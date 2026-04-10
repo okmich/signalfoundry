@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build script for okmich-quant-utilities mono-repo.
+Build script for signalfoundry mono-repo.
 
 Handles cleanup, testing, linting, formatting, type checking, and building
 of all or specific sub-projects.
@@ -404,7 +404,7 @@ def parse_project(value: str | None) -> list[str]:
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Build script for okmich-quant-utilities mono-repo",
+        description="Build script for signalfoundry mono-repo",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -521,7 +521,7 @@ def main() -> int:
     target_projects = parse_project(None if project_arg == "__all__" else project_arg)
 
     print()
-    print(f"{Colors.MAGENTA}{Colors.BOLD}okmich-quant-utilities Build Script{Colors.RESET}")
+    print(f"{Colors.MAGENTA}{Colors.BOLD}signalfoundry Build Script{Colors.RESET}")
     print(f"Action: {action}")
     print(f"Target: {target_projects[0] if len(target_projects) == 1 else 'all projects'}")
 

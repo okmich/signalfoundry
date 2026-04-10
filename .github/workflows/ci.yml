@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Sync workspace packages
+        run: uv sync --all-packages
+      - name: Import smoke check
+        run: uv run python -c "import okmich_quant_features, okmich_quant_core; print('smoke-ok')"

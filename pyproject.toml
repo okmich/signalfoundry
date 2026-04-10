@@ -1,7 +1,7 @@
 [project]
-name = "okmich-quant-workspace"
+name = "signalfoundry-workspace"
 version = "0.1.0"
-description = "Quantitative trading framework workspace"
+description = "SignalFoundry quantitative research and trading workspace"
 requires-python = ">=3.12,<3.14"
 
 [tool.uv.workspace]
