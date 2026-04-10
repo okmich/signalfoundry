@@ -1,0 +1,43 @@
+[project]
+name = "okmich-quant-research"
+version = "3.7.0"
+description = "Backtesting, EDA, and systematic feature pipelines"
+requires-python = ">=3.12"
+dependencies = [
+    "okmich-quant-features",
+    "okmich-quant-labelling",
+    "okmich-quant-ml",
+    "okmich-quant-neural-net",
+    "arch==7.2.0",
+    "Boruta>=0.4.3",
+    "dcor>=0.7",
+    "imageio==2.37.0",
+    "ml_dtypes==0.5.3",
+    "tensorflow==2.20.0",
+    "h5py==3.14.0",
+    "keras==3.11.1",
+    "keras-tuner==1.4.7",
+    "matplotlib>=3.6",
+    "numba==0.63.1",
+    "optuna>=4.0",
+    "pandas==2.3.0",
+    "scikit-learn==1.7.2",
+    "scipy==1.17.0",
+    "shap>=0.50.0",
+    "statsmodels==0.14.5",
+    "vectorbt==0.28.2",
+    "xgboost==3.0.4",
+]
+
+[tool.uv.sources]
+okmich-quant-features = { workspace = true }
+okmich-quant-labelling = { workspace = true }
+okmich-quant-ml = { workspace = true }
+okmich-quant-neural-net = { workspace = true }
+
+[project.scripts]
+run-experiment = "okmich_quant_research.cli.run_experiment:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

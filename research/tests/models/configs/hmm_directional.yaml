@@ -1,0 +1,113 @@
+# HMM Directional Regime Classification Example
+# Goal: Discover HMM regimes with strong directional bias
+
+experiment_name: "hmm_directional_example"
+research_type: "supervised"
+
+data:
+  symbol: "US500.r"
+  timeframe: "5min"
+  source_folder: "D:/data_dump/market_data/raw/FXPIG-Server/5"
+  max_samples: 150000
+
+feature_engineering:
+  # Use custom feature function from playground
+  external_function:
+    module: "tests.okmich_quant_research.models.configs.custom_features"
+    function: "combined_features_v1"
+    params:
+      lookback: 20
+      include_volume: true
+
+  version: "combined_v1"
+  save_source_code: true  # Save snapshot for reproducibility
+
+  # Auto feature selection
+  auto_selection:
+    enabled: true
+    top_n: 15
+    vif_threshold: 10.0
+    min_importance: 0.01
+
+  # EDA configuration
+  eda:
+    enabled: true
+    n_top_features: 20
+    correlation_threshold: 0.8
+    save_plots: true
+    analyses:
+      - relevance
+      - distribution
+      - correlation
+      - transformation
+
+model:
+  type: "clustering"
+
+  algorithms:
+    - "mbkmeans"
+    - "hmmlearn"
+    - "hmm_pmgnt"
+    - "hmm_student"
+
+  n_states_range: [2, 3, 4]
+
+# Objectives for directional classification
+objectives:
+  primary:
+    - name: "regime_discriminability"
+      target: "maximize"
+      weight: 0.30
+      threshold: 0.7
+
+    - name: "regime_purity"
+      target: "maximize"
+      weight: 0.30
+      threshold: 0.60
+
+    - name: "mean_duration"
+      target: "range"
+      min: 5
+      max: 30
+      weight: 0.25
+
+    - name: "win_rate"
+      target: "maximize"
+      weight: 0.15
+      threshold: 0.52
+
+  secondary:
+    - "autocorrelation_lag1"
+    - "persistence_score"
+    - "frequency_pct"
+
+evaluation:
+  label_eval_functions:
+    path_structure_stats:
+      enabled: true
+      function: "all_path_structure_label_statistics"
+      params:
+        returns_col: "return"
+        price_col: "close"
+
+    regime_returns_potentials:
+      enabled: true
+      function: "evaluate_all_labels_regime_returns_potentials"
+      params:
+        progressive_skip: 1
+        whipsaw_cost: 0.0
+        wrong_direction_penalty: 0.0
+        include_overall: true
+
+constraints:
+  min_observations_per_regime: 100
+  max_frequency_pct: 60
+  min_frequency_pct: 10
+
+output:
+  folder: "playground/experiments/research/output/hmm_directional_example"
+  save_models: true
+  save_labels: true
+  save_metrics: true
+  save_plots: true
+  generate_report: true

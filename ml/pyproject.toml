@@ -1,0 +1,32 @@
+[project]
+name = "okmich-quant-ml"
+version = "0.4.0"
+description = "Classical ML models: state space models, sklearn estimators, and regime detection"
+requires-python = ">=3.12"
+dependencies = [
+    "okmich-quant-features",
+    "okmich-quant-labelling",
+    "numba==0.63.1",
+    "pandas==2.3.0",
+    "pomegranate @ git+https://github.com/okmich/pomegranate.git@feat/dtype-parameter-and-log-stability",
+    "prophet==1.2.1",
+    "lightgbm==4.6.0",
+    "scikit-learn==1.7.2",
+    "seaborn>=0.13.0",
+    "statsmodels==0.14.5",
+    "xgboost==3.0.4",
+]
+
+[tool.uv.sources]
+okmich-quant-features = { workspace = true }
+okmich-quant-labelling = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/okmich_quant_ml"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

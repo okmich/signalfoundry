@@ -1,0 +1,119 @@
+# Unsupervised Volatility Regime Clustering Example
+# Goal: Discover volatility-based market regimes
+
+experiment_name: "clustering_volatility_example"
+research_type: "unsupervised"
+
+data:
+  symbol: "US500.r"
+  timeframe: "5min"
+  source_folder: "D:/data_dump/market_data/raw/FXPIG-Server/5"
+  max_samples: 100000
+
+feature_engineering:
+  external_function:
+    module: "tests.okmich_quant_research.models.configs.custom_features"
+    function: "example_volatility_features"
+    params:
+      short_window: 10
+      long_window: 30
+
+  version: "volatility_v1"
+  save_source_code: true
+
+  auto_selection:
+    enabled: true
+    top_n: 12
+    vif_threshold: 15.0
+    methods: ["variance", "pca"]  # Unsupervised selection
+
+  eda:
+    enabled: true
+    n_top_features: 15
+    save_plots: true
+
+model:
+  type: "clustering"
+
+  algorithms:
+    - "mbkmeans"
+    - "gmm"
+    - "hmm_lambda"
+    - "hmm_student"
+
+  n_states_range: [2, 3]
+
+# Objectives for volatility classification
+objectives:
+  primary:
+    - name: "silhouette_score"
+      target: "maximize"
+      weight: 0.25
+
+    - name: "volatility_separation"
+      target: "maximize"
+      weight: 0.35
+      calculation: "max(volatility) / min(volatility)"
+
+    - name: "regime_discriminability"
+      target: "maximize"
+      weight: 0.25
+
+    - name: "mean_duration"
+      target: "range"
+      min: 8
+      max: 40
+      weight: 0.15
+
+evaluation:
+  label_eval_functions:
+    path_structure_stats:
+      enabled: true
+      function: "all_path_structure_label_statistics"
+
+  # Map clusters to volatility buckets
+  unsupervised_label_mapping:
+    enabled: true
+    params:
+      mapping_type: 'volatility'
+      vol_proxy_col: 'atr'  # Use ATR as volatility proxy (or 'realized_vol', 'parkinson_vol', etc.)
+
+      # Other available mapping types (for reference):
+      # OPTION: Trend mapping - Map to directional signals (-1, 0, 1)
+      # mapping_type: 'trend'
+      # trend_method: 'conservative'
+      # cost_threshold: null
+      # min_sharpe: 0.3
+
+      # OPTION: Momentum mapping - Map to momentum scores
+      # mapping_type: 'momentum'
+
+      # OPTION: Path structure mapping - Map to choppiness scores (0=smooth to n=choppy)
+      # mapping_type: 'path_structure'
+      # lookback: 14
+
+  # Evaluate mapped volatility regimes
+  regime_returns_potentials:
+    enabled: true
+    function: "evaluate_all_labels_regime_returns_potentials"
+    use_mapped_labels: true
+    params:
+      progressive_skip: 1
+      include_overall: true
+
+  clustering_metrics:
+    - silhouette_score
+    - calinski_harabasz_score
+    - davies_bouldin_score
+
+constraints:
+  min_observations_per_regime: 100
+
+output:
+  folder: "playground/experiments/research/output/clustering_volatility_example"
+  save_models: true
+  save_labels: true
+  save_mapped_labels: true
+  save_metrics: true
+  save_plots: true
+  generate_report: true

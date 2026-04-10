@@ -1,0 +1,30 @@
+[project]
+name = "okmich-quant-workspace"
+version = "0.1.0"
+description = "Quantitative trading framework workspace"
+requires-python = ">=3.12,<3.14"
+
+[tool.uv.workspace]
+members = [
+    "core",
+    "features",
+    "labelling",
+    "ml",
+    "mt5",
+    "neural-net",
+    "pipeline",
+    "research",
+    "utils",
+]
+exclude = ["__pycache__"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "jupyter>=1.0.0",
+    "ipython>=8.0.0",
+]

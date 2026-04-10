@@ -1,0 +1,64 @@
+; Timothy Masters Single-Market Indicators - All 38 Indicators
+; Format: OUTPUT_NAME : INDICATOR_NAME param1 param2 ...
+
+; ============================================================================
+; MOMENTUM & OSCILLATORS (#1-11)
+; ============================================================================
+RSI_14 : RSI 14
+DETRENDED_RSI : DETRENDED RSI 7 14 32
+STOCHASTIC_14_1 : STOCHASTIC 14 1
+STOCHRSI_14 : STOCHRSI 14 14 1
+MA_DIFF : MA DIFFERENCE 10 40 0
+MACD_12_26_9 : MACD 12 26 9
+PPO_12_26_9 : PPO 12 26 9
+PRICE_CHG_OSC : PRICE CHANGE OSCILLATOR 10 4.0
+CLOSE_MINUS_MA : CLOSE MINUS MOVING AVERAGE 20 60
+PRICE_INTENSITY : PRICE INTENSITY 1
+REACTIVITY : REACTIVITY 10 4
+
+; ============================================================================
+; TREND INDICATORS (#12-21)
+; ============================================================================
+LINEAR_TREND : LINEAR TREND 50 60
+QUADRATIC_TREND : QUADRATIC TREND 50 60
+CUBIC_TREND : CUBIC TREND 50 60
+LINEAR_DEV : LINEAR DEVIATION 50
+QUADRATIC_DEV : QUADRATIC DEVIATION 50
+CUBIC_DEV : CUBIC DEVIATION 50
+ADX_14 : ADX 14
+AROON_UP_25 : AROON UP 25
+AROON_DOWN_25 : AROON DOWN 25
+AROON_DIFF_25 : AROON DIFF 25
+
+; ============================================================================
+; VARIANCE INDICATORS (#22-23)
+; ============================================================================
+PRICE_VAR_RATIO : PRICE VARIANCE RATIO 10 4.0
+CHANGE_VAR_RATIO : CHANGE VARIANCE RATIO 10 4.0
+
+; ============================================================================
+; VOLUME INDICATORS (#24-32)
+; ============================================================================
+INTRADAY_INT : INTRADAY INTENSITY 14 0
+MONEY_FLOW : MONEY FLOW 14
+PRICE_VOL_FIT : PRICE VOLUME FIT 50
+VWMA_RATIO : VOLUME WEIGHTED MA RATIO 20
+NORMALIZED_OBV : NORMALIZED ON BALANCE VOLUME 20
+DELTA_OBV : DELTA ON BALANCE VOLUME 20 5
+NORMALIZED_PVI : NORMALIZED POSITIVE VOLUME INDEX 100
+NORMALIZED_NVI : NORMALIZED NEGATIVE VOLUME INDEX 100
+VOLUME_MOM : VOLUME MOMENTUM 10 4.0
+
+; ============================================================================
+; INFORMATION THEORY INDICATORS (#33-34)
+; ============================================================================
+ENTROPY_3 : ENTROPY 3 10
+MUTUAL_INFO_3 : MUTUAL INFORMATION 3 10
+
+; ============================================================================
+; FTI INDICATORS (#35-38)
+; ============================================================================
+FTI_LOWPASS : FTI LOWPASS 60 30 8 40
+FTI_BEST_WIDTH : FTI BEST WIDTH 60 30 8 40
+FTI_BEST_PERIOD : FTI BEST PERIOD 60 30 8 40
+FTI_BEST_FTI : FTI BEST FTI 60 30 8 40

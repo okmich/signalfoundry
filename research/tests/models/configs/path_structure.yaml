@@ -1,0 +1,95 @@
+# Path Structure Classification Example
+# Goal: Discover regimes based on price path characteristics (trending vs choppy)
+
+experiment_name: "path_structure_example"
+research_type: "supervised"
+
+data:
+  symbol: "US500.r"
+  timeframe: "5min"
+  source_folder: "D:/data_dump/market_data/raw/FXPIG-Server/5"
+  max_samples: 120000
+
+feature_engineering:
+  external_function:
+    module: "tests.okmich_quant_research.models.configs.custom_features"
+    function: "example_path_structure_features"
+    params:
+      hurst_window: 12
+      efficiency_window: 20
+
+  version: "path_structure_v1"
+  save_source_code: true
+
+  auto_selection:
+    enabled: true
+    top_n: 10
+    vif_threshold: 10.0
+
+  eda:
+    enabled: true
+    n_top_features: 12
+    save_plots: true
+
+model:
+  type: "clustering"
+
+  algorithms:
+    - "kmeans"
+    - "gmm"
+    - "hmm_mm_learn"
+    - "hmm_pmgnt"
+
+  n_states_range: [2, 3]
+
+# Objectives for path structure classification
+objectives:
+  primary:
+    - name: "efficiency_separation"
+      target: "maximize"
+      weight: 0.40
+      calculation: "max(efficiency_ratio) - min(efficiency_ratio)"
+      description: "Separate trending vs choppy regimes"
+
+    - name: "trend_persistence_separation"
+      target: "maximize"
+      weight: 0.25
+      calculation: "std(trend_persistence)"
+      description: "Varied trend strength across regimes"
+
+    - name: "regime_discriminability"
+      target: "maximize"
+      weight: 0.20
+
+    - name: "mean_duration"
+      target: "range"
+      min: 5
+      max: 25
+      weight: 0.15
+
+  secondary:
+    - "autocorrelation_lag1"
+    - "return_consistency"
+    - "noise_to_signal_ratio"
+
+evaluation:
+  label_eval_functions:
+    path_structure_stats:
+      enabled: true
+      function: "all_path_structure_label_statistics"
+
+    regime_returns_potentials:
+      enabled: false  # Focus on path structure, not returns
+
+constraints:
+  min_observations_per_regime: 100
+  max_frequency_pct: 70
+  min_frequency_pct: 15
+
+output:
+  folder: "playground/experiments/research/output/path_structure_example"
+  save_models: true
+  save_labels: true
+  save_metrics: true
+  save_plots: true
+  generate_report: true
