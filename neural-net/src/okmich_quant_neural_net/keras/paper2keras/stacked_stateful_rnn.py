@@ -92,12 +92,7 @@ import numpy as np
 from keras import layers, models
 
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 RNNType = Literal['gru', 'lstm']
 

@@ -73,16 +73,12 @@ https://arxiv.org/abs/1809.04206
 
 import numpy as np
 from keras import layers, models
+
 # Import the existing TCN layer (WaveNet-based implementation)
-from okmich_quant_ml.keras.layers.tcn import TCN
+from okmich_quant_neural_net.keras.layers import TCN
 
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================

@@ -15,12 +15,7 @@ import keras_tuner as kt
 from tensorflow import keras
 from tensorflow.keras import layers, models
 
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 def create_stacked_gru_residual(input_shape, num_classes, task_type=TaskType.CLASSIFICATION,

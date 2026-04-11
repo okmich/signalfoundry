@@ -17,12 +17,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, models
 
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 def create_lstm_autoencoder(input_shape, encoding_dim=32, encoder_units_1=128, encoder_units_2=64, decoder_units_1=64,

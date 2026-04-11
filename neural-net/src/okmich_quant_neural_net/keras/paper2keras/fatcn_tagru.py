@@ -59,15 +59,10 @@ Tunable (KerasTuner):
 
 from keras import layers, models
 
-from okmich_quant_neural_net.keras.layers.feature_attention import FeatureAttention
-from okmich_quant_neural_net.keras.layers.light_weight_attention import LightweightAttention
-from okmich_quant_neural_net.keras.layers.tcn import TCN
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from ..layers.feature_attention import FeatureAttention
+from ..layers.light_weight_attention import LightweightAttention
+from ..layers.tcn import TCN
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================

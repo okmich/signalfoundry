@@ -68,15 +68,8 @@ Time series adaptation: "Temporal Convolutional Networks with Depthwise Separabl
 
 from keras import layers, models, optimizers, losses, metrics
 
-from okmich_quant_neural_net.keras.metrics import (
-    CausalRegimeAccuracy, RegimeTransitionRecall, RegimeTransitionPrecision,
-)
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from ..metrics import CausalRegimeAccuracy, RegimeTransitionRecall, RegimeTransitionPrecision
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================

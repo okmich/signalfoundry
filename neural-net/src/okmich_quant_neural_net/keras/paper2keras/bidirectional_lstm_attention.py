@@ -52,16 +52,12 @@ Tsantekidis et al. (2017) "Algorithmic Trading Using Deep Neural Networks on Hig
 """
 
 from keras import layers, models
+
 # Import the existing LightweightAttention layer from the main codebase
-from okmich_quant_ml.keras.layers.light_weight_attention import LightweightAttention
+from ..layers import LightweightAttention
 
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================
@@ -116,11 +112,8 @@ def build_bilstm_attention(sequence_length=48, num_features=20, num_classes=3, t
     x = layers.Dropout(dropout_lstm, name="dropout2")(x)
 
     # Attention layer (using LightweightAttention from main codebase)
-    x = LightweightAttention(
-        attn_type=attention_type,
-        heads=attention_heads,
-        return_attention_scores=False,
-        name="lightweight_attention")(x)
+    x = LightweightAttention(attn_type=attention_type, heads=attention_heads, return_attention_scores=False,
+                             name="lightweight_attention")(x)
 
     # Dense layer
     x = layers.Dense(dense_units, activation="relu", name="dense1")(x)
@@ -226,11 +219,8 @@ def build_bilstm_attention_tunable(hp, num_features, num_classes, task_type=Task
     x = layers.Dropout(dropout_lstm, name="dropout2")(x)
 
     # Attention layer (using LightweightAttention from main codebase)
-    x = LightweightAttention(
-        attn_type=attention_type,
-        heads=attention_heads,
-        return_attention_scores=False,
-        name="lightweight_attention")(x)
+    x = LightweightAttention(attn_type=attention_type, heads=attention_heads, return_attention_scores=False,
+                             name="lightweight_attention")(x)
 
     # Dense layer
     x = layers.Dense(dense_units, activation="relu", name="dense1")(x)

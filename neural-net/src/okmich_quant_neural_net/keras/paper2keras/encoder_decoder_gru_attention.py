@@ -20,14 +20,9 @@ from tensorflow import keras
 from tensorflow.keras import layers, models
 
 # Import Bahdanau attention layer from centralized location
-from okmich_quant_neural_net.keras.layers.bahdanau_attention import BahdanauAttention
+from ..layers.bahdanau_attention import BahdanauAttention
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 def create_encoder_decoder_gru_attention(input_shape, num_classes, task_type=TaskType.CLASSIFICATION,

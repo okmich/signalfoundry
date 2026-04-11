@@ -19,12 +19,7 @@ import keras_tuner as kt
 from tensorflow import keras
 from tensorflow.keras import layers, models
 
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskType.CLASSIFICATION,
@@ -368,4 +363,4 @@ def create_tunable_hierarchical_multiscale_cnn(input_shape, num_classes, task_ty
     - Easy to quantize: Use TFLite for mobile/edge deployment
     - Batch predictions for multiple instruments simultaneously
     """
-)
+

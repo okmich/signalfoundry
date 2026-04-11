@@ -124,6 +124,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from keras import layers, models, optimizers, losses, metrics
 
+from ..metrics import BalancedAccuracy
+
 RNNType = Literal['rnn', 'gru', 'lstm']
 
 

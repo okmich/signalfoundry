@@ -82,9 +82,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from keras import layers, models
 
-from okmich_quant_neural_net.keras.layers import LightweightAttention
-from okmich_quant_neural_net.keras.paper2keras.common import TaskType, create_output_layer_and_loss, get_optimizer, \
-    get_model_name
+from ..layers import LightweightAttention
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================
@@ -706,48 +705,3 @@ HINTS FOR USING LSTM-ATTENTION IN TRADING:
      invaluable for understanding and trusting your trading
      algorithm."
 """
-
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
-if __name__ == "__main__":
-    print("\n" + "=" * 80)
-    print("ATTENTION-AUGMENTED LSTM - INTERPRETABLE TRADING MODEL")
-    print("=" * 80)
-    print("\nSimple + Powerful + Interpretable")
-    print("=" * 80)
-    print("\nAvailable examples:")
-    print("  1. Simple usage (fixed hyperparameters)")
-    print("  2. Attention visualization (interpretability)")
-    print("  3. Pattern interpretation (understand model focus)")
-    print("  4. Run all examples")
-    print("=" * 80)
-
-    choice = input("\nSelect example to run (1-4, or 'q' to quit): ").strip()
-
-    if choice == "1":
-        model, history = example_simple_usage()
-    elif choice == "2":
-        model, attention_weights = example_attention_visualization()
-    elif choice == "3":
-        example_pattern_interpretation()
-    elif choice == "4":
-        print("\nRunning all examples...\n")
-        print("\n" + ">" * 80)
-        example_simple_usage()
-        print("\n" + ">" * 80)
-        example_attention_visualization()
-        print("\n" + ">" * 80)
-        example_pattern_interpretation()
-        print("\n" + "=" * 80)
-        print("ALL EXAMPLES COMPLETED!")
-        print("=" * 80)
-    elif choice.lower() == "q":
-        print("\nExiting...")
-    else:
-        print("\nInvalid choice. Please run again and select 1-4 or 'q'.")
-
-    print("\n" + "=" * 80)
-    print("For more details, see the HINTS section in the source code.")
-    print("=" * 80)

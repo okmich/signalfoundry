@@ -92,6 +92,7 @@ from keras import layers, models, optimizers, losses, metrics
 
 # Import MDN components
 from ..layers.mdn import MixtureDensityLayer, mdn_loss, split_mdn_params
+from ..metrics import BalancedAccuracy, MacroF1Score
 
 
 # ============================================================================

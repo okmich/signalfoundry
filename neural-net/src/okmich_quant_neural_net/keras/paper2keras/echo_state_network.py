@@ -101,14 +101,9 @@ https://arxiv.org/pdf/2508.05416
 
 from keras import layers, models
 # Import the ESN layer
-from okmich_quant_ml.keras.layers.esn import EchoStateNetwork, DeepEchoStateNetwork
+from ..layers.esn import EchoStateNetwork, DeepEchoStateNetwork
 
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 # ============================================================================
@@ -625,54 +620,3 @@ HINTS FOR USING ESN IN CRYPTOCURRENCY TRADING:
     - Multiple ESNs with different random_states
 """
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-
-if __name__ == "__main__":
-    print("\n" + "=" * 80)
-    print("ECHO STATE NETWORK (ESN) - CRYPTOCURRENCY TRADING")
-    print("=" * 80)
-    print("\nBased on: 'Echo State Networks for Bitcoin Time Series Prediction'")
-    print("Paper: https://arxiv.org/pdf/2508.05416")
-    print("=" * 80)
-    print("\nAvailable examples:")
-    print("  1. Simple ESN (paper-optimized for crypto)")
-    print("  2. Tunable ESN (hyperparameter optimization)")
-    print("  3. Deep ESN (hierarchical reservoirs)")
-    print("  4. Walk-forward speed test")
-    print("  5. Run all examples")
-    print("=" * 80)
-
-    choice = input("\nSelect example to run (1-5, or 'q' to quit): ").strip()
-
-    if choice == "1":
-        model, history = example_simple_usage()
-    elif choice == "2":
-        tuner, model = example_tunable_usage()
-    elif choice == "3":
-        model, history = example_deep_esn()
-    elif choice == "4":
-        example_walk_forward_speed_test()
-    elif choice == "5":
-        print("\nRunning all examples...\n")
-        print("\n" + ">" * 80)
-        example_simple_usage()
-        print("\n" + ">" * 80)
-        example_tunable_usage()
-        print("\n" + ">" * 80)
-        example_deep_esn()
-        print("\n" + ">" * 80)
-        example_walk_forward_speed_test()
-        print("\n" + "=" * 80)
-        print("ALL EXAMPLES COMPLETED!")
-        print("=" * 80)
-    elif choice.lower() == "q":
-        print("\nExiting...")
-    else:
-        print("\nInvalid choice. Please run again and select 1-5 or 'q'.")
-
-    print("\n" + "=" * 80)
-    print("For more details, see the HINTS section in the source code.")
-    print("Paper: https://arxiv.org/pdf/2508.05416")
-    print("=" * 80)

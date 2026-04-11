@@ -19,12 +19,7 @@ from tensorflow.keras import layers, models
 # Import custom TCN layer
 from okmich_quant_neural_net.keras.layers.tcn import TCN
 # Import task type and common utilities
-from okmich_quant_neural_net.keras.paper2keras.common import (
-    TaskType,
-    create_output_layer_and_loss,
-    get_optimizer,
-    get_model_name,
-)
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
 
 def create_tcn_autoencoder(input_shape, encoding_dim=32, nb_filters=64, kernel_size=3, dilations=(1, 2, 4, 8, 16, 32),
