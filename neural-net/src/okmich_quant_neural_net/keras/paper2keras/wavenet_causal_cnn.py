@@ -82,6 +82,47 @@ from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_m
 
 
 # ============================================================================
+# Internal helpers
+# ============================================================================
+
+
+def _resolve_tcn_filters(filters_list, dilations):
+    """Normalize filters configuration and validate TCN constraints."""
+    if isinstance(filters_list, tuple):
+        filters_list = list(filters_list)
+
+    if isinstance(filters_list, list):
+        if len(filters_list) != len(dilations):
+            raise ValueError(
+                "filters_list must match dilations length when a list/tuple is provided. "
+                f"Got len(filters_list)={len(filters_list)} and len(dilations)={len(dilations)}."
+            )
+        return filters_list
+
+    if isinstance(filters_list, int):
+        return filters_list
+
+    raise TypeError(f"filters_list must be int, list, or tuple, got: {type(filters_list)}")
+
+
+def _filters_from_strategy(filter_strategy, num_dilations):
+    """Build a filters list that always matches the dilation schedule length."""
+    if filter_strategy == "small":
+        base_filters = [32, 32, 32, 32]
+    elif filter_strategy == "medium":
+        base_filters = [32, 32, 64, 64]
+    elif filter_strategy == "large":
+        base_filters = [32, 64, 128, 128]
+    else:
+        raise ValueError(f"Unknown filter_strategy: {filter_strategy}")
+
+    if num_dilations <= len(base_filters):
+        return base_filters[:num_dilations]
+
+    return base_filters + [base_filters[-1]] * (num_dilations - len(base_filters))
+
+
+# ============================================================================
 # SIMPLE VERSION (Fixed Hyperparameters)
 # ============================================================================
 
@@ -95,7 +136,7 @@ def build_wavenet_cnn(
         kernel_size=2,
         dilations=(1, 2, 4, 8),
         dropout_rate=0.2,
-        use_skip_connections=True,
+        use_skip_connections=False,
         use_batch_norm=False,
         dense1_units=128,
         dense1_dropout=0.3,
@@ -117,11 +158,11 @@ def build_wavenet_cnn(
         sequence_length: Number of timesteps in input sequences
         num_features: Number of features per timestep
         num_classes: Number of output classes
-        filters_list: List/tuple of filter sizes for each layer (default: (32, 32, 64, 64))
+        filters_list: List/tuple of filter sizes for each layer, or int for fixed filters
         kernel_size: Convolution kernel size (WaveNet uses 2) (default: 2)
         dilations: Tuple of dilation rates (default: (1, 2, 4, 8))
         dropout_rate: Dropout rate in conv layers (default: 0.2)
-        use_skip_connections: Use skip connections (default: True)
+        use_skip_connections: Use skip connections (default: False)
         use_batch_norm: Use batch normalization (default: False)
         dense1_units: Units in first dense layer (default: 128)
         dense1_dropout: Dropout after first dense layer (default: 0.3)
@@ -142,14 +183,19 @@ def build_wavenet_cnn(
         >>> model.summary()
     """
 
+    tcn_filters = _resolve_tcn_filters(filters_list, dilations)
+    if use_skip_connections and isinstance(tcn_filters, list) and len(set(tcn_filters)) > 1:
+        raise ValueError(
+            "use_skip_connections=True is only supported when all filters are identical. "
+            "Set use_skip_connections=False or provide uniform filters_list values."
+        )
+
     # Input layer
     inputs = layers.Input(shape=(sequence_length, num_features), name="input_sequences")
 
     # TCN/WaveNet layer with specified filters per layer
     x = TCN(
-        nb_filters=(
-            list(filters_list) if isinstance(filters_list, tuple) else filters_list
-        ),
+        nb_filters=tcn_filters,
         kernel_size=kernel_size,
         nb_stacks=1,
         dilations=dilations,
@@ -266,34 +312,27 @@ def build_wavenet_cnn_tunable(hp, num_features, num_classes, task_type=TaskType.
     # Tunable hyperparameters
     if sequence_length is None:
         # Tune sequence_length if not provided
-        sequence_length = hp.Int(
-            "sequence_length", min_value=32, max_value=max_sequence_length, step=16
-        )
+        sequence_length = hp.Int("sequence_length", min_value=32, max_value=max_sequence_length, step=16)
     # else: use the provided fixed sequence_length
     kernel_size = hp.Choice("kernel_size", values=[2, 3])  # WaveNet uses 2
 
     # Filter configuration strategy
     filter_strategy = hp.Choice("filter_strategy", values=["small", "medium", "large"])
-    if filter_strategy == "small":
-        filters_list = [32, 32, 32, 32]
-    elif filter_strategy == "medium":
-        filters_list = [32, 32, 64, 64]
-    else:  # large
-        filters_list = [32, 64, 128, 128]
 
     # Dilation strategy
-    dilation_strategy = hp.Choice(
-        "dilation_strategy", values=["shallow", "medium", "deep"]
-    )
+    dilation_strategy = hp.Choice("dilation_strategy", values=["shallow", "medium", "deep"])
     if dilation_strategy == "shallow":
         dilations = (1, 2, 4, 8)
     elif dilation_strategy == "medium":
         dilations = (1, 2, 4, 8, 16)
     else:  # deep
         dilations = (1, 2, 4, 8, 16, 32)
+    filters_list = _filters_from_strategy(filter_strategy, len(dilations))
 
     dropout_rate = hp.Float("dropout_rate", min_value=0.1, max_value=0.4, step=0.1)
-    use_skip_connections = hp.Boolean("use_skip_connections", default=True)
+    use_skip_connections = hp.Boolean("use_skip_connections", default=False)
+    if use_skip_connections and len(set(filters_list)) > 1:
+        use_skip_connections = False
     use_batch_norm = hp.Boolean("use_batch_norm", default=False)
 
     dense1_units = hp.Choice("dense1_units", values=[64, 128, 256])
@@ -334,9 +373,7 @@ def build_wavenet_cnn_tunable(hp, num_features, num_classes, task_type=TaskType.
     x = layers.Dropout(dense2_dropout, name="dropout2")(x)
 
     # Output layer with task-specific configuration
-    outputs, loss, output_metrics = create_output_layer_and_loss(
-        x, task_type, num_classes
-    )
+    outputs, loss, output_metrics = create_output_layer_and_loss(x, task_type, num_classes)
 
     # Create model
     model_name = get_model_name("WaveNet_Tunable", task_type)
@@ -344,217 +381,11 @@ def build_wavenet_cnn_tunable(hp, num_features, num_classes, task_type=TaskType.
 
     # Tunable optimizer
     optimizer_name = hp.Choice("optimizer", values=["adam", "adamw", "rmsprop"])
-    learning_rate = hp.Float(
-        "learning_rate", min_value=1e-4, max_value=1e-2, sampling="log"
-    )
+    learning_rate = hp.Float("learning_rate", min_value=1e-4, max_value=1e-2, sampling="log")
 
     # Compile model with gradient clipping
     opt = get_optimizer(optimizer_name, learning_rate)
     model.compile(optimizer=opt, loss=loss, metrics=output_metrics)
-
-    return model
-
-
-# ============================================================================
-# USAGE EXAMPLES
-# ============================================================================
-
-
-def example_simple_usage():
-    """Example: Using the simple (fixed) version."""
-    print("\n" + "=" * 80)
-    print("EXAMPLE 1: Simple WaveNet Causal CNN (Fixed Hyperparameters)")
-    print("=" * 80)
-
-    # Configuration
-    sequence_length = 48  # 48 timesteps (e.g., 4 hours of 5-min bars)
-    num_features = 20  # 20 technical indicators
-    num_classes = 3  # 3 market regimes (bullish, bearish, sideways)
-
-    # Build model
-    model = build_wavenet_cnn(
-        sequence_length=sequence_length,
-        num_features=num_features,
-        num_classes=num_classes,
-        filters_list=(32, 32, 64, 64),
-        kernel_size=2,
-        dilations=(1, 2, 4, 8),
-        dropout_rate=0.2,
-        dense1_units=128,
-        dense1_dropout=0.3,
-        dense2_units=64,
-        dense2_dropout=0.2,
-    )
-
-    # Display model architecture
-    model.summary()
-
-    # Generate synthetic data for demonstration
-    print(f"\nGenerating synthetic training data...")
-    X_train = np.random.randn(1000, sequence_length, num_features).astype(np.float32)
-    y_train = np.random.randint(0, num_classes, size=(1000,))
-
-    X_val = np.random.randn(200, sequence_length, num_features).astype(np.float32)
-    y_val = np.random.randint(0, num_classes, size=(200,))
-
-    # Train model
-    print(f"\nTraining model...")
-    history = model.fit(
-        X_train,
-        y_train,
-        validation_data=(X_val, y_val),
-        epochs=5,
-        batch_size=32,
-        verbose=1,
-    )
-
-    # Evaluate
-    print(f"\nEvaluating model...")
-    results = model.evaluate(X_val, y_val, verbose=0)
-    print(f"Validation Loss: {results[0]:.4f}")
-    print(f"Validation Accuracy: {results[1]:.4f}")
-
-    # Make predictions
-    print(f"\nMaking predictions on test sample...")
-    X_test = np.random.randn(5, sequence_length, num_features).astype(np.float32)
-    predictions = model.predict(X_test, verbose=0)
-    print(f"Predictions shape: {predictions.shape}")
-    print(f"Sample predictions (probabilities):")
-    print(predictions[:3])
-
-    return model, history
-
-
-def example_tunable_usage():
-    """Example: Using the tunable version with KerasTuner."""
-    print("\n" + "=" * 80)
-    print("EXAMPLE 2: Tunable WaveNet Causal CNN (Hyperparameter Optimization)")
-    print("=" * 80)
-
-    try:
-        import keras_tuner
-    except ImportError:
-        print("\nERROR: keras_tuner not installed.")
-        print("Install with: pip install keras-tuner")
-        return None
-
-    # Configuration
-    num_features = 20
-    num_classes = 3
-
-    # Define model builder function
-    def model_builder(hp):
-        return build_wavenet_cnn_tunable(
-            hp=hp,
-            num_features=num_features,
-            num_classes=num_classes,
-            max_sequence_length=96,
-        )
-
-    # Initialize tuner
-    print("\nInitializing Bayesian Optimization tuner...")
-    tuner = keras_tuner.BayesianOptimization(
-        model_builder,
-        objective="val_accuracy",
-        max_trials=5,  # Small number for demo
-        executions_per_trial=1,
-        directory="tuning_results",
-        project_name="wavenet_cnn_demo",
-        overwrite=True,
-    )
-
-    # Generate synthetic data
-    print("\nGenerating synthetic training data...")
-    X_train = np.random.randn(1000, 96, num_features).astype(np.float32)
-    y_train = np.random.randint(0, num_classes, size=(1000,))
-
-    X_val = np.random.randn(200, 96, num_features).astype(np.float32)
-    y_val = np.random.randint(0, num_classes, size=(200,))
-
-    # Search for best hyperparameters
-    print("\nSearching for best hyperparameters...")
-    print("(This may take a few minutes...)")
-
-    tuner.search(
-        X_train,
-        y_train,
-        validation_data=(X_val, y_val),
-        epochs=3,  # Small number for demo
-        batch_size=32,
-        verbose=0,
-    )
-
-    # Get best model
-    print("\nRetrieving best model...")
-    best_model = tuner.get_best_models(num_models=1)[0]
-
-    # Display best hyperparameters
-    best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
-    print("\nBest Hyperparameters:")
-    print(f"  Sequence Length: {best_hp.get('sequence_length')}")
-    print(f"  Kernel Size: {best_hp.get('kernel_size')}")
-    print(f"  Filter Strategy: {best_hp.get('filter_strategy')}")
-    print(f"  Dilation Strategy: {best_hp.get('dilation_strategy')}")
-    print(f"  Dropout Rate: {best_hp.get('dropout_rate')}")
-    print(f"  Skip Connections: {best_hp.get('use_skip_connections')}")
-    print(f"  Batch Norm: {best_hp.get('use_batch_norm')}")
-    print(f"  Dense1 Units: {best_hp.get('dense1_units')}")
-    print(f"  Dense1 Dropout: {best_hp.get('dense1_dropout')}")
-    print(f"  Dense2 Units: {best_hp.get('dense2_units')}")
-    print(f"  Dense2 Dropout: {best_hp.get('dense2_dropout')}")
-    print(f"  Optimizer: {best_hp.get('optimizer')}")
-    print(f"  Learning Rate: {best_hp.get('learning_rate'):.6f}")
-
-    # Evaluate best model
-    print("\nEvaluating best model...")
-    best_seq_len = best_hp.get("sequence_length")
-    X_val_adjusted = X_val[:, :best_seq_len, :]
-
-    results = best_model.evaluate(X_val_adjusted, y_val, verbose=0)
-    print(f"Validation Loss: {results[0]:.4f}")
-    print(f"Validation Accuracy: {results[1]:.4f}")
-
-    return tuner, best_model
-
-
-def example_high_frequency_data():
-    """Example: Using WaveNet for high-frequency tick data."""
-    print("\n" + "=" * 80)
-    print("EXAMPLE 3: High-Frequency Tick Data Application")
-    print("=" * 80)
-
-    # High-frequency configuration
-    sequence_length = 100  # Last 100 ticks
-    num_features = 10  # bid, ask, volume, etc.
-    num_classes = 3  # price up, down, stable
-
-    print(f"\nConfiguration for High-Frequency Trading:")
-    print(f"  Sequence Length: {sequence_length} ticks")
-    print(f"  Features: {num_features} (bid/ask spread, volume, order flow, etc.)")
-    print(f"  Classes: {num_classes} (price movement prediction)")
-
-    # Build model optimized for tick data
-    # Use shallow dilations for recent tick patterns
-    model = build_wavenet_cnn(
-        sequence_length=sequence_length,
-        num_features=num_features,
-        num_classes=num_classes,
-        filters_list=(32, 32, 64, 64),
-        kernel_size=2,  # WaveNet-style
-        dilations=(1, 2, 4, 8),  # Focuses on recent patterns
-        dropout_rate=0.2,
-        dense1_units=128,
-        dense2_units=64,
-    )
-
-    print(f"\nModel built for tick data analysis!")
-    print(f"\nKey features:")
-    print(f"  ✓ Causal convolutions (no look-ahead)")
-    print(f"  ✓ Receptive field: 31 ticks")
-    print(f"  ✓ Dual pooling (max + avg)")
-    print(f"  ✓ Suitable for order flow imbalance detection")
-
-    model.summary()
 
     return model
 

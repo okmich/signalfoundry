@@ -16,8 +16,8 @@ https://ieeexplore.ieee.org/document/8259701
 """
 
 import keras_tuner as kt
-from tensorflow import keras
-from tensorflow.keras import layers, models
+from keras import layers, models
+from keras.regularizers import l2
 
 from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
 
@@ -26,7 +26,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
                                        branch_filters=32, kernel_sizes=(2, 4, 8, 16), pool_size=2,
                                        conv_filters_1=128, conv_filters_2=64, conv_kernel_size=3, conv_dropout=0.3,
                                        dense_units_1=128, dense_units_2=64, dense_dropout_1=0.3, dense_dropout_2=0.2,
-                                       learning_rate=0.001, l2_reg=0.0001):
+                                       learning_rate=0.001, l2_reg=0.0001, jit_compile=False):
     """
     Create a Hierarchical Multi-Scale CNN with pyramid architecture.
 
@@ -62,6 +62,8 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
         Learning rate for Adam optimizer
     l2_reg : float, default=0.0001
         L2 regularization factor
+    jit_compile : bool, default=False
+        Whether to enable XLA JIT compilation in model.compile
 
     Returns
     -------
@@ -80,7 +82,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
             kernel_size=kernel_size,
             padding="causal",
             activation="relu",
-            kernel_regularizer=keras.regularizers.l2(l2_reg),
+            kernel_regularizer=l2(l2_reg),
             name=f"branch_{i + 1}_conv_k{kernel_size}",
         )(inputs)
         branch = layers.MaxPooling1D(pool_size=pool_size, name=f"branch_{i + 1}_pool")(
@@ -96,7 +98,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
         filters=conv_filters_1,
         kernel_size=conv_kernel_size,
         padding="causal",
-        kernel_regularizer=keras.regularizers.l2(l2_reg),
+        kernel_regularizer=l2(l2_reg),
         name="conv1d_1",
     )(concatenated)
     conv1 = layers.Activation("relu", name="relu_1")(conv1)
@@ -107,7 +109,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
         filters=conv_filters_2,
         kernel_size=conv_kernel_size,
         padding="causal",
-        kernel_regularizer=keras.regularizers.l2(l2_reg),
+        kernel_regularizer=l2(l2_reg),
         name="conv1d_2",
     )(conv1)
     conv2 = layers.Activation("relu", name="relu_2")(conv2)
@@ -124,7 +126,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
     dense1 = layers.Dense(
         dense_units_1,
         activation="relu",
-        kernel_regularizer=keras.regularizers.l2(l2_reg),
+        kernel_regularizer=l2(l2_reg),
         name="dense_1",
     )(pooled)
     dense1 = layers.Dropout(dense_dropout_1, name="dense_dropout_1")(dense1)
@@ -133,7 +135,7 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
     x = layers.Dense(
         dense_units_2,
         activation="relu",
-        kernel_regularizer=keras.regularizers.l2(l2_reg),
+        kernel_regularizer=l2(l2_reg),
         name="dense_2",
     )(dense1)
     x = layers.Dropout(dense_dropout_2, name="dense_dropout_2")(x)
@@ -149,12 +151,14 @@ def create_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskT
 
     # Compile
     opt = get_optimizer("adam", learning_rate)
-    model.compile(optimizer=opt, loss=loss, metrics=output_metrics)
+    model.compile(optimizer=opt, loss=loss, metrics=output_metrics, jit_compile=jit_compile)
 
     return model
 
 
-def create_tunable_hierarchical_multiscale_cnn(input_shape, num_classes, task_type=TaskType.CLASSIFICATION):
+def create_tunable_hierarchical_multiscale_cnn(
+        input_shape, num_classes, task_type=TaskType.CLASSIFICATION, jit_compile=False
+):
     """
     Create a tunable version of the Hierarchical Multi-Scale CNN for hyperparameter optimization.
 
@@ -229,6 +233,7 @@ def create_tunable_hierarchical_multiscale_cnn(input_shape, num_classes, task_ty
             dense_dropout_2=dense_dropout_2,
             learning_rate=learning_rate,
             l2_reg=l2_reg,
+            jit_compile=jit_compile,
         )
 
     return build_model
