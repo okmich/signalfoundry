@@ -490,35 +490,53 @@ class BasePomegranateHMM(ABC):
         log_pi, log_A, log_B = self._extract_hmm_parameters(X)
         T, K = log_B.shape
 
-        # --- Forward pass (single pass over full sequence) ---
+        # --- Forward pass (single sequential pass over full sequence) ---
+        # np.logaddexp.reduce replaces scipy.logsumexp on the tiny (K,K) slice;
+        # it handles -inf transitions correctly and avoids per-step Python dispatch overhead.
         log_alpha = np.empty((T, K), dtype=np.float64)
         log_alpha[0] = log_pi + log_B[0]
         for t in range(1, T):
-            log_alpha[t] = logsumexp(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+            log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
 
-        # --- Truncated backward pass (isolated per timestep, open-end) ---
-        # log_beta always starts at 0 (uniform): no terminal conditioning.
-        # This is the streaming invariant — we never assume the sequence ends.
-        posteriors = np.empty((T, K), dtype=np.float64)
-        for t in range(T):
-            log_beta = np.zeros(K, dtype=np.float64)
-            end = min(t + lag, T - 1)
-            for s in range(end, t, -1):
-                log_beta = logsumexp(log_A + log_B[s] + log_beta, axis=1)
-            log_posterior = log_alpha[t] + log_beta
-            log_posterior -= logsumexp(log_posterior)
-            posteriors[t] = np.exp(log_posterior)
+        # --- Vectorized backward sweep via diagonal recurrence ---
+        # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])
+        # Base:     log_beta[t, 0]   = 0  for all t (uniform — no backward info)
+        # Boundary: log_beta[T-1, L] = 0  for all L (nothing after the last bar)
+        # Open-end invariant: backward messages never assume a known terminal state.
+        lB_next = log_B[1:]  # (T-1, K): emission at t+1 for each t in [0, T-2]
+        prev_col = np.zeros((T, K), dtype=np.float64)  # log_beta[:, 0]
 
-        return posteriors
+        # Backward messages saturate once L >= T-1: no new observations can be added
+        # beyond the sequence boundary, so lags > T-1 produce identical posteriors.
+        effective_lag = min(lag, T - 1)
+        for L in range(1, effective_lag + 1):
+            rhs = lB_next + prev_col[1:]  # (T-1, K): log_B[t+1] + log_beta[t+1, L-1]
+            curr_col = np.zeros((T, K), dtype=np.float64)  # boundary: log_beta[T-1, L] = 0
+            curr_col[:T - 1] = logsumexp(log_A[np.newaxis, :, :] + rhs[:, np.newaxis, :], axis=2)
+            prev_col = curr_col
 
-    def predict_proba_fixed_lag_sweep(self, X: np.ndarray, lags: list[int]) -> dict[int, np.ndarray]:
-        """Compute fixed-lag posteriors for multiple lags, sharing forward pass and emissions.
+        log_posterior = log_alpha + prev_col  # (T, K)
+        log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+        return np.exp(log_posterior - log_norm)
 
-        Shares the forward pass and emission extraction across all lags, avoiding
-        redundant O(T*K^2) work. However, the per-lag backward pass (O(T*L*K^2))
-        dominates runtime, so wall-clock speedup over individual calls is marginal.
-        The primary benefit is guaranteed numerical consistency across lags
-        (identical forward variables).
+    def predict_proba_fixed_lag_sweep(self, X: np.ndarray, lags: list[int],
+                                      window_size: Optional[int] = None) -> dict[int, np.ndarray]:
+        """Compute fixed-lag posteriors for multiple lags.
+
+        Modes
+        -----
+        Full-history mode (default, window_size=None):
+            Shares the forward pass and emission extraction across all lags,
+            avoiding redundant O(T*K^2) work.
+
+        Bounded-history mode (window_size=W):
+            Emulates a fixed-size live buffer without carrying forward state.
+            For each target timestep t and lag L, the posterior is computed on
+            observations restricted to:
+                [max(0, min(t+L, T-1)-W+1) .. min(t+L, T-1)]
+            This intentionally differs from full-history inference and produces
+            an approximate backtest view aligned with finite-window live setups.
+            Runtime is higher than full-history mode.
 
         Parameters
         ----------
@@ -528,6 +546,10 @@ class BasePomegranateHMM(ABC):
             Lag values to compute. Each must be >= 0. Duplicates are removed
             and lags are processed in ascending order internally. The returned
             dict is keyed by lag value, so input ordering does not affect results.
+        window_size : int | None, default=None
+            If provided, restricts inference history to the most recent
+            `window_size` observations per as-of timestamp (fixed-size window
+            emulation). Must be >= 1.
 
         Returns
         -------
@@ -544,12 +566,22 @@ class BasePomegranateHMM(ABC):
             raise ValueError("X must not be empty")
         if not np.all(np.isfinite(X)):
             raise ValueError("X contains NaN or Inf values. Clean input data before calling fixed-lag smoothing.")
+        if window_size is not None:
+            if isinstance(window_size, bool):
+                raise ValueError("window_size must be an integer, got bool")
+            if not isinstance(window_size, (int, np.integer)):
+                raise ValueError(f"window_size must be an integer, got {type(window_size).__name__}")
+            if window_size < 1:
+                raise ValueError(f"window_size must be >= 1, got {window_size}")
         X = self._preprocess_input(X)
 
         result: dict[int, np.ndarray] = {}
 
-        # Separate lag=0 fast path from custom lags
-        custom_lags = []
+        # Fix 3: explicit check before iteration to give a clear API error
+        if not hasattr(lags, '__iter__'):
+            raise ValueError(f"lags must be an iterable of integers, got {type(lags).__name__}")
+
+        unique_lags: list[int] = []
         for lag in lags:
             if isinstance(lag, bool):
                 raise ValueError(f"lag must be an integer, got bool")
@@ -557,35 +589,98 @@ class BasePomegranateHMM(ABC):
                 raise ValueError(f"lag must be an integer, got {type(lag).__name__}")
             if lag < 0:
                 raise ValueError(f"lag must be >= 0, got {lag}")
-            if lag == 0:
-                result[0] = self._predict_proba_filtered(X)
-            else:
-                custom_lags.append(lag)
+            unique_lags.append(int(lag))
 
-        # Deduplicate to avoid redundant backward computation
-        custom_lags = sorted(set(custom_lags))
+        # Deduplicate to avoid redundant computation
+        unique_lags = sorted(set(unique_lags))
 
-        if not custom_lags:
+        if not unique_lags:
             return result
 
-        # Shared extraction and forward pass for all custom lags
+        # Fix 1: validate windowed-mode constraint before any computation.
+        # When lag >= window_size, start = end - window_size + 1 > t, making
+        # local_t = t - start negative — a silent wrong-index bug.
+        if window_size is not None:
+            violating = [lag for lag in unique_lags if lag >= window_size]
+            if violating:
+                raise ValueError(
+                    f"In windowed mode every lag must be less than window_size. "
+                    f"Got window_size={window_size} but lag(s) {violating} >= window_size. "
+                    f"The observation window must contain the target timestep."
+                )
+
+        if window_size is None:
+            if 0 in unique_lags:
+                result[0] = self._predict_proba_filtered(X)
+            custom_lags = [lag for lag in unique_lags if lag != 0]
+            if not custom_lags:
+                return result
+            # Shared extraction and forward pass for all custom lags
+            log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+            T, K = log_B.shape
+
+            log_alpha = np.empty((T, K), dtype=np.float64)
+            log_alpha[0] = log_pi + log_B[0]
+            for t in range(1, T):
+                log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+
+            # Incremental vectorized backward sweep via diagonal recurrence.
+            # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])
+            # Base:     log_beta[t, 0]   = 0  for all t (uniform — no backward info)
+            # Boundary: log_beta[T-1, L] = 0  for all L (nothing after the last bar)
+            # Each lag column costs one numpy op on (T-1, K, K) — no Python loop over T.
+            #
+            # Saturation: once L >= T-1, boundary conditions have propagated to every
+            # timestep — further columns are identical, so we cap at T-1.
+            lB_next = log_B[1:]  # (T-1, K): emission at t+1 for each t in [0, T-2]
+            prev_col = np.zeros((T, K), dtype=np.float64)  # log_beta[:, 0]
+            custom_lags_set = set(custom_lags)
+            effective_max_lag = min(custom_lags[-1], T - 1)
+
+            for L in range(1, effective_max_lag + 1):
+                rhs = lB_next + prev_col[1:]  # (T-1, K): log_B[t+1] + log_beta[t+1, L-1]
+                curr_col = np.zeros((T, K), dtype=np.float64)  # boundary: log_beta[T-1, L] = 0
+                curr_col[:T - 1] = logsumexp(log_A[np.newaxis, :, :] + rhs[:, np.newaxis, :], axis=2)
+
+                if L in custom_lags_set:
+                    log_posterior = log_alpha + curr_col  # (T, K)
+                    log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+                    result[L] = np.exp(log_posterior - log_norm)
+
+                prev_col = curr_col
+
+            # Lags beyond T-1 saturate to the same posteriors as effective_max_lag.
+            saturated_lags = [lag for lag in custom_lags if lag > T - 1]
+            if saturated_lags:
+                log_posterior = log_alpha + prev_col
+                log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+                sat_posteriors = np.exp(log_posterior - log_norm)
+                for lag in saturated_lags:
+                    result[lag] = sat_posteriors
+            return result
+
+        # Bounded-history mode: explicit fixed-window recomputation per as-of timestamp.
         log_pi, log_A, log_B = self._extract_hmm_parameters(X)
         T, K = log_B.shape
 
-        log_alpha = np.empty((T, K), dtype=np.float64)
-        log_alpha[0] = log_pi + log_B[0]
-        for t in range(1, T):
-            log_alpha[t] = logsumexp(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
-
-        # Per-lag backward passes (isolated per timestep, open-end)
-        for lag in custom_lags:
+        for lag in unique_lags:
             posteriors = np.empty((T, K), dtype=np.float64)
             for t in range(T):
-                log_beta = np.zeros(K, dtype=np.float64)
                 end = min(t + lag, T - 1)
-                for s in range(end, t, -1):
-                    log_beta = logsumexp(log_A + log_B[s] + log_beta, axis=1)
-                log_posterior = log_alpha[t] + log_beta
+                start = max(0, end - window_size + 1)
+                window_log_B = log_B[start:end + 1]
+                local_t = t - start
+
+                log_alpha = np.empty((window_log_B.shape[0], K), dtype=np.float64)
+                log_alpha[0] = log_pi + window_log_B[0]
+                for j in range(1, window_log_B.shape[0]):
+                    log_alpha[j] = np.logaddexp.reduce(log_alpha[j - 1, :, np.newaxis] + log_A, axis=0) + window_log_B[j]
+
+                log_beta = np.zeros(K, dtype=np.float64)
+                for s in range(window_log_B.shape[0] - 1, local_t, -1):
+                    log_beta = logsumexp(log_A + window_log_B[s] + log_beta, axis=1)
+
+                log_posterior = log_alpha[local_t] + log_beta
                 log_posterior -= logsumexp(log_posterior)
                 posteriors[t] = np.exp(log_posterior)
             result[lag] = posteriors

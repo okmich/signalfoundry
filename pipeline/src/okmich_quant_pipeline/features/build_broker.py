@@ -3,22 +3,22 @@ build_broker.py — CLI entry point to build processed datasets for a broker.
 
 Examples:
     # Build all symbols discovered in the broker's data directory
-    build-feature-dataset --broker DerivSVG-Server
+    build-feature-dataset --broker <broker-name>
 
     # Build specific symbols
-    build-feature-dataset --broker FXPIG-Server --symbols "EURUSD.r,GBPUSD.r,XAUUSD.r"
+    build-feature-dataset --broker <broker-name> --symbols "EURUSD.r,GBPUSD.r,XAUUSD.r"
 
     # Build TopOneTrader with custom horizon and window
-    build-feature-dataset --broker TopOneTrader-MT5 --horizon 6 --window 14
+    build-feature-dataset --broker <broker-name> --horizon 6 --window 14
 
     # Build without vol-normalizing the label
-    build-feature-dataset --broker FXPIG-Server --no-vol-normalize
+    build-feature-dataset --broker <broker-name> --no-vol-normalize
 
     # Custom data paths
-    build-feature-dataset --broker TopOneTrader-MT5 \\
-        --raw-dir D:/data_dump/market_data/raw \\
+    build-feature-dataset --broker <broker-name> \\
+        --raw-dir <path to data>/raw \\
         --output-dir D:/data_dump/feature_data \\
-        --metastore D:/data_dump/market_data/raw/labelling_metastore.json
+        --metastore <path to data>/raw/labelling_metastore.json
 """
 
 import argparse
@@ -35,9 +35,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # Defaults
-DEFAULT_RAW_DIR = "D:/data_dump/market_data/raw"
+DEFAULT_RAW_DIR = "<path to data>/raw"
 DEFAULT_OUTPUT_DIR = "D:/data_dump/feature_data"
-DEFAULT_METASTORE = "D:/data_dump/market_data/raw/labelling_metastore.json"
+DEFAULT_METASTORE = "<path to data>/raw/labelling_metastore.json"
 DEFAULT_TIMEFRAME = 5
 DEFAULT_HORIZON = 12
 DEFAULT_WINDOW = 20
@@ -60,7 +60,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--broker", required=True, help="Broker/server name (e.g. TopOneTrader-MT5)")
+    parser.add_argument("--broker", required=True, help="Broker/server name (e.g. <broker-name>)")
     parser.add_argument(
         "--symbols",
         type=str,

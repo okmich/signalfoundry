@@ -294,6 +294,53 @@ def test_sweep_matches_individual_calls(fitted_hmm, sample_data):
                                              err_msg=f"Sweep and individual differ at lag={lag}")
 
 
+def test_sweep_with_n_records_matches_fixed_lag_same_l(fitted_hmm, sample_data):
+    """On an N-record input window, sweep(lags=[L]) should match predict_proba_fixed_lag(..., L)."""
+    n_records = 50
+    lag = 5
+    x_n = sample_data[-n_records:]
+
+    sweep_l = fitted_hmm.predict_proba_fixed_lag_sweep(x_n, lags=[lag])[lag]
+    fixed_l = fitted_hmm.predict_proba_fixed_lag(x_n, lag=lag)
+
+    np.testing.assert_array_almost_equal(
+        sweep_l, fixed_l, decimal=10,
+        err_msg=f"Sweep should match fixed-lag on same {n_records}-record input for lag={lag}",
+    )
+
+
+def test_sweep_windowed_matches_truncated_window_oracle(fitted_hmm, sample_data):
+    """Windowed sweep must match running fixed-lag on each truncated live-like window."""
+    lag = 4
+    window_size = 18
+    sweep_windowed = fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[lag], window_size=window_size)[lag]
+    T = sample_data.shape[0]
+
+    for t in range(T):
+        end = min(t + lag, T - 1)
+        start = max(0, end - window_size + 1)
+        local = sample_data[start:end + 1]
+        local_proba = fitted_hmm.predict_proba_fixed_lag(local, lag=lag)
+        local_index = t - start
+        np.testing.assert_array_almost_equal(
+            sweep_windowed[t], local_proba[local_index], decimal=10,
+            err_msg=f"Windowed sweep mismatch at t={t}",
+        )
+
+
+def test_sweep_windowed_with_large_window_matches_full_history(fitted_hmm, sample_data):
+    """If window_size >= T, windowed mode must reduce to full-history mode."""
+    lags_to_test = [0, 2, 5]
+    sweep_full = fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=lags_to_test)
+    sweep_windowed = fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=lags_to_test, window_size=len(sample_data) + 5)
+
+    for lag in lags_to_test:
+        np.testing.assert_array_almost_equal(
+            sweep_windowed[lag], sweep_full[lag], decimal=10,
+            err_msg=f"window_size>=T should match full history for lag={lag}",
+        )
+
+
 # ============================================================================
 # Test: Fast-path performance (lag=0 should not run custom FB)
 # ============================================================================
@@ -409,6 +456,15 @@ def test_float_lag_raises_in_sweep(fitted_hmm, sample_data):
         fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[0, 1.5])
 
 
+def test_invalid_window_size_raises_in_sweep(fitted_hmm, sample_data):
+    with pytest.raises(ValueError, match="window_size must be >= 1"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[1], window_size=0)
+    with pytest.raises(ValueError, match="window_size must be an integer"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[1], window_size=2.5)
+    with pytest.raises(ValueError, match="window_size must be an integer.*bool"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[1], window_size=True)
+
+
 def test_empty_array_raises(fitted_hmm):
     with pytest.raises(ValueError, match="empty"):
         fitted_hmm.predict_proba_fixed_lag(np.array([]).reshape(0, 2), lag=1)
@@ -462,6 +518,43 @@ def test_sweep_dedup_handles_duplicate_lags(fitted_hmm, sample_data):
     individual_5 = fitted_hmm.predict_proba_fixed_lag(sample_data, lag=5)
     np.testing.assert_array_almost_equal(sweep[3], individual_3, decimal=10)
     np.testing.assert_array_almost_equal(sweep[5], individual_5, decimal=10)
+
+
+# ============================================================================
+# Test: Review comment fixes
+# ============================================================================
+
+def test_windowed_lag_ge_window_size_raises(fitted_hmm, sample_data):
+    """lag >= window_size makes local_t negative — must be caught before inference."""
+    with pytest.raises(ValueError, match="window_size"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[5], window_size=5)
+    with pytest.raises(ValueError, match="window_size"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[3, 10], window_size=8)
+
+
+def test_large_lag_sweep_matches_saturated_individual(fitted_hmm, sample_data):
+    """Lags > T-1 must match predict_proba_fixed_lag at the same lag (saturation)."""
+    T = sample_data.shape[0]
+    large_lag = T + 50
+    sweep = fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[large_lag])
+    individual = fitted_hmm.predict_proba_fixed_lag(sample_data, lag=large_lag)
+    np.testing.assert_array_almost_equal(sweep[large_lag], individual, decimal=10)
+
+
+def test_large_lag_saturates_to_same_as_t_minus_1(fitted_hmm, sample_data):
+    """For lags >= T-1 the posteriors must equal those at lag=T-1 (backward saturation)."""
+    T = sample_data.shape[0]
+    sweep = fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[T - 1, T, T + 100])
+    np.testing.assert_array_almost_equal(sweep[T - 1], sweep[T], decimal=10)
+    np.testing.assert_array_almost_equal(sweep[T - 1], sweep[T + 100], decimal=10)
+
+
+def test_non_iterable_lags_raises(fitted_hmm, sample_data):
+    """Passing a scalar or None for lags must raise a clear ValueError, not a TypeError."""
+    with pytest.raises(ValueError, match="iterable"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=5)
+    with pytest.raises(ValueError, match="iterable"):
+        fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=None)
 
 
 if __name__ == "__main__":
