@@ -1,6 +1,5 @@
-import copy
 import os
-from typing import List, Callable, Optional, Tuple
+from typing import List, Callable, Tuple
 
 import numpy as np
 import pandas as pd
@@ -15,9 +14,8 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 from okmich_quant_labelling.utils.label_util import map_label_to_trend_direction
-from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM, InferenceMode, _build_duration_model
+from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM, InferenceMode
 from okmich_quant_ml.hmm.pomegranate import DistType
-from okmich_quant_ml.hmm.util import DurationType
 from okmich_quant_features.utils import resample_ohlcv
 from okmich_quant_features.utils.transform_pipeline import build_pipeline_from_config
 from okmich_quant_ml.regime_filters import BasePostProcessor
@@ -60,24 +58,7 @@ HMM_ALGOS = [
     "hmm_mm_student",
 ]
 
-# HSMM-based algorithms (HMM + explicit duration modelling)
-HSMM_ALGOS = [
-    "hsmm_pmgnt",
-    "hsmm_expnt",
-    "hsmm_gmma",
-    "hsmm_lambda",
-    "hsmm_lognorm",
-    "hsmm_student",
-    "hsmm_mm_pmgnt",
-    "hsmm_mm_expnt",
-    "hsmm_mm_gmma",
-    "hsmm_mm_lambda",
-    "hsmm_mm_lognorm",
-    "hsmm_mm_student",
-]
-
-# All clustering algorithms (backward compatibility)
-CLUSTERING_ALGOS = CLUSTERING_ALGOS_STANDARD + HMM_ALGOS + HSMM_ALGOS
+CLUSTERING_ALGOS = CLUSTERING_ALGOS_STANDARD + HMM_ALGOS
 
 
 def _train_single_model(name, model, X, sym, label_column_prefix):
@@ -85,7 +66,7 @@ def _train_single_model(name, model, X, sym, label_column_prefix):
         if name == "gmm":
             labels = model.fit_predict(X)
             silhouette_features = X
-        elif name.startswith(("hmm", "hsmm")):
+        elif name.startswith("hmm"):
             labels = model.fit_predict(X.values).astype(np.int32)
             silhouette_features = X
         else:
@@ -130,8 +111,7 @@ class LabelClusterPipelineConfig:
                  columns_scaling_exclude: List[str] = None, signal_column=None, timeframe: str = "15min", symbols: List[str] = None,
                  label_column_prefix="lbl_", skip_backtesting: bool = False, mm_n_components: int = 2, data_size: int = -1,
                  training_set_pct: float = 0.75, append_excluded_col_in_result: bool = False, clustering_algos: List[str] = None,
-                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None,
-                 duration_type: Optional[DurationType] = None, max_duration: int = 288):
+                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None):
         self.should_dim_reduce = should_dim_reduce
         self.should_scale = should_scale
         self.should_resample = should_resample
@@ -157,8 +137,6 @@ class LabelClusterPipelineConfig:
         self.clustering_algos = (
             CLUSTERING_ALGOS if clustering_algos is None else clustering_algos
         )
-        self.duration_type = duration_type
-        self.max_duration = max_duration
         self.offline_labelling_mode = offline_labelling_mode
         if inference_mode is None:
             self.inference_mode = InferenceMode.SMOOTHING if offline_labelling_mode else InferenceMode.FILTERING
@@ -215,13 +193,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                 raise ValueError(
                     f"The training set pct value must be between 0 and 1, got {self.pipeline_config.training_set_pct}"
                 )
-
-        # Validate that HSMM algos aren't requested without a duration_type
-        requested_hsmm = [a for a in self.pipeline_config.clustering_algos if a.startswith("hsmm")]
-        if requested_hsmm and self.pipeline_config.duration_type is None:
-            raise ValueError(
-                f"HSMM algorithms {requested_hsmm} require duration_type to be set in pipeline config."
-            )
 
         if "kmeans" in self.pipeline_config.clustering_algos:
             self.cluster_algorithms["kmeans"] = KMeans(
@@ -295,33 +266,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                     distribution_type=dist_type, n_states=default_cluster, inference_mode=inference_mode,
                     n_components=self.pipeline_config.mm_n_components, random_state=self.random_seed,
                 )
-        # HSMM variants — require duration_type to be set in pipeline config
-        if self.pipeline_config.duration_type is not None:
-            duration_cfg = (self.pipeline_config.duration_type, default_cluster, self.pipeline_config.max_duration)
-            hsmm_single = {
-                "hsmm_pmgnt": DistType.NORMAL, "hsmm_expnt": DistType.EXPONENTIAL,
-                "hsmm_gmma": DistType.GAMMA, "hsmm_lambda": DistType.LAMDA,
-                "hsmm_lognorm": DistType.LOGNORMAL, "hsmm_student": DistType.STUDENTT,
-            }
-            for algo_key, dist_type in hsmm_single.items():
-                if algo_key in self.pipeline_config.clustering_algos:
-                    self.cluster_algorithms[algo_key] = PomegranateHMM(
-                        distribution_type=dist_type, n_states=default_cluster, inference_mode=inference_mode,
-                        random_state=self.random_seed, duration_model=copy.deepcopy(_build_duration_model(*duration_cfg)),
-                    )
-            hsmm_mixture = {
-                "hsmm_mm_pmgnt": DistType.NORMAL, "hsmm_mm_expnt": DistType.EXPONENTIAL,
-                "hsmm_mm_gmma": DistType.GAMMA, "hsmm_mm_lambda": DistType.LAMDA,
-                "hsmm_mm_lognorm": DistType.LOGNORMAL, "hsmm_mm_student": DistType.STUDENTT,
-            }
-            for algo_key, dist_type in hsmm_mixture.items():
-                if algo_key in self.pipeline_config.clustering_algos:
-                    self.cluster_algorithms[algo_key] = PomegranateMixtureHMM(
-                        distribution_type=dist_type, n_states=default_cluster, inference_mode=inference_mode,
-                        n_components=self.pipeline_config.mm_n_components, random_state=self.random_seed,
-                        duration_model=copy.deepcopy(_build_duration_model(*duration_cfg)),
-                    )
-
     def get_supported_clustering_algos(self):
         return CLUSTERING_ALGOS
 
@@ -438,7 +382,7 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                 labels = model.predict(X)
                 probs = model.predict_proba(X)
                 silhouette_features = X
-            elif model_key.startswith(("hmm", "hsmm")):
+            elif model_key.startswith("hmm"):
                 labels = model.predict(X.values).astype(np.int32)
                 if model.inference_mode != InferenceMode.VITERBI:
                     probs = model.predict_proba(X.values)
