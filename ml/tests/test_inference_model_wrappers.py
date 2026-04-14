@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import joblib
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -348,3 +349,74 @@ class TestHmmModelWrapperPredict:
         _, labels = wrapper.predict(X)
 
         assert labels.shape == (40,)
+
+    def test_posterior_invariant_rejects_non_normalized_rows(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)})
+
+        def _bad_predict_proba(X):
+            return np.array([[0.5, 0.5, 0.5]], dtype=float)  # row sum = 1.5
+
+        wrapper.model.predict_proba = _bad_predict_proba
+
+        X = np.random.default_rng(15).standard_normal((10, 2))
+        with pytest.raises(ValueError, match="Posterior rows must sum to 1"):
+            wrapper.predict(X)
+
+    def test_posterior_invariant_rejects_nan_inf(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)})
+
+        def _bad_predict_proba(X):
+            return np.array([[0.2, np.nan, 0.8], [0.1, np.inf, 0.9]], dtype=float)
+
+        wrapper.model.predict_proba = _bad_predict_proba
+
+        X = np.random.default_rng(16).standard_normal((10, 2))
+        with pytest.raises(ValueError, match="Posterior contains NaN or Inf values"):
+            wrapper.predict(X)
+
+    def test_posterior_invariant_can_be_disabled(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper(
+            {"type": "hmm", "model_path": str(artifact_dir)},
+            validate_posterior_invariants=False,
+        )
+
+        def _bad_predict_proba(X):
+            return np.array([[0.5, 0.5, 0.5]], dtype=float)
+
+        wrapper.model.predict_proba = _bad_predict_proba
+
+        X = np.random.default_rng(17).standard_normal((10, 2))
+        probs, labels = wrapper.predict(X)
+        assert probs.shape == (1, 3)
+        assert labels.shape == (1,)
+
+    def test_fixed_lag_alignment_validation_passes(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)}, use_fixed_lag_posterior=True, fixed_lag=4)
+
+        asof_timestamp = pd.Timestamp("2026-04-15 10:00:00")
+        label_timestamp = pd.Timestamp("2026-04-15 09:40:00")
+        wrapper.validate_fixed_lag_alignment(asof_timestamp=asof_timestamp, label_timestamp=label_timestamp, bar_timedelta="5min")
+
+    def test_fixed_lag_alignment_validation_raises_on_misalignment(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)}, use_fixed_lag_posterior=True, fixed_lag=4)
+
+        asof_timestamp = pd.Timestamp("2026-04-15 10:00:00")
+        label_timestamp = pd.Timestamp("2026-04-15 09:45:00")
+        with pytest.raises(ValueError, match="Fixed-lag timestamp misalignment"):
+            wrapper.validate_fixed_lag_alignment(asof_timestamp=asof_timestamp, label_timestamp=label_timestamp, bar_timedelta="5min")
+
+    def test_fixed_lag_alignment_validation_requires_fixed_lag_mode(self, tmp_path):
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        wrapper = HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)}, use_fixed_lag_posterior=False, fixed_lag=4)
+
+        with pytest.raises(ValueError, match="applies only when use_fixed_lag_posterior=True"):
+            wrapper.validate_fixed_lag_alignment(
+                asof_timestamp=pd.Timestamp("2026-04-15 10:00:00"),
+                label_timestamp=pd.Timestamp("2026-04-15 09:40:00"),
+                bar_timedelta="5min",
+            )

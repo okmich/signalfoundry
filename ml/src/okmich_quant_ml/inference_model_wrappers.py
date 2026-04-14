@@ -93,7 +93,8 @@ class HmmModelWrapper:
 
     def __init__(self, model_dict: Dict[str, str], use_fixed_lag_posterior: bool = False, fixed_lag: Optional[int] = None,
                  posterior_transformers: Optional[list[PosteriorTransformer]] = None,
-                 posterior_inferer: Optional[PosteriorInferer] = None):
+                 posterior_inferer: Optional[PosteriorInferer] = None,
+                 validate_posterior_invariants: bool = True, posterior_sum_tolerance: float = 1e-6):
         """
         model_dict should be of the form:
         {
@@ -135,6 +136,10 @@ class HmmModelWrapper:
         self.posterior_inferer = posterior_inferer if posterior_inferer is not None else ArgmaxInferer()
         self.posterior_pipeline = PosteriorPipeline(transformers=self.posterior_transformers,
                                                     inferer=self.posterior_inferer)
+        self.validate_posterior_invariants = bool(validate_posterior_invariants)
+        self.posterior_sum_tolerance = float(posterior_sum_tolerance)
+        if self.posterior_sum_tolerance <= 0:
+            raise ValueError(f"posterior_sum_tolerance must be > 0, got {self.posterior_sum_tolerance}")
 
     def predict(self, data: Union[np.ndarray, pd.DataFrame]) -> tuple[np.ndarray, Any]:
         _features = data if isinstance(data, np.ndarray) else data.values
@@ -153,8 +158,42 @@ class HmmModelWrapper:
         else:
             probs = np.asarray(self.model.predict_proba(transformed_features), dtype=float)
 
+        if self.validate_posterior_invariants:
+            self._validate_probability_matrix(probs)
+
         inferred = self.posterior_pipeline.run(probs)
         return probs, inferred
+
+    def validate_fixed_lag_alignment(self, asof_timestamp: Any, label_timestamp: Any, bar_timedelta: Any) -> None:
+        """Validate fixed-lag as-of alignment: label_timestamp must equal asof_timestamp - L * bar_timedelta."""
+        if not self.use_fixed_lag_posterior:
+            raise ValueError("Fixed-lag alignment validation applies only when use_fixed_lag_posterior=True.")
+
+        asof_ts = pd.Timestamp(asof_timestamp)
+        label_ts = pd.Timestamp(label_timestamp)
+        bar_delta = pd.Timedelta(bar_timedelta)
+        expected_label_ts = asof_ts - (bar_delta * self.fixed_lag)
+
+        if label_ts != expected_label_ts:
+            raise ValueError(
+                f"Fixed-lag timestamp misalignment: expected label_timestamp={expected_label_ts}, "
+                f"got {label_ts} (asof_timestamp={asof_ts}, fixed_lag={self.fixed_lag}, bar_timedelta={bar_delta})."
+            )
+
+    def _validate_probability_matrix(self, probs: np.ndarray) -> None:
+        if probs.ndim != 2:
+            raise ValueError(f"Posterior matrix must be 2D, got shape {probs.shape}")
+        if not np.all(np.isfinite(probs)):
+            raise ValueError("Posterior contains NaN or Inf values.")
+
+        row_sums = probs.sum(axis=1)
+        if not np.all(np.abs(row_sums - 1.0) <= self.posterior_sum_tolerance):
+            min_sum = float(np.min(row_sums))
+            max_sum = float(np.max(row_sums))
+            raise ValueError(
+                f"Posterior rows must sum to 1 within tolerance {self.posterior_sum_tolerance}. "
+                f"Observed row-sum range: [{min_sum}, {max_sum}]."
+            )
 
     @staticmethod
     def _resolve_artifact_dir(model_path: str) -> Path:
