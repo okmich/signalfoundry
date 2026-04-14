@@ -1,45 +1,12 @@
-from .duration import BaseDuration, GammaDuration, LogNormalDuration, NegBinDuration, NonparametricDuration, PoissonDuration
 from .evaluator import RegimeQualityEvaluator
 from .factorial import FactorialHMM
 from .inference_cache import InferenceCache
 from .pomegranate import PomegranateHMM, DistType
 from .pomegranate_mm import PomegranateMixtureHMM
-from .util import DurationType, InferenceMode
+from .util import InferenceMode
 
 
-def _build_duration_model(duration_type: DurationType, n_states: int, max_duration: int) -> BaseDuration:
-    """Construct a duration model from the enum type."""
-    match duration_type:
-        case DurationType.POISSON:
-            return PoissonDuration(n_states, max_duration)
-        case DurationType.NONPARAMETRIC:
-            return NonparametricDuration(n_states, max_duration)
-        case DurationType.NEGBIN:
-            return NegBinDuration(n_states, max_duration)
-        case DurationType.GAMMA:
-            return GammaDuration(n_states, max_duration)
-        case DurationType.LOGNORMAL:
-            return LogNormalDuration(n_states, max_duration)
-        case _:
-            raise ValueError(f"Unknown duration type: {duration_type}")
-
-
-def _infer_duration_type(duration_model: BaseDuration) -> DurationType:
-    """Infer DurationType enum from a duration model instance."""
-    if isinstance(duration_model, PoissonDuration):
-        return DurationType.POISSON
-    if isinstance(duration_model, NonparametricDuration):
-        return DurationType.NONPARAMETRIC
-    if isinstance(duration_model, NegBinDuration):
-        return DurationType.NEGBIN
-    if isinstance(duration_model, GammaDuration):
-        return DurationType.GAMMA
-    if isinstance(duration_model, LogNormalDuration):
-        return DurationType.LOGNORMAL
-    raise ValueError(
-        f"Unsupported duration model type: {type(duration_model).__name__}. "
-        "Pass duration_types explicitly to train()."
-    )
+_REMOVED_HSMM_KWARGS: frozenset = frozenset({"duration_model", "duration_type", "max_duration"})
 
 
 # ------------------------------------------------------------------
@@ -49,13 +16,13 @@ def create_simple_hmm_instance(dist_type: DistType, n_states: int = 3, *, n_comp
                               is_mixture_model: bool = False, random_state: int = 100, max_iter: int = 100,
                               inference_mode: InferenceMode = InferenceMode.FILTERING,
                               covariance_type: str = "full", min_cov: float | None = None,
-                              duration_type: DurationType | None = None, max_duration: int = 100,
                               **dist_kwargs) -> PomegranateHMM | PomegranateMixtureHMM:
-    # Build duration model if requested
-    duration_model = None
-    if duration_type is not None:
-        duration_model = _build_duration_model(duration_type, n_states, max_duration)
-
+    bad = _REMOVED_HSMM_KWARGS & dist_kwargs.keys()
+    if bad:
+        raise TypeError(
+            f"HSMM support has been removed. The following kwargs are no longer accepted: {sorted(bad)}. "
+            "Remove them from the call."
+        )
     # Add covariance parameters for distributions that support them
     distributions_with_covariance = {DistType.NORMAL, DistType.STUDENTT, DistType.LOGNORMAL}
     if dist_type in distributions_with_covariance:
@@ -84,8 +51,7 @@ def create_simple_hmm_instance(dist_type: DistType, n_states: int = 3, *, n_comp
 
         return PomegranateMixtureHMM(distribution_type=dist_type, n_states=n_states, n_components=n_components,
                                      random_state=random_state, max_iter=max_iter,
-                                     inference_mode=inference_mode, duration_model=duration_model, **dist_kwargs)
+                                     inference_mode=inference_mode, **dist_kwargs)
     else:
         return PomegranateHMM(distribution_type=dist_type, n_states=n_states, random_state=random_state,
-                              max_iter=max_iter, inference_mode=inference_mode,
-                              duration_model=duration_model, **dist_kwargs)
+                              max_iter=max_iter, inference_mode=inference_mode, **dist_kwargs)

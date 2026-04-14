@@ -14,7 +14,7 @@ Verifies:
 - Open-end semantics: no terminal conditioning (large lag != pomegranate smoothing)
 - Both PomegranateHMM and PomegranateMixtureHMM
 - Sweep API matches individual calls
-- Edge cases: negative lag, HSMM, unfitted model, boolean lag, small sequence
+- Edge cases: negative lag, unfitted model, boolean lag, small sequence
 
 Run with: pytest test_fixed_lag_smoothing.py -v
 """
@@ -346,15 +346,6 @@ def test_boolean_lag_raises(fitted_hmm, sample_data):
         fitted_hmm.predict_proba_fixed_lag(sample_data, lag=True)
     with pytest.raises(ValueError, match="integer.*bool"):
         fitted_hmm.predict_proba_fixed_lag_sweep(sample_data, lags=[False])
-
-
-def test_hsmm_raises_not_implemented(sample_data):
-    from okmich_quant_ml.hmm.duration import PoissonDuration
-    dur = PoissonDuration(n_states=2, max_duration=50)
-    model = PomegranateHMM(distribution_type=DistType.NORMAL, n_states=2, duration_model=dur)
-    model.fit(sample_data)
-    with pytest.raises(NotImplementedError, match="HSMM"):
-        model.predict_proba_fixed_lag(sample_data, lag=3)
 
 
 

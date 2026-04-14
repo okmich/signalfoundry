@@ -22,12 +22,8 @@ class ProcessorPipeline:
 
     Examples
     --------
-    >>> from okmich_quant_ml.hmm.postprocessor import (
-    ...     MinimumDurationFilter,
-    ...     HysteresisProcessor,
-    ...     MedianFilter,
+    >>> from okmich_quant_ml.hmm.postprocessor import MinimumDurationFilter, HysteresisProcessor, MedianFilter, \
     ...     ProcessorPipeline
-    ... )
     >>>
     >>> pipeline = ProcessorPipeline([
     ...     MinimumDurationFilter({'min_duration': 3}),
@@ -64,9 +60,7 @@ class ProcessorPipeline:
                 returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         current_states = states
         for processor in self.processors:
-            current_states = processor.process(
-                current_states, posteriors=posteriors, returns=returns
-            )
+            current_states = processor.process(current_states, posteriors=posteriors, returns=returns)
         return current_states
 
     def process_online(self, state: int, posterior: Optional[np.ndarray] = None, return_value: Optional[float] = None,
@@ -74,13 +68,8 @@ class ProcessorPipeline:
         current_state = state
 
         for processor in self.processors:
-            current_state = processor.process_online(
-                current_state,
-                posterior=posterior,
-                return_value=return_value,
-                timestamp=timestamp,
-            )
-
+            current_state = processor.process_online(current_state, posterior=posterior, return_value=return_value,
+                                                     timestamp=timestamp)
         return current_state
 
     def reset(self) -> ProcessorPipeline:
@@ -116,7 +105,6 @@ class ProcessorPipeline:
         """
         if not self.processors:
             raise ValueError("Pipeline has no processors")
-
         return self.processors[-1].get_regime_statistics(states)
 
     def __len__(self) -> int:

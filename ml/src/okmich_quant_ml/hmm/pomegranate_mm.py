@@ -49,59 +49,24 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None, n_states_range: Sequence[int] = (2, 3, 4, 5),
-              n_criteria_range: Sequence[int] = (2, 3, 4, 5), criterion: str = "aic",
-              duration_types: Sequence | None = None, max_duration_range: Sequence[int] | None = None) -> "PomegranateMixtureHMM":
-        """Pick the best configuration using AIC or BIC.
-
-        Parameters
-        ----------
-        duration_types : sequence of DurationType or None, optional
-            Duration families to sweep. If omitted, defaults to:
-            - ``[None]`` for standard HMM instances
-            - ``[current_duration_type]`` for HSMM instances.
-        max_duration_range : sequence of int or None, optional
-            Max-duration values to sweep when ``duration_types`` is set.
-            If omitted, defaults to the current HSMM max-duration when
-            preserving an HSMM default; otherwise ``(100,)``.
-        """
+    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None, n_states_range: Sequence[int] = (2, 3, 4, 5), n_criteria_range: Sequence[int] = (2, 3, 4, 5), criterion: str = "aic") -> "PomegranateMixtureHMM":
+        """Pick the best configuration using AIC or BIC."""
         _VALID_CRITERIA = {"aic", "bic"}
         if criterion not in _VALID_CRITERIA:
             raise ValueError(f"Unknown criterion '{criterion}'. Allowed values: {sorted(_VALID_CRITERIA)}")
-
-        default_duration_type = None
-        if self.duration_model is not None:
-            from . import _infer_duration_type
-            default_duration_type = _infer_duration_type(self.duration_model)
-
-        if duration_types is None:
-            duration_types = [default_duration_type] if default_duration_type is not None else [None]
-        if max_duration_range is None:
-            if default_duration_type is not None and duration_types == [default_duration_type]:
-                max_duration_range = (self.duration_model.max_duration,)
-            else:
-                max_duration_range = (100,)
 
         best_score, best_inst = np.inf, None
         for j in n_criteria_range:
             for k in n_states_range:
                 for inst_kwargs in self._iter_train_dist_kwargs():
-                    for dt in duration_types:
-                        md_range = max_duration_range if dt is not None else (None,)
-                        for md in md_range:
-                            dur_model = None
-                            if dt is not None:
-                                from . import _build_duration_model
-                                dur_model = _build_duration_model(dt, k, md)
-                            inst = self.__class__(self.distribution_type, n_states=k, n_components=j,
-                                                  random_state=self.random_state, max_iter=self.max_iter,
-                                                  inference_mode=self.inference_mode,
-                                                  duration_model=dur_model, **inst_kwargs)
-                            inst.fit(X, lengths)
-                            aic, bic = inst.get_aic_bic(X)
-                            score = aic if criterion == "aic" else bic
-                            if score < best_score:
-                                best_score, best_inst = score, inst
+                    inst = self.__class__(self.distribution_type, n_states=k, n_components=j,
+                                          random_state=self.random_state, max_iter=self.max_iter,
+                                          inference_mode=self.inference_mode, **inst_kwargs)
+                    inst.fit(X, lengths)
+                    aic, bic = inst.get_aic_bic(X)
+                    score = aic if criterion == "aic" else bic
+                    if score < best_score:
+                        best_score, best_inst = score, inst
         return best_inst
 
     def get_aic_bic(self, X: np.ndarray) -> tuple[float, float]:
@@ -111,29 +76,22 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
 
         X = X.reshape(-1, 1) if X.ndim == 1 else X
 
-        # Log-likelihood: HSMM uses forward pass, standard HMM uses pomegranate
         ll = float(self.log_likelihood(X))
 
         # Emission parameter counting for mixture model
         n_features = X.shape[1]
+        cov_params = self._cov_param_count(n_features)
         params_per_state = (
             self.n_components * n_features  # means
-            + self.n_components * n_features  # covariances
+            + self.n_components * cov_params  # covariances (structure-aware)
             + (self.n_components - 1)  # mixture weights
         )
         if self.distribution_type == DistType.STUDENTT:
             params_per_state += self.n_components  # dofs per component
 
         n_emission_params = self.n_states * params_per_state
-
-        if self._is_hsmm:
-            n_trans_params = self.n_states * (self.n_states - 2)  # zero diagonal
-            n_duration_params = self.duration_model.n_parameters()
-        else:
-            n_trans_params = self.n_states * (self.n_states - 1)
-            n_duration_params = 0
-
-        n_params = (self.n_states - 1) + n_trans_params + n_emission_params + n_duration_params
+        n_trans_params = self.n_states * (self.n_states - 1)
+        n_params = (self.n_states - 1) + n_trans_params + n_emission_params
 
         aic = -2 * ll + 2 * n_params
         bic = -2 * ll + n_params * np.log(X.shape[0])
@@ -456,7 +414,9 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
     def _build_component_distribution(self, state_idx: int, comp_idx: int, rng: np.random.Generator):
         match self.distribution_type:
             case DistType.NORMAL:
-                return Normal(dtype=torch.float64)
+                covariance_type = self.dist_kwargs.get("covariance_type", "full")
+                min_cov = self.dist_kwargs.get("min_cov")
+                return Normal(covariance_type=covariance_type, min_cov=min_cov, dtype=torch.float64)
             case DistType.STUDENTT:
                 dofs = self.dist_kwargs.get("dofs", 3)
                 covariance_type, min_cov = self._student_t_covariance_config()
