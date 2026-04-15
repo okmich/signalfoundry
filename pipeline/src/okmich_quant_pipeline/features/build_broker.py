@@ -8,7 +8,7 @@ Examples:
     # Build specific symbols
     build-feature-dataset --broker <broker-name> --symbols "EURUSD.r,GBPUSD.r,XAUUSD.r"
 
-    # Build TopOneTrader with custom horizon and window
+    # Build <broker name> with custom horizon and window
     build-feature-dataset --broker <broker-name> --horizon 6 --window 14
 
     # Build without vol-normalizing the label

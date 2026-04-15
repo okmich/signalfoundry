@@ -1,6 +1,14 @@
 import numpy as np
 
-from okmich_quant_ml.posterior_inference import ArgmaxInferer, PosteriorPipeline, entropy, margin
+from okmich_quant_ml.posterior_inference import (
+    AbstainMode,
+    ArgmaxInferer,
+    EmaPosteriorTransformer,
+    MarginGateInferer,
+    PosteriorPipeline,
+    entropy,
+    margin,
+)
 
 
 class ReverseColumnsTransformer:
@@ -144,3 +152,24 @@ def test_pipeline_without_inferer_returns_final_posterior_shape_preserved() -> N
 
     assert transformed.shape == probs.shape
     np.testing.assert_allclose(transformed, expected, atol=1e-12)
+
+
+def test_pipeline_with_ema_transformer_and_margin_gate_inferer_runs_end_to_end() -> None:
+    probs = np.array(
+        [
+            [0.90, 0.05, 0.05],
+            [0.55, 0.35, 0.10],
+            [0.10, 0.80, 0.10],
+            [0.45, 0.45, 0.10],
+        ],
+        dtype=float,
+    )
+    pipeline = PosteriorPipeline(
+        transformers=[EmaPosteriorTransformer(alpha=0.30)],
+        inferer=MarginGateInferer(theta_top=0.70, theta_margin=0.20, abstain_mode=AbstainMode.HOLD_LAST, abstain_label=2),
+    )
+
+    labels = pipeline.run(probs)
+
+    assert labels.shape == (len(probs),)
+    assert labels.dtype.kind in {"i", "u"}

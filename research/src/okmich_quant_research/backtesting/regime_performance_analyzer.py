@@ -26,13 +26,8 @@ class RegimePerformanceAnalyzer:
         Typical values: 252 (daily), 8760 (hourly), 52560 (5-min).
     """
 
-    def __init__(
-        self,
-        portfolio: vbt.Portfolio,
-        regime_labels: pd.Series,
-        regime_names: Optional[Dict[int, str]] = None,
-        annualization_factor: int = 252,
-    ) -> None:
+    def __init__(self, portfolio: vbt.Portfolio, regime_labels: pd.Series, regime_names: Optional[Dict[int, str]] = None,
+                 annualization_factor: int = 252) -> None:
         self.portfolio = portfolio
         self.regime_names = regime_names or {}
         self.annualization_factor = annualization_factor
@@ -40,12 +35,8 @@ class RegimePerformanceAnalyzer:
         # Align labels to portfolio index
         pf_index = portfolio.wrapper.index
         if len(regime_labels.index.intersection(pf_index)) == 0:
-            raise ValueError(
-                "regime_labels index has no overlap with the portfolio index."
-            )
-        self._labels: pd.Series = (
-            regime_labels.reindex(pf_index, method="ffill").astype(int)
-        )
+            raise ValueError("regime_labels index has no overlap with the portfolio index.")
+        self._labels: pd.Series = regime_labels.reindex(pf_index, method="ffill").astype(int)
         self._regimes: List[int] = sorted(self._labels.dropna().unique().tolist())
 
         # Cache expensive vbt calls
@@ -274,11 +265,7 @@ class RegimePerformanceAnalyzer:
     # public plot methods
     # ------------------------------------------------------------------
 
-    def plot_regime_summary(
-        self,
-        figsize=(14, 10),
-        save_path: Optional[str] = None,
-    ) -> plt.Figure:
+    def plot_regime_summary(self, figsize=(14, 10), save_path: Optional[str] = None) -> plt.Figure:
         """2×2 bar chart summary: total return, Sharpe, win rate, trade count."""
         with plt.style.context("dark_background"):
             fig, axes = plt.subplots(2, 2, figsize=figsize)
@@ -317,11 +304,7 @@ class RegimePerformanceAnalyzer:
             fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
         return fig
 
-    def plot_regime_returns(
-        self,
-        figsize=(14, 6),
-        save_path: Optional[str] = None,
-    ) -> plt.Figure:
+    def plot_regime_returns(self, figsize=(14, 6), save_path: Optional[str] = None) -> plt.Figure:
         """One subplot per regime showing cumulative return over that regime's bars."""
         n_regimes = len(self._regimes)
         with plt.style.context("dark_background"):
@@ -360,11 +343,7 @@ class RegimePerformanceAnalyzer:
             fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
         return fig
 
-    def plot_regime_trade_distribution(
-        self,
-        figsize=(12, 5),
-        save_path: Optional[str] = None,
-    ) -> plt.Figure:
+    def plot_regime_trade_distribution(self, figsize=(12, 5), save_path: Optional[str] = None) -> plt.Figure:
         """Box plot of trade PnL grouped by regime."""
         tbr = self._trades_by_regime()
         pnl_col = "PnL"

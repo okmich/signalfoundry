@@ -76,7 +76,7 @@ def compute_metric(prices_window: pd.Series, current_theta: float, mode: Adaptat
         return 0.0
 
     if mode == AdaptationMode.VOLATILITY:
-        log_returns = np.diff(np.log(prices_window.values.astype(np.float64) + 1e-10))
+        log_returns = np.diff(np.log(prices_window.values.astype(np.float64)))
         return float(np.std(log_returns)) if len(log_returns) > 1 else 0.0
 
     if mode == AdaptationMode.RDC:
