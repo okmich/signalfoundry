@@ -51,8 +51,8 @@ class FixedForwardReturnLabeler:
     - Choose based on your trading frequency and holding period
     """
 
-    def __init__(self, horizon: int, normalize: bool = True, normalize_window: int = 20,
-                 clip_percentile: Optional[float] = None, use_log_returns: bool = True):
+    def __init__(self, horizon: int, normalize: bool = True, normalize_window: int = 20, clip_percentile: float = 90.0,
+                 use_log_returns: bool = True):
         if horizon <= 0:
             raise ValueError(f"horizon must be positive, got {horizon}")
         if normalize and normalize_window <= 0:
