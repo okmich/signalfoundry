@@ -13,6 +13,7 @@ from ..metrics import (
 class TaskType(Enum):
     CLASSIFICATION = "classification"
     REGRESSION = "regression"
+    POSTERIOR_DISTILLATION = "posterior_distillation"
 
     def __str__(self):
         return self.value
@@ -65,7 +66,7 @@ def create_output_layer_and_loss(x, task_type: TaskType, num_classes: int = None
     if not isinstance(task_type, TaskType):
         raise TypeError(
             f"task_type must be TaskType enum, got: {type(task_type)}. "
-            f"Use TaskType.CLASSIFICATION or TaskType.REGRESSION"
+            f"Use TaskType.CLASSIFICATION, TaskType.REGRESSION, or TaskType.POSTERIOR_DISTILLATION"
         )
 
     if task_type == TaskType.CLASSIFICATION:
@@ -91,6 +92,22 @@ def create_output_layer_and_loss(x, task_type: TaskType, num_classes: int = None
                 RegimeTransitionRecall(lag_tolerance=2, name='regime_transition_recall'),
                 RegimeTransitionPrecision(lag_tolerance=2, name='regime_transition_precision'),
             ]
+    elif task_type == TaskType.POSTERIOR_DISTILLATION:
+        if num_classes is None:
+            raise ValueError("num_classes is required for posterior distillation tasks")
+
+        # Same output shape as classification: (T, K) softmax probabilities.
+        # Loss is CategoricalCrossentropy (not Sparse) so it accepts soft float
+        # targets of shape (n, K) — computes -sum(p_teacher * log(p_student))
+        # per row, which equals KL(p_teacher || p_student) up to the constant
+        # entropy of the teacher.  One-hot targets are a valid special case.
+        output_layer = layers.Dense(num_classes, activation='softmax', name=output_name)(x)
+        loss_fn = losses.CategoricalCrossentropy()
+        metrics_list = [
+            CausalRegimeAccuracy(window_size=5, name='causal_regime_accuracy'),
+            RegimeTransitionRecall(lag_tolerance=2, name='regime_transition_recall'),
+            RegimeTransitionPrecision(lag_tolerance=2, name='regime_transition_precision'),
+        ]
     elif task_type == TaskType.REGRESSION:
         # Single continuous output
         output_layer = layers.Dense(1, activation='linear', name=output_name)(x)
@@ -134,5 +151,7 @@ def get_optimizer(optimizer_name: str, learning_rate: float, clipnorm: float = 1
 def get_model_name(base_name: str, task_type: TaskType) -> str:
     if task_type == TaskType.REGRESSION:
         return f"{base_name}_Regression"
+    elif task_type == TaskType.POSTERIOR_DISTILLATION:
+        return f"{base_name}_PosteriorDistillation"
     else:
         return base_name

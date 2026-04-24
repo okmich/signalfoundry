@@ -176,7 +176,7 @@ class ATDCPipeline:
         Returns
         -------
         dict
-            All keys from run_atdc_algorithm() plus optimal_theta, optimal_alpha.
+            All keys from run_atdc_algorithm() plus optimal_theta_init, optimal_alpha.
 
         Raises
         ------

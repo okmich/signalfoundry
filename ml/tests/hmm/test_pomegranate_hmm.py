@@ -423,6 +423,20 @@ class TestErrorHandling:
         with pytest.raises(RuntimeError, match="Model has not been fitted yet"):
             model.get_aic_bic(sample_sequence_data)
 
+    def test_removed_hsmm_kwarg_duration_model_raises(self):
+        with pytest.raises(TypeError, match="HSMM support has been removed"):
+            PomegranateHMM(distribution_type=DistType.NORMAL, n_states=2, duration_model=object())
+
+    def test_removed_hsmm_kwarg_via_factory_raises(self):
+        from okmich_quant_ml.hmm import create_simple_hmm_instance
+        with pytest.raises(TypeError, match="HSMM support has been removed"):
+            create_simple_hmm_instance(DistType.NORMAL, n_states=2, duration_type="poisson")
+
+    def test_removed_hsmm_kwarg_max_duration_raises(self):
+        from okmich_quant_ml.hmm import create_simple_hmm_instance
+        with pytest.raises(TypeError, match="HSMM support has been removed"):
+            create_simple_hmm_instance(DistType.NORMAL, n_states=2, max_duration=100)
+
 
 # ============================================================================
 # Serialization Tests

@@ -6,13 +6,13 @@ Produces one parquet per symbol containing OHLCV + all features + forward log-re
 
 Usage:
     import os
-    os.environ["SYMBOL_METASTORE_FILE"] = "D:/data_dump/market_data/raw/labelling_metastore.json"
+    os.environ["SYMBOL_METASTORE_FILE"] = "<path to data>/raw/labelling_metastore.json"
 
     builder = DatasetBuilder(
-        broker="TopOneTrader-MT5",
+        broker="broker name",
         timeframe=5,
-        raw_data_root="D:/data_dump/market_data/raw",
-        output_dir="D:/data_dump/market_data/processed",
+        raw_data_root="<path to data>/raw",
+        output_dir="<path to data>/processed",
         horizon=12,
         default_window=20,
     )

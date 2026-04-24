@@ -3,6 +3,9 @@ name = "signalfoundry-workspace"
 version = "0.1.0"
 description = "SignalFoundry quantitative research and trading workspace"
 requires-python = ">=3.12,<3.14"
+dependencies = [
+    "okmich-quant-core",
+]
 
 [tool.uv.workspace]
 members = [
@@ -17,6 +20,9 @@ members = [
     "utils",
 ]
 exclude = ["__pycache__"]
+
+[tool.uv.sources]
+okmich-quant-core = { workspace = true, editable = true }
 
 [dependency-groups]
 dev = [

@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import torch
 from pomegranate.hmm import DenseHMM
+from scipy.special import logsumexp
 
-from .duration._base import BaseDuration
 from .util import DistType, InferenceMode
 
 
@@ -22,9 +22,10 @@ class BasePomegranateHMM(ABC):
     Subclasses must implement model-specific methods like _build_model() and get_aic_bic().
     """
 
+    _REMOVED_HSMM_KWARGS: frozenset = frozenset({"duration_model", "duration_type", "max_duration"})
+
     def __init__(self, distribution_type: DistType, n_states: int = 2, *, random_state: int = 100,
-                 max_iter: int = 100, inference_mode: Optional[InferenceMode] = None,
-                 duration_model: Optional[BaseDuration] = None, **dist_kwargs):
+                 max_iter: int = 100, inference_mode: Optional[InferenceMode] = None, **dist_kwargs):
         """
         Parameters
         ----------
@@ -38,34 +39,48 @@ class BasePomegranateHMM(ABC):
             - FILTERING: Forward algorithm only (no look-ahead bias)
             - SMOOTHING: Forward-Backward algorithm (uses future info, for analysis)
             - VITERBI: Most likely state sequence (uses future info, for labeling)
-        duration_model : BaseDuration, optional
-            Explicit-duration model for HSMM.  When provided, the model
-            uses HSMM EM instead of standard Baum-Welch.
         dist_kwargs
             Extra arguments forwarded to the actual pomegranate
             distribution constructors (e.g. n_components for gmm).
         """
+        bad = self._REMOVED_HSMM_KWARGS & dist_kwargs.keys()
+        if bad:
+            raise TypeError(
+                f"HSMM support has been removed. The following kwargs are no longer accepted: {sorted(bad)}. "
+                "Remove them from the call."
+            )
         self.distribution_type = distribution_type
         self.n_states = n_states
         self.random_state = random_state
         self.max_iter = max_iter
         self.inference_mode = inference_mode if inference_mode is not None else InferenceMode.FILTERING
-        self.duration_model = duration_model
         self.dist_kwargs = dist_kwargs
         self._model: Optional[DenseHMM] = None
-        # HSMM-specific state (populated after fit when duration_model is set)
-        self._hsmm_log_trans: Optional[np.ndarray] = None
-        self._hsmm_log_init: Optional[np.ndarray] = None
-
-    @property
-    def _is_hsmm(self) -> bool:
-        return self.duration_model is not None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     # Maximum retries for EM fitting when Cholesky / covariance errors occur
     _FIT_MAX_RETRIES: int = 3
+
+    def _cov_param_count(self, n_features: int) -> int:
+        """Number of covariance parameters per state for distributions that carry one.
+
+        Returns 0 for distributions without a covariance structure (Gamma, Exponential,
+        Poisson, etc.). For Normal / StudentT / LogNormal the count depends on the
+        covariance type stored in dist_kwargs:
+            diag   → n_features   (one variance per feature)
+            sphere → 1            (single shared variance)
+            full   → n_features * (n_features + 1) / 2  (lower-triangle of Σ)
+        """
+        if self.distribution_type not in {DistType.NORMAL, DistType.STUDENTT, DistType.LOGNORMAL}:
+            return 0
+        cov_type = str(self.dist_kwargs.get("covariance_type", "full")).lower()
+        if cov_type == "diag":
+            return n_features
+        if cov_type == "sphere":
+            return 1
+        return n_features * (n_features + 1) // 2  # full
 
     def fit(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None) -> "BasePomegranateHMM":
         """
@@ -98,10 +113,7 @@ class BasePomegranateHMM(ABC):
             self._model = self._build_model()
 
             try:
-                if self._is_hsmm:
-                    self._fit_hsmm(X_list)
-                else:
-                    self._model.fit(X_list)
+                self._model.fit(X_list)
                 # Success — restore original seed for reproducibility and return
                 self.random_state = original_seed
                 del self._kmeans_stats
@@ -149,9 +161,6 @@ class BasePomegranateHMM(ABC):
 
         X = self._preprocess_input(X)
 
-        if self._is_hsmm:
-            return self._predict_hsmm(X)
-
         if self.inference_mode == InferenceMode.VITERBI:
             predictions = self._model.predict([X]).flatten()
             # Convert torch tensor to numpy
@@ -167,21 +176,6 @@ class BasePomegranateHMM(ABC):
             if isinstance(proba, np.ndarray) and proba.ndim == 3 and proba.shape[0] == 1:
                 proba = proba[0]
             return np.argmax(proba, axis=1)
-        else:
-            raise ValueError(f"Unknown inference_mode: {self.inference_mode}")
-
-    def _predict_hsmm(self, X: np.ndarray) -> np.ndarray:
-        """HSMM prediction dispatch based on inference_mode."""
-        from .hsmm_inference import hsmm_filter, hsmm_forward_backward, hsmm_viterbi
-        log_emissions = self._compute_log_emissions(X)
-        if self.inference_mode == InferenceMode.VITERBI:
-            return hsmm_viterbi(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-        elif self.inference_mode == InferenceMode.FILTERING:
-            gamma = hsmm_filter(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-            return np.argmax(gamma, axis=1)
-        elif self.inference_mode == InferenceMode.SMOOTHING:
-            result = hsmm_forward_backward(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-            return np.argmax(result.state_posteriors, axis=1)
         else:
             raise ValueError(f"Unknown inference_mode: {self.inference_mode}")
 
@@ -204,9 +198,6 @@ class BasePomegranateHMM(ABC):
                 "Use predict() instead, or set inference_mode to FILTERING or SMOOTHING."
             )
 
-        if self._is_hsmm:
-            return self._predict_proba_hsmm(X)
-
         if self.inference_mode == InferenceMode.FILTERING:
             return self._predict_proba_filtered(X)
         elif self.inference_mode == InferenceMode.SMOOTHING:
@@ -216,18 +207,6 @@ class BasePomegranateHMM(ABC):
             if isinstance(proba, np.ndarray) and proba.ndim == 3 and proba.shape[0] == 1:
                 proba = proba[0]
             return proba
-        else:
-            raise ValueError(f"Unknown inference_mode: {self.inference_mode}")
-
-    def _predict_proba_hsmm(self, X: np.ndarray) -> np.ndarray:
-        """HSMM predict_proba dispatch."""
-        from .hsmm_inference import hsmm_filter, hsmm_forward_backward
-        log_emissions = self._compute_log_emissions(X)
-        if self.inference_mode == InferenceMode.FILTERING:
-            return hsmm_filter(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-        elif self.inference_mode == InferenceMode.SMOOTHING:
-            result = hsmm_forward_backward(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-            return result.state_posteriors
         else:
             raise ValueError(f"Unknown inference_mode: {self.inference_mode}")
 
@@ -246,9 +225,6 @@ class BasePomegranateHMM(ABC):
         # Remove batch dimension if present
         if log_probs.ndim == 3 and log_probs.shape[0] == 1:
             log_probs = log_probs[0]
-
-        # Normalize to get probabilities
-        from scipy.special import logsumexp
 
         filtered_probs = np.exp(log_probs - logsumexp(log_probs, axis=1, keepdims=True))
 
@@ -277,12 +253,6 @@ class BasePomegranateHMM(ABC):
             raise RuntimeError("Model has not been fitted yet.")
         X = self._preprocess_input(X)
 
-        if self._is_hsmm:
-            from .hsmm_inference import hsmm_forward
-            log_emissions = self._compute_log_emissions(X)
-            _, _, ll = hsmm_forward(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-            return float(ll)
-
         ll = self._model.log_probability([X])
         if hasattr(ll, "sum"):
             ll = ll.sum()
@@ -291,15 +261,9 @@ class BasePomegranateHMM(ABC):
         return float(ll)
 
     def transition_prob(self) -> np.ndarray:
-        """Transition matrix (n_states, n_states).
-
-        For HSMM: returns the zero-diagonal jump matrix.
-        """
+        """Transition matrix (n_states, n_states)."""
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
-
-        if self._is_hsmm:
-            return np.exp(self._hsmm_log_trans)
 
         edges = self._model.edges
 
@@ -351,12 +315,6 @@ class BasePomegranateHMM(ABC):
         if n_steps < 1:
             raise ValueError("n_steps must be at least 1")
 
-        if self._is_hsmm:
-            raise NotImplementedError(
-                "forecast() is not yet supported for HSMM. Matrix-powering the jump matrix ignores "
-                "duration dynamics entirely. Simulation-based forecast is planned for Phase 3."
-            )
-
         # Start with one-hot encoding of current regime
         current_state = np.zeros(self.n_states)
         current_state[current_regime] = 1.0
@@ -392,9 +350,6 @@ class BasePomegranateHMM(ABC):
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
 
-        if self._is_hsmm:
-            return self._hsmm_stationary_distribution()
-
         trans_mat = self.transition_prob()
 
         # Find stationary distribution by computing eigenvector
@@ -409,46 +364,6 @@ class BasePomegranateHMM(ABC):
         stationary = stationary / stationary.sum()
 
         return stationary
-
-    def _hsmm_stationary_distribution(self) -> np.ndarray:
-        """HSMM stationary: pi_j = pi_embedded_j * E[D_j] / sum_k(pi_embedded_k * E[D_k])."""
-        N = self.n_states
-        jump_mat = np.exp(self._hsmm_log_trans)
-
-        if N == 2:
-            # N=2 special case: jump matrix is [[0,1],[1,0]], pi_embedded = [0.5, 0.5]
-            pi_embedded = np.array([0.5, 0.5])
-        else:
-            from scipy.linalg import eig
-            eigenvalues, eigenvectors = eig(jump_mat.T)
-
-            # Find real eigenvalues near 1
-            real_mask = np.abs(eigenvalues.imag) < 1e-10
-            real_eigs = eigenvalues[real_mask].real
-            near_one = np.abs(real_eigs - 1.0) < 1e-6
-            if near_one.sum() > 1:
-                raise RuntimeError("Multiple unit eigenvalues detected — embedded chain is reducible. "
-                                   "The stationary distribution is not unique.")
-            if near_one.sum() == 0:
-                raise RuntimeError(f"No real eigenvalue near 1 found. Eigenvalues: {eigenvalues}")
-
-            # Get eigenvector for the eigenvalue closest to 1 among real eigenvalues
-            real_indices = np.where(real_mask)[0]
-            closest_idx = real_indices[np.argmin(np.abs(real_eigs - 1.0))]
-            pi_embedded = np.real(eigenvectors[:, closest_idx])
-
-            if np.any(pi_embedded < -1e-8):
-                raise RuntimeError("Stationary distribution solver produced negative entries. The embedded "
-                                   "transition matrix may be reducible (some states are unreachable). "
-                                   "Inspect transition_prob() for structural issues.")
-            pi_embedded = np.maximum(pi_embedded, 0.0)
-            pi_embedded /= pi_embedded.sum()
-
-        # Weight by expected durations
-        expected_durs = np.array([self.duration_model.expected_duration(j) for j in range(N)])
-        pi = pi_embedded * expected_durs
-        pi /= pi.sum()
-        return pi
 
     def expected_duration(self, regime: int) -> float:
         """
@@ -479,9 +394,6 @@ class BasePomegranateHMM(ABC):
         if not (0 <= regime < self.n_states):
             raise ValueError(f"regime must be between 0 and {self.n_states-1}")
 
-        if self._is_hsmm:
-            return self.duration_model.expected_duration(regime)
-
         trans_mat = self.transition_prob()
 
         # Expected duration = 1 / (1 - self_transition_probability)
@@ -491,106 +403,6 @@ class BasePomegranateHMM(ABC):
             return np.inf
 
         return 1.0 / (1.0 - self_transition_prob)
-
-    # ------------------------------------------------------------------
-    # HSMM-only public methods
-    # ------------------------------------------------------------------
-    def duration_parameters(self) -> list[dict]:
-        """Per-state duration parameter dicts.
-
-        Returns a list of length ``n_states``, each containing the
-        duration distribution's parameters for that state.
-
-        Raises ``RuntimeError`` when ``duration_model is None``.
-        """
-        if self.duration_model is None:
-            raise RuntimeError("duration_parameters() requires a fitted HSMM (duration_model is None).")
-        params = self.duration_model.get_params()
-        result = []
-        for j in range(self.n_states):
-            state_params: dict = {"state": j, "expected_duration": self.duration_model.expected_duration(j)}
-            # Extract per-state scalars from the full param arrays
-            for key, val in params.items():
-                if key in ("n_states", "max_duration"):
-                    continue
-                if isinstance(val, np.ndarray):
-                    if val.ndim == 1 and len(val) == self.n_states:
-                        state_params[key] = float(val[j])
-                    elif val.ndim == 2 and val.shape[0] == self.n_states:
-                        state_params[key] = val[j].tolist()
-            result.append(state_params)
-        return result
-
-    def duration_pmf(self, state: int) -> np.ndarray:
-        """Full duration PMF vector for a given state (linear-domain).
-
-        Returns shape ``(max_duration,)`` where index ``i`` is
-        ``P(duration = i + 1 | state)``.
-
-        Raises ``RuntimeError`` when ``duration_model is None``.
-        """
-        if self.duration_model is None:
-            raise RuntimeError("duration_pmf() requires a fitted HSMM (duration_model is None).")
-        if not (0 <= state < self.n_states):
-            raise ValueError(f"state must be between 0 and {self.n_states - 1}")
-        return np.exp(self.duration_model.log_pmf(state))
-
-    def predict_duration_info(self, X: np.ndarray) -> pd.DataFrame:
-        """Segment boundaries, durations, and state assignments.
-
-        Runs Viterbi decoding and extracts contiguous state segments.
-
-        Returns a DataFrame with columns:
-        ``state``, ``start``, ``end``, ``duration``.
-
-        Raises ``RuntimeError`` when ``duration_model is None``.
-        """
-        if self.duration_model is None:
-            raise RuntimeError("predict_duration_info() requires a fitted HSMM (duration_model is None).")
-        if self._model is None:
-            raise RuntimeError("Model has not been fitted yet.")
-
-        X = self._preprocess_input(X)
-        from .hsmm_inference import hsmm_viterbi
-        log_emissions = self._compute_log_emissions(X)
-        states = hsmm_viterbi(log_emissions, self._hsmm_log_trans, self._hsmm_log_init, self.duration_model)
-
-        segments: list[dict] = []
-        current_state = int(states[0])
-        start = 0
-        for t in range(1, len(states)):
-            if states[t] != current_state:
-                segments.append({"state": current_state, "start": start, "end": t - 1, "duration": t - start})
-                current_state = int(states[t])
-                start = t
-        segments.append({"state": current_state, "start": start, "end": len(states) - 1, "duration": len(states) - start})
-
-        return pd.DataFrame(segments)
-
-    def plot_duration_distributions(self, ax=None, figsize: tuple = (10, 5)):
-        """Plot fitted duration PMFs for all states.
-
-        Raises ``RuntimeError`` when ``duration_model is None``.
-        """
-        if self.duration_model is None:
-            raise RuntimeError("plot_duration_distributions() requires a fitted HSMM (duration_model is None).")
-
-        import matplotlib.pyplot as plt
-        if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
-
-        M = self.duration_model.max_duration
-        u = np.arange(1, M + 1)
-        for j in range(self.n_states):
-            pmf = np.exp(self.duration_model.log_pmf(j))
-            exp_dur = self.duration_model.expected_duration(j)
-            ax.plot(u, pmf, label=f"State {j} (E[D]={exp_dur:.1f})")
-
-        ax.set_xlabel("Duration")
-        ax.set_ylabel("P(duration)")
-        ax.set_title("HSMM Duration Distributions")
-        ax.legend()
-        return ax
 
     # ------------------------------------------------------------------
     # Fixed-lag smoothing
@@ -605,12 +417,6 @@ class BasePomegranateHMM(ABC):
         """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
-        if self._is_hsmm:
-            raise NotImplementedError(
-                "Fixed-lag smoothing is not supported for HSMM. The segment-based forward-backward "
-                "has structurally different backward recursion (duration-dependent segments, not "
-                "single-step transitions)."
-            )
         log_B = self._compute_log_emissions(X)
 
         def _to_log_numpy(param):
@@ -684,35 +490,53 @@ class BasePomegranateHMM(ABC):
         log_pi, log_A, log_B = self._extract_hmm_parameters(X)
         T, K = log_B.shape
 
-        # --- Forward pass (single pass over full sequence) ---
+        # --- Forward pass (single sequential pass over full sequence) ---
+        # np.logaddexp.reduce replaces scipy.logsumexp on the tiny (K,K) slice;
+        # it handles -inf transitions correctly and avoids per-step Python dispatch overhead.
         log_alpha = np.empty((T, K), dtype=np.float64)
         log_alpha[0] = log_pi + log_B[0]
         for t in range(1, T):
-            log_alpha[t] = logsumexp(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+            log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
 
-        # --- Truncated backward pass (isolated per timestep, open-end) ---
-        # log_beta always starts at 0 (uniform): no terminal conditioning.
-        # This is the streaming invariant — we never assume the sequence ends.
-        posteriors = np.empty((T, K), dtype=np.float64)
-        for t in range(T):
-            log_beta = np.zeros(K, dtype=np.float64)
-            end = min(t + lag, T - 1)
-            for s in range(end, t, -1):
-                log_beta = logsumexp(log_A + log_B[s] + log_beta, axis=1)
-            log_posterior = log_alpha[t] + log_beta
-            log_posterior -= logsumexp(log_posterior)
-            posteriors[t] = np.exp(log_posterior)
+        # --- Vectorized backward sweep via diagonal recurrence ---
+        # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])
+        # Base:     log_beta[t, 0]   = 0  for all t (uniform — no backward info)
+        # Boundary: log_beta[T-1, L] = 0  for all L (nothing after the last bar)
+        # Open-end invariant: backward messages never assume a known terminal state.
+        lB_next = log_B[1:]  # (T-1, K): emission at t+1 for each t in [0, T-2]
+        prev_col = np.zeros((T, K), dtype=np.float64)  # log_beta[:, 0]
 
-        return posteriors
+        # Backward messages saturate once L >= T-1: no new observations can be added
+        # beyond the sequence boundary, so lags > T-1 produce identical posteriors.
+        effective_lag = min(lag, T - 1)
+        for L in range(1, effective_lag + 1):
+            rhs = lB_next + prev_col[1:]  # (T-1, K): log_B[t+1] + log_beta[t+1, L-1]
+            curr_col = np.zeros((T, K), dtype=np.float64)  # boundary: log_beta[T-1, L] = 0
+            curr_col[:T - 1] = logsumexp(log_A[np.newaxis, :, :] + rhs[:, np.newaxis, :], axis=2)
+            prev_col = curr_col
 
-    def predict_proba_fixed_lag_sweep(self, X: np.ndarray, lags: list[int]) -> dict[int, np.ndarray]:
-        """Compute fixed-lag posteriors for multiple lags, sharing forward pass and emissions.
+        log_posterior = log_alpha + prev_col  # (T, K)
+        log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+        return np.exp(log_posterior - log_norm)
 
-        Shares the forward pass and emission extraction across all lags, avoiding
-        redundant O(T*K^2) work. However, the per-lag backward pass (O(T*L*K^2))
-        dominates runtime, so wall-clock speedup over individual calls is marginal.
-        The primary benefit is guaranteed numerical consistency across lags
-        (identical forward variables).
+    def predict_proba_fixed_lag_sweep(self, X: np.ndarray, lags: list[int],
+                                      window_size: Optional[int] = None) -> dict[int, np.ndarray]:
+        """Compute fixed-lag posteriors for multiple lags.
+
+        Modes
+        -----
+        Full-history mode (default, window_size=None):
+            Shares the forward pass and emission extraction across all lags,
+            avoiding redundant O(T*K^2) work.
+
+        Bounded-history mode (window_size=W):
+            Emulates a fixed-size live buffer without carrying forward state.
+            For each target timestep t and lag L, the posterior is computed on
+            observations restricted to:
+                [max(0, min(t+L, T-1)-W+1) .. min(t+L, T-1)]
+            This intentionally differs from full-history inference and produces
+            an approximate backtest view aligned with finite-window live setups.
+            Runtime is higher than full-history mode.
 
         Parameters
         ----------
@@ -722,6 +546,10 @@ class BasePomegranateHMM(ABC):
             Lag values to compute. Each must be >= 0. Duplicates are removed
             and lags are processed in ascending order internally. The returned
             dict is keyed by lag value, so input ordering does not affect results.
+        window_size : int | None, default=None
+            If provided, restricts inference history to the most recent
+            `window_size` observations per as-of timestamp (fixed-size window
+            emulation). Must be >= 1.
 
         Returns
         -------
@@ -738,12 +566,22 @@ class BasePomegranateHMM(ABC):
             raise ValueError("X must not be empty")
         if not np.all(np.isfinite(X)):
             raise ValueError("X contains NaN or Inf values. Clean input data before calling fixed-lag smoothing.")
+        if window_size is not None:
+            if isinstance(window_size, bool):
+                raise ValueError("window_size must be an integer, got bool")
+            if not isinstance(window_size, (int, np.integer)):
+                raise ValueError(f"window_size must be an integer, got {type(window_size).__name__}")
+            if window_size < 1:
+                raise ValueError(f"window_size must be >= 1, got {window_size}")
         X = self._preprocess_input(X)
 
         result: dict[int, np.ndarray] = {}
 
-        # Separate lag=0 fast path from custom lags
-        custom_lags = []
+        # Fix 3: explicit check before iteration to give a clear API error
+        if not hasattr(lags, '__iter__'):
+            raise ValueError(f"lags must be an iterable of integers, got {type(lags).__name__}")
+
+        unique_lags: list[int] = []
         for lag in lags:
             if isinstance(lag, bool):
                 raise ValueError(f"lag must be an integer, got bool")
@@ -751,35 +589,98 @@ class BasePomegranateHMM(ABC):
                 raise ValueError(f"lag must be an integer, got {type(lag).__name__}")
             if lag < 0:
                 raise ValueError(f"lag must be >= 0, got {lag}")
-            if lag == 0:
-                result[0] = self._predict_proba_filtered(X)
-            else:
-                custom_lags.append(lag)
+            unique_lags.append(int(lag))
 
-        # Deduplicate to avoid redundant backward computation
-        custom_lags = sorted(set(custom_lags))
+        # Deduplicate to avoid redundant computation
+        unique_lags = sorted(set(unique_lags))
 
-        if not custom_lags:
+        if not unique_lags:
             return result
 
-        # Shared extraction and forward pass for all custom lags
+        # Fix 1: validate windowed-mode constraint before any computation.
+        # When lag >= window_size, start = end - window_size + 1 > t, making
+        # local_t = t - start negative — a silent wrong-index bug.
+        if window_size is not None:
+            violating = [lag for lag in unique_lags if lag >= window_size]
+            if violating:
+                raise ValueError(
+                    f"In windowed mode every lag must be less than window_size. "
+                    f"Got window_size={window_size} but lag(s) {violating} >= window_size. "
+                    f"The observation window must contain the target timestep."
+                )
+
+        if window_size is None:
+            if 0 in unique_lags:
+                result[0] = self._predict_proba_filtered(X)
+            custom_lags = [lag for lag in unique_lags if lag != 0]
+            if not custom_lags:
+                return result
+            # Shared extraction and forward pass for all custom lags
+            log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+            T, K = log_B.shape
+
+            log_alpha = np.empty((T, K), dtype=np.float64)
+            log_alpha[0] = log_pi + log_B[0]
+            for t in range(1, T):
+                log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+
+            # Incremental vectorized backward sweep via diagonal recurrence.
+            # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])
+            # Base:     log_beta[t, 0]   = 0  for all t (uniform — no backward info)
+            # Boundary: log_beta[T-1, L] = 0  for all L (nothing after the last bar)
+            # Each lag column costs one numpy op on (T-1, K, K) — no Python loop over T.
+            #
+            # Saturation: once L >= T-1, boundary conditions have propagated to every
+            # timestep — further columns are identical, so we cap at T-1.
+            lB_next = log_B[1:]  # (T-1, K): emission at t+1 for each t in [0, T-2]
+            prev_col = np.zeros((T, K), dtype=np.float64)  # log_beta[:, 0]
+            custom_lags_set = set(custom_lags)
+            effective_max_lag = min(custom_lags[-1], T - 1)
+
+            for L in range(1, effective_max_lag + 1):
+                rhs = lB_next + prev_col[1:]  # (T-1, K): log_B[t+1] + log_beta[t+1, L-1]
+                curr_col = np.zeros((T, K), dtype=np.float64)  # boundary: log_beta[T-1, L] = 0
+                curr_col[:T - 1] = logsumexp(log_A[np.newaxis, :, :] + rhs[:, np.newaxis, :], axis=2)
+
+                if L in custom_lags_set:
+                    log_posterior = log_alpha + curr_col  # (T, K)
+                    log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+                    result[L] = np.exp(log_posterior - log_norm)
+
+                prev_col = curr_col
+
+            # Lags beyond T-1 saturate to the same posteriors as effective_max_lag.
+            saturated_lags = [lag for lag in custom_lags if lag > T - 1]
+            if saturated_lags:
+                log_posterior = log_alpha + prev_col
+                log_norm = logsumexp(log_posterior, axis=1, keepdims=True)
+                sat_posteriors = np.exp(log_posterior - log_norm)
+                for lag in saturated_lags:
+                    result[lag] = sat_posteriors
+            return result
+
+        # Bounded-history mode: explicit fixed-window recomputation per as-of timestamp.
         log_pi, log_A, log_B = self._extract_hmm_parameters(X)
         T, K = log_B.shape
 
-        log_alpha = np.empty((T, K), dtype=np.float64)
-        log_alpha[0] = log_pi + log_B[0]
-        for t in range(1, T):
-            log_alpha[t] = logsumexp(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
-
-        # Per-lag backward passes (isolated per timestep, open-end)
-        for lag in custom_lags:
+        for lag in unique_lags:
             posteriors = np.empty((T, K), dtype=np.float64)
             for t in range(T):
-                log_beta = np.zeros(K, dtype=np.float64)
                 end = min(t + lag, T - 1)
-                for s in range(end, t, -1):
-                    log_beta = logsumexp(log_A + log_B[s] + log_beta, axis=1)
-                log_posterior = log_alpha[t] + log_beta
+                start = max(0, end - window_size + 1)
+                window_log_B = log_B[start:end + 1]
+                local_t = t - start
+
+                log_alpha = np.empty((window_log_B.shape[0], K), dtype=np.float64)
+                log_alpha[0] = log_pi + window_log_B[0]
+                for j in range(1, window_log_B.shape[0]):
+                    log_alpha[j] = np.logaddexp.reduce(log_alpha[j - 1, :, np.newaxis] + log_A, axis=0) + window_log_B[j]
+
+                log_beta = np.zeros(K, dtype=np.float64)
+                for s in range(window_log_B.shape[0] - 1, local_t, -1):
+                    log_beta = logsumexp(log_A + window_log_B[s] + log_beta, axis=1)
+
+                log_posterior = log_alpha[local_t] + log_beta
                 log_posterior -= logsumexp(log_posterior)
                 posteriors[t] = np.exp(log_posterior)
             result[lag] = posteriors
@@ -819,18 +720,8 @@ class BasePomegranateHMM(ABC):
             "posterior_delta": posterior_delta,
         }
 
-    # ------------------------------------------------------------------
-    # HSMM helpers
-    # ------------------------------------------------------------------
-    def _fit_hsmm(self, X_list: list[np.ndarray]) -> None:
-        """Run HSMM EM via HSMMEMFitter."""
-        from .hsmm_em import HSMMEMFitter
-        fitter = HSMMEMFitter(model=self._model, duration_model=self.duration_model, max_iter=self.max_iter,
-                              random_state=self.random_state)
-        self._model, self.duration_model, self._hsmm_log_trans, self._hsmm_log_init, _ = fitter.fit(X_list)
-
     def _preprocess_input(self, X: np.ndarray) -> np.ndarray:
-        """Shared input preprocessing for both HMM and HSMM paths."""
+        """Shared input preprocessing."""
         if isinstance(X, pd.DataFrame):
             X = X.values
         X = np.asarray(X)
@@ -981,10 +872,14 @@ class BasePomegranateHMM(ABC):
             buffer = io.BytesIO(state["_model_bytes"])
             state["_model"] = joblib.load(buffer)
             del state["_model_bytes"]
-        # Backward compat: old models without duration_model
-        state.setdefault("duration_model", None)
-        state.setdefault("_hsmm_log_trans", None)
-        state.setdefault("_hsmm_log_init", None)
+        # Reject models serialized with HSMM state — they cannot run correctly
+        # after HSMM inference paths were removed.
+        hsmm_keys = frozenset({"duration_model", "_hsmm_log_trans", "_hsmm_log_init"}) & state.keys()
+        if hsmm_keys:
+            raise RuntimeError(
+                "Cannot load a model serialized with HSMM state: HSMM support has been removed. "
+                f"Legacy state keys found: {sorted(hsmm_keys)}. Re-train and re-save the model."
+            )
         self.__dict__.update(state)
 
     def save(self, path: str) -> None:

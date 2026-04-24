@@ -32,17 +32,9 @@ def triple_ema(series: pd.Series, p1: int = 1, p2: int = 1, p3: int = 1) -> pd.S
     return e3
 
 
-def true_strength_index(
-        series: Union[pd.Series, np.ndarray, list],
-        r: int = 25,
-        s: int = 13,
-        signal: int = 7,
-        as_percent: bool = False,
-        fillna: bool = False,
-        is_series_returns: bool = False,
-) -> Union[
-    Tuple[pd.Series, pd.Series, pd.Series], Tuple[np.ndarray, np.ndarray, np.ndarray]
-]:
+def true_strength_index(series: Union[pd.Series, np.ndarray, list], r: int = 25, s: int = 13, signal: int = 7,
+                        as_percent: bool = False, fillna: bool = False, is_series_returns: bool = False) -> Union[
+Tuple[pd.Series, pd.Series, pd.Series], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
     Compute the True Strength Index (TSI) by William Blau.
 
@@ -136,15 +128,8 @@ def true_strength_index(
         return tsi, sig, tsi - signal
 
 
-def slope_divergence_tsi(
-        series: pd.Series,
-        r: int = 25,
-        s: int = 13,
-        signal: int = 7,
-        slope_period: int = 3,
-        is_series_returns: bool = False,
-        method: str = "diff",
-):
+def slope_divergence_tsi(series: pd.Series, r: int = 25, s: int = 13, signal: int = 7,
+                         slope_period: int = 3, is_series_returns: bool = False, method: str = "diff"):
     """
     Compute Slope Divergence of TSI (SDTSI) by William Blau.
 
@@ -172,14 +157,8 @@ def slope_divergence_tsi(
         Columns: ["tsi", "tsi_signal", "tsi_diff", "tsi_slope", "bullish_div", "bearish_div"]
     """
     # get TSI
-    tsi, tsi_signal, tsi_diff = true_strength_index(
-        series,
-        r=r,
-        s=s,
-        signal=signal,
-        as_percent=True,
-        is_series_returns=is_series_returns,
-    )
+    tsi, tsi_signal, tsi_diff = true_strength_index(series, r=r, s=s, signal=signal, as_percent=True,
+                                                    is_series_returns=is_series_returns)
     if method == "diff":
         slope = tsi.diff(periods=slope_period)
     elif method == "ols":
@@ -196,25 +175,13 @@ def slope_divergence_tsi(
         raise ValueError("method must be 'diff' or 'ols'")
 
     # divergence flags
-    bullish_div = ((series.diff() < 0) & (slope > 0)).astype(
-        int
-    )  # price down, tsi slope up
-    bearish_div = ((series.diff() > 0) & (slope < 0)).astype(
-        int
-    )  # price up, tsi slope down
+    bullish_div = ((series.diff() < 0) & (slope > 0)).astype(int)  # price down, tsi slope up
+    bearish_div = ((series.diff() > 0) & (slope < 0)).astype(int)  # price up, tsi slope down
     return tsi, tsi_signal, tsi_diff, slope, bullish_div, bearish_div
 
 
-def stochastic_momentum_index(
-        high: pd.Series,
-        low: pd.Series,
-        close: pd.Series,
-        k_period: int = 14,
-        r: int = 3,
-        s: int = 3,
-        signal: int = 3,
-        as_percent: bool = True,
-):
+def stochastic_momentum_index(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14,
+                              r: int = 3, s: int = 3, signal: int = 3, as_percent: bool = True):
     """
     Compute William Blau's Stochastic Momentum Index (SMI).
 
@@ -270,21 +237,9 @@ def stochastic_momentum_index(
     return smi, smi_signal, smi - smi_signal
 
 
-import pandas as pd
-import numpy as np
-from typing import Tuple
-
-
-def directional_trend_index_blau(
-        high: pd.Series,
-        low: pd.Series,
-        q: int = 2,
-        r: int = 20,
-        s: int = 5,
-        u: int = 3,
-        signal: int | None = None,
-        as_percent: bool = True,
-) -> Tuple[pd.Series, pd.Series | None, pd.Series | None]:
+def directional_trend_index(high: pd.Series, low: pd.Series, q: int = 2, r: int = 20, s: int = 5, u: int = 3,
+                                 signal: int | None = None,
+                                 as_percent: bool = True) -> Tuple[pd.Series, pd.Series | None, pd.Series | None]:
     """
     William Blau Directional Trend Index (DTI), based on Composite High/Low Momentum (HLM).
 
@@ -321,9 +276,7 @@ def directional_trend_index_blau(
     delta_low = low - prev_low
 
     hmu = delta_high.where(delta_high > 0, 0.0)  # Up trend momentum
-    lmd = (-delta_low).where(
-        delta_low < 0, 0.0
-    )  # Down trend momentum (positive values)
+    lmd = (-delta_low).where(delta_low < 0, 0.0)  # Down trend momentum (positive values)
 
     hlm = hmu - lmd  # composite High/Low Momentum (can be positive or negative)
 
@@ -348,27 +301,17 @@ def directional_trend_index_blau(
     return dti, dti_signal, dti_diff
 
 
-def directional_efficiency_index(
-        high: pd.Series,
-        low: pd.Series,
-        close: pd.Series,
-        r: int = 14,
-        s: int = 14,
-        signal: int = 9,
-        as_percent: bool = True,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
+def directional_efficiency_index(high: pd.Series, low: pd.Series, close: pd.Series, r: int = 14, s: int = 14,
+                                 signal: int = 9, as_percent: bool = False) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     Directional Efficiency Index (DEI)
     ----------------------------------
 
-    A volatility-normalized directional strength oscillator inspired by
-    the smoothing philosophy of William Blau but distinct from his
-    canonical Directional Trend Index (DTI).
+    A volatility-normalized directional strength oscillator inspired by the smoothing philosophy of William Blau
+    but distinct from his canonical Directional Trend Index (DTI).
 
-    This indicator measures *how directionally efficient* recent price
-    movements have been relative to total volatility (True Range).
-    It applies double-EMA smoothing to both directional movement (DM)
-    and True Range (TR), then takes their ratio to produce a continuous
+    This indicator measures *how directionally efficient* recent price movements have been relative to total volatility (True Range).
+    It applies double-EMA smoothing to both directional movement (DM) and True Range (TR), then takes their ratio to produce a continuous
     signed trend-strength measure.
 
     ----------------------------------------------------------------------

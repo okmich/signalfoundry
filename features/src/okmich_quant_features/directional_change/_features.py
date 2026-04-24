@@ -170,9 +170,14 @@ def dc_live_features(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.
     if not (0 < alpha <= 1.0):
         raise ValueError(f"alpha must be in (0, 1], got {alpha}")
     if len(prices) < 2:
+        n = len(prices)
         return pd.DataFrame({
-            'tmv_current': np.nan, 't_current': np.nan, 'direction': np.nan,
-            'upward_dcc': False, 'downward_dcc': False, 'rdc_current': np.nan,
+            'tmv_current': np.full(n, np.nan),
+            't_current': np.full(n, np.nan),
+            'direction': np.full(n, np.nan),
+            'upward_dcc': np.zeros(n, dtype=np.bool_),
+            'downward_dcc': np.zeros(n, dtype=np.bool_),
+            'rdc_current': np.full(n, np.nan),
         }, index=prices.index)
     arr = prices.values.astype(np.float64)
     if not np.isfinite(arr).all():

@@ -16,15 +16,6 @@ class DistType(Enum):
     BERNOULLI = auto()
 
 
-class DurationType(StrEnum):
-    """Duration distribution family for HSMM explicit-duration modelling."""
-    POISSON = "poisson"
-    NEGBIN = "negbin"
-    GAMMA = "gamma"
-    LOGNORMAL = "lognormal"
-    NONPARAMETRIC = "nonparametric"
-
-
 class InferenceMode(StrEnum):
     """
     Inference mode for HMM predictions.
