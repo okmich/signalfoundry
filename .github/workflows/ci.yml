@@ -6,15 +6,50 @@ on:
   pull_request:
 
 jobs:
-  smoke:
+  build-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: okmich-quant-core
+            module: okmich_quant_core
+            tests: core/tests
+          - package: okmich-quant-features
+            module: okmich_quant_features
+            tests: features/tests
+          - package: okmich-quant-labelling
+            module: okmich_quant_labelling
+            tests: labelling/tests
+          - package: okmich-quant-ml
+            module: okmich_quant_ml
+            tests: ml/tests
+          - package: okmich-quant-neural-net
+            module: okmich_quant_neural_net
+            tests: neural-net/tests
+          - package: okmich-quant-pipeline
+            module: okmich_quant_pipeline
+            tests: pipeline/tests
+          - package: okmich-quant-research
+            module: okmich_quant_research
+            tests: research/tests
+          - package: okmich-quant-utils
+            module: okmich_quant_utils
+            tests: ""
+    name: build-test (${{ matrix.package }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
-      - name: Sync workspace packages
-        run: uv sync --all-packages
+      - name: Sync package
+        run: uv sync --locked --package ${{ matrix.package }}
+      - name: Build package
+        run: uv build --package ${{ matrix.package }} --wheel --out-dir dist/${{ matrix.package }}
       - name: Import smoke check
-        run: uv run python -c "import okmich_quant_features, okmich_quant_core; print('smoke-ok')"
+        run: |
+          uv run --locked --package ${{ matrix.package }} python -c "import ${{ matrix.module }}; print('smoke-ok: ${{ matrix.module }}')"
+      - name: Run tests
+        if: matrix.tests != ''
+        run: uv run --locked --package ${{ matrix.package }} pytest ${{ matrix.tests }}
