@@ -14,7 +14,7 @@ from ._misc import rolling_high_proximity, high_proximity, session_high_low_pct,
 from ._williamblau import true_strength_index, stochastic_momentum_index, slope_divergence_tsi, \
     directional_trend_index_blau, directional_efficiency_index
 
-from .david_varadi import aggregate_m, dvo, dv2
+from .david_varadi import aggregate_m, aggregate_m_components, dvo, dv2
 
 
 def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,

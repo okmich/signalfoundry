@@ -1,13 +1,22 @@
 import numpy as np
+import pytest
 
 from okmich_quant_ml.posterior_inference import (
     AbstainMode,
     ArgmaxInferer,
+    CompositeGateInferer,
     EmaPosteriorTransformer,
+    EntropyGateInferer,
     MarginGateInferer,
     PosteriorPipeline,
+    RollingMeanPosteriorTransformer,
+    dwell_length,
     entropy,
     margin,
+    rolling_entropy_std,
+    rolling_flip_rate,
+    rolling_max_prob_std,
+    step_kl,
 )
 
 
@@ -173,3 +182,180 @@ def test_pipeline_with_ema_transformer_and_margin_gate_inferer_runs_end_to_end()
 
     assert labels.shape == (len(probs),)
     assert labels.dtype.kind in {"i", "u"}
+
+
+def test_pipeline_with_rolling_mean_and_composite_gate_runs_end_to_end() -> None:
+    probs = np.array(
+        [
+            [0.85, 0.10, 0.05],
+            [0.70, 0.20, 0.10],
+            [0.05, 0.10, 0.85],
+            [0.10, 0.80, 0.10],
+            [0.33, 0.34, 0.33],
+        ],
+        dtype=float,
+    )
+    pipeline = PosteriorPipeline(
+        transformers=[RollingMeanPosteriorTransformer(window=2)],
+        inferer=CompositeGateInferer(theta_top=0.55, theta_margin=0.20, theta_entropy=0.80,
+                                     abstain_mode=AbstainMode.FLAT, abstain_label=-1),
+    )
+
+    labels = pipeline.run(probs)
+
+    assert labels.shape == (len(probs),)
+    assert labels.dtype.kind in {"i"}
+
+
+def test_pipeline_with_entropy_gate_only_runs_end_to_end() -> None:
+    probs = np.array(
+        [
+            [0.92, 0.05, 0.03],
+            [0.40, 0.30, 0.30],
+            [0.02, 0.96, 0.02],
+        ],
+        dtype=float,
+    )
+    pipeline = PosteriorPipeline(
+        transformers=[],
+        inferer=EntropyGateInferer(theta_entropy=0.40, abstain_mode=AbstainMode.FLAT, abstain_label=-1),
+    )
+
+    labels = pipeline.run(probs)
+
+    np.testing.assert_array_equal(labels, np.array([0, -1, 1], dtype=np.int64))
+
+
+def test_step_kl_is_zero_on_identical_rows() -> None:
+    probs = np.tile(np.array([0.3, 0.4, 0.3], dtype=float), (6, 1))
+    out = step_kl(probs)
+
+    assert out.shape == (6,)
+    assert out[0] == 0.0
+    np.testing.assert_allclose(out[1:], 0.0, atol=1e-12)
+
+
+def test_step_kl_grows_with_magnitude_of_shift() -> None:
+    probs = np.array(
+        [
+            [0.50, 0.30, 0.20],
+            [0.50, 0.30, 0.20],
+            [0.45, 0.35, 0.20],
+            [0.10, 0.10, 0.80],
+        ],
+        dtype=float,
+    )
+    out = step_kl(probs)
+
+    assert out[0] == 0.0
+    assert out[1] == pytest.approx(0.0, abs=1e-12)
+    assert out[2] > 0.0
+    assert out[3] > out[2]
+
+
+def test_step_kl_handles_zero_probability_in_prior_row() -> None:
+    probs = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.3, 0.4, 0.3],
+        ],
+        dtype=float,
+    )
+    out = step_kl(probs)
+
+    assert np.isfinite(out).all()
+    assert out[1] > 0.0
+
+
+def test_step_kl_rejects_non_matrix_input() -> None:
+    with pytest.raises(ValueError, match="step_kl requires"):
+        step_kl(np.array([0.5, 0.5], dtype=float))
+
+
+def test_rolling_flip_rate_is_zero_on_stable_argmax() -> None:
+    probs = np.tile(np.array([0.7, 0.2, 0.1], dtype=float), (8, 1))
+    out = rolling_flip_rate(probs, window=5)
+
+    assert out.shape == (8,)
+    np.testing.assert_allclose(out, 0.0)
+
+
+def test_rolling_flip_rate_saturates_on_alternating_argmax() -> None:
+    probs = np.array([[0.6, 0.4], [0.4, 0.6]] * 10, dtype=float)
+    out = rolling_flip_rate(probs, window=5)
+
+    # Steady state: every step flips, so the trailing flip rate saturates at 1.0
+    # once the window has slid past the initial zero-flip row.
+    assert out[-1] == pytest.approx(1.0)
+
+
+def test_rolling_flip_rate_rejects_bad_window() -> None:
+    probs = np.tile(np.array([0.5, 0.5], dtype=float), (5, 1))
+    with pytest.raises(ValueError, match="window must be >= 1"):
+        rolling_flip_rate(probs, window=0)
+
+
+def test_rolling_max_prob_std_is_zero_on_constant_top_prob() -> None:
+    probs = np.tile(np.array([0.7, 0.3], dtype=float), (10, 1))
+    out = rolling_max_prob_std(probs, window=4)
+
+    np.testing.assert_allclose(out, 0.0, atol=1e-12)
+
+
+def test_rolling_max_prob_std_is_positive_when_top_prob_varies() -> None:
+    probs = np.array([[0.9, 0.1], [0.6, 0.4], [0.9, 0.1], [0.6, 0.4], [0.9, 0.1]], dtype=float)
+    out = rolling_max_prob_std(probs, window=5)
+
+    assert out[-1] > 0.0
+
+
+def test_rolling_entropy_std_is_zero_on_flat_posterior_sequence() -> None:
+    probs = np.tile(np.array([0.5, 0.5], dtype=float), (6, 1))
+    out = rolling_entropy_std(probs, window=3)
+
+    np.testing.assert_allclose(out, 0.0, atol=1e-12)
+
+
+def test_dwell_length_increments_during_stable_run() -> None:
+    probs = np.tile(np.array([0.7, 0.3], dtype=float), (5, 1))
+    out = dwell_length(probs)
+
+    np.testing.assert_array_equal(out, np.array([1, 2, 3, 4, 5], dtype=np.int64))
+
+
+def test_dwell_length_resets_on_argmax_change() -> None:
+    probs = np.array(
+        [
+            [0.7, 0.3],
+            [0.7, 0.3],
+            [0.3, 0.7],
+            [0.3, 0.7],
+            [0.7, 0.3],
+        ],
+        dtype=float,
+    )
+    out = dwell_length(probs)
+
+    np.testing.assert_array_equal(out, np.array([1, 2, 1, 2, 1], dtype=np.int64))
+
+
+def test_dwell_length_handles_empty_input() -> None:
+    out = dwell_length(np.zeros((0, 3), dtype=float))
+
+    assert out.shape == (0,)
+    assert out.dtype == np.int64
+
+
+def test_dynamic_features_reject_nan_input() -> None:
+    bad = np.array([[0.5, 0.5], [0.5, np.nan]], dtype=float)
+
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        step_kl(bad)
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        rolling_flip_rate(bad, window=2)
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        rolling_max_prob_std(bad, window=2)
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        rolling_entropy_std(bad, window=2)
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        dwell_length(bad)
