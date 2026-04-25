@@ -39,6 +39,30 @@ def test_normal_inverse_gamma_detector_matches_reference_recursion() -> None:
     np.testing.assert_allclose(actual, expected, atol=1e-12)
 
 
+def test_truncated_detector_agrees_with_high_r_max_when_fold_mass_is_negligible() -> None:
+    """§10.1: when no posterior mass has reached the truncation bin, a small-``r_max``
+    detector and a much-larger-``r_max`` detector produce identical posteriors over
+    the columns the smaller one represents.
+
+    Construction: ``T = 50`` updates with ``r_max_small = 60`` and ``r_max_large = 200``.
+    Because the recursion only advances mass by one column per step (plus the cp jump
+    to column 0), after T updates posterior mass is supported on columns ``0..T``;
+    columns ``> T`` are exactly zero. This means the truncation bin of the smaller
+    detector has not yet been touched, so both detectors must agree on every column
+    of the smaller one.
+    """
+    rng = np.random.default_rng(seed=7)
+    xs = rng.standard_normal(50).astype(np.float64)
+
+    small = BayesianOnlineChangepointDetector(NormalInverseGammaModel(), hazard_rate=0.10, r_max=60)
+    large = BayesianOnlineChangepointDetector(NormalInverseGammaModel(), hazard_rate=0.10, r_max=200)
+
+    small_post = small.batch(xs)
+    large_post = large.batch(xs)
+
+    np.testing.assert_allclose(small_post, large_post[:, :60], atol=1e-12)
+
+
 def test_posterior_mean_run_length_drops_after_clean_mean_shift() -> None:
     xs = np.concatenate([np.zeros(60, dtype=np.float64), np.full(20, 5.0, dtype=np.float64)])
     detector = BayesianOnlineChangepointDetector(NormalInverseGammaModel(), hazard_rate=1.0 / 30.0, r_max=120)

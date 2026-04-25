@@ -103,6 +103,39 @@ def test_observation_models_reject_invalid_hyperparameters_and_observations() ->
         model.update(-1.0)
 
 
+def test_observation_model_banks_do_not_grow_past_r_max_under_long_streams() -> None:
+    """§10.5: feeding far more than ``r_max`` observations does not grow memory
+    beyond ``r_max`` hypotheses for any shipped observation model.
+
+    Drives 4 × ``r_max`` updates through each model and verifies every per-slot
+    sufficient-statistic array remains exactly ``(r_max,)`` in shape and ``float64``
+    in dtype.
+    """
+    r_max = 5
+    n_updates = 4 * r_max
+    xs = np.linspace(0.1, 1.0, n_updates, dtype=np.float64)
+
+    gaussian = GaussianKnownVarianceModel(mu_0=0.0, sigma0_sq=1.0, sigma_obs_sq=1.0)
+    nig = NormalInverseGammaModel()
+    gamma_exp = GammaExponentialModel(alpha_0=1.0, beta_0=1.0)
+
+    for model in (gaussian, nig, gamma_exp):
+        model.reset(r_max)
+        for x in xs:
+            model.update(float(x))
+
+    assert gaussian.mu_.shape == (r_max,) and gaussian.mu_.dtype == np.float64
+    assert gaussian.sigma_sq_.shape == (r_max,) and gaussian.sigma_sq_.dtype == np.float64
+
+    assert nig.mu_.shape == (r_max,) and nig.mu_.dtype == np.float64
+    assert nig.kappa_.shape == (r_max,) and nig.kappa_.dtype == np.float64
+    assert nig.alpha_.shape == (r_max,) and nig.alpha_.dtype == np.float64
+    assert nig.beta_.shape == (r_max,) and nig.beta_.dtype == np.float64
+
+    assert gamma_exp.alpha_.shape == (r_max,) and gamma_exp.alpha_.dtype == np.float64
+    assert gamma_exp.beta_.shape == (r_max,) and gamma_exp.beta_.dtype == np.float64
+
+
 def test_observation_models_require_reset_before_use() -> None:
     model = NormalInverseGammaModel()
     with pytest.raises(RuntimeError, match="reset"):

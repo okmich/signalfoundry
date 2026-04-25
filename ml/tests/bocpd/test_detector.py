@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from okmich_quant_ml.bocpd import BayesianOnlineChangepointDetector, NormalInverseGammaModel
+from okmich_quant_ml.bocpd import (
+    BayesianOnlineChangepointDetector,
+    GammaExponentialModel,
+    GaussianKnownVarianceModel,
+    NormalInverseGammaModel,
+)
 from okmich_quant_ml.posterior_inference import (
     AbstainMode,
     EmaPosteriorTransformer,
@@ -104,6 +109,43 @@ def test_detector_rejects_invalid_configuration_and_inputs() -> None:
     np.testing.assert_allclose(int_out, float_out)
     with pytest.raises(ValueError, match="one-dimensional"):
         detector.batch(np.ones((2, 2), dtype=np.float64))
+
+
+@pytest.mark.parametrize(
+    "model_factory,xs_factory",
+    [
+        (
+            lambda: GaussianKnownVarianceModel(mu_0=0.0, sigma0_sq=1.0, sigma_obs_sq=1.0),
+            lambda rng: rng.standard_normal(200).astype(np.float64),
+        ),
+        (
+            lambda: NormalInverseGammaModel(mu_0=0.0, kappa_0=1.0, alpha_0=1.0, beta_0=1.0),
+            lambda rng: rng.standard_normal(200).astype(np.float64),
+        ),
+        (
+            lambda: GammaExponentialModel(alpha_0=1.0, beta_0=1.0),
+            lambda rng: rng.exponential(scale=1.0, size=200).astype(np.float64),
+        ),
+    ],
+    ids=["gaussian_known_variance", "normal_inverse_gamma", "gamma_exponential"],
+)
+def test_run_length_posterior_is_simplex_valid_for_each_observation_model(model_factory, xs_factory) -> None:
+    """§10.2: every row of the posterior is on the simplex for every shipped observation model.
+
+    Asserts shape, dtype, finiteness, non-negativity, and unit row-sum (within 1e-9)
+    on distribution-appropriate random inputs across all three obs models.
+    """
+    rng = np.random.default_rng(seed=99)
+    xs = xs_factory(rng)
+    detector = BayesianOnlineChangepointDetector(model_factory(), hazard_rate=1 / 50, r_max=64)
+
+    posterior = detector.batch(xs)
+
+    assert posterior.shape == (200, 64)
+    assert posterior.dtype == np.float64
+    assert np.all(np.isfinite(posterior))
+    assert np.all(posterior >= 0.0)
+    np.testing.assert_allclose(posterior.sum(axis=1), 1.0, atol=1e-9)
 
 
 def test_posterior_pipeline_consumes_run_length_posterior_without_adapter() -> None:
