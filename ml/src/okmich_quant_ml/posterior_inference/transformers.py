@@ -6,6 +6,8 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize, minimize_scalar
 from scipy.special import logsumexp
 
+from .features import _validate_posterior_matrix
+
 
 @njit(cache=True)
 def _ema_recurrence(probs: np.ndarray, alpha: float) -> np.ndarray:
@@ -17,33 +19,6 @@ def _ema_recurrence(probs: np.ndarray, alpha: float) -> np.ndarray:
         for k in range(n_cols):
             out[i, k] = alpha * probs[i, k] + one_minus_alpha * out[i - 1, k]
     return out
-
-
-def _as_probability_matrix(probs: NDArray, eps: float = 1e-12, normalize: bool = True) -> NDArray:
-    """Validate a posterior matrix and optionally normalize rows to the simplex.
-
-    With ``normalize=True`` (default), the returned array is clipped to ``eps`` and
-    row-renormalised so downstream log-space computations are safe. With
-    ``normalize=False``, only the shape / NaN-Inf validation runs and the input
-    values pass through unchanged — use this for rearrangement transformers that
-    should not silently alter probabilities.
-    """
-    array = np.asarray(probs, dtype=float)
-    if array.ndim != 2:
-        raise ValueError(f"Expected posterior matrix with shape (T, K), got {array.shape}")
-    if array.shape[1] < 2:
-        raise ValueError(f"Expected at least 2 classes (K >= 2), got K={array.shape[1]}")
-    if array.size > 0 and not np.isfinite(array.sum()):
-        raise ValueError("Posterior matrix contains NaN or Inf values.")
-    if not normalize:
-        return array
-
-    clipped = np.clip(array, eps, None)
-    row_sums = clipped.sum(axis=1, keepdims=True)
-    if row_sums.size > 0 and row_sums.min() <= 0.0:
-        raise ValueError("Posterior rows must have strictly positive sums.")
-    clipped /= row_sums
-    return clipped
 
 
 def _scalar_nll(probs: NDArray, y_idx: NDArray, eps: float) -> float:
@@ -65,7 +40,7 @@ class EmaPosteriorTransformer:
             raise ValueError(f"eps must be > 0, got {self.eps}")
 
     def transform(self, probs: NDArray) -> NDArray:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "EmaPosteriorTransformer", eps=self.eps, normalize=True)
         if p.shape[0] == 0:
             return p
         out = _ema_recurrence(p, self.alpha)
@@ -91,7 +66,7 @@ class RollingMeanPosteriorTransformer:
             raise ValueError(f"eps must be > 0, got {self.eps}")
 
     def transform(self, probs: NDArray) -> NDArray:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "RollingMeanPosteriorTransformer", eps=self.eps, normalize=True)
         n_rows = p.shape[0]
         if n_rows == 0:
             return p
@@ -117,9 +92,8 @@ class RollingMeanPosteriorTransformer:
 class TemperatureScalingTransformer:
     """Post-hoc temperature scaling on posterior probabilities.
 
-    Calibration is specific to the posterior distribution it is fit on. Filtered
-    (``lag=0``) and matured (``lag > 0``) posteriors from the same HMM have different
-    entropy profiles, so a temperature fit on one regime applied to the other will
+    Calibration is specific to the posterior distribution it is fit on. Filtered (``lag=0``) and matured (``lag > 0``)
+    posteriors from the same HMM have different entropy profiles, so a temperature fit on one regime applied to the other will
     produce miscalibrated output. Always fit on the same lag regime used at inference.
 
     ``fit`` uses bounded Brent (``scipy.optimize.minimize_scalar``) over
@@ -136,7 +110,7 @@ class TemperatureScalingTransformer:
         self._validate_configuration()
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> TemperatureScalingTransformer:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "TemperatureScalingTransformer", eps=self.eps, normalize=True)
         y = np.asarray(y_idx, dtype=np.int64)
         if y.ndim != 1:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
@@ -159,7 +133,7 @@ class TemperatureScalingTransformer:
         return self
 
     def transform(self, probs: NDArray) -> NDArray:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "TemperatureScalingTransformer", eps=self.eps, normalize=True)
         return self._apply_temperature(p, self.temperature)
 
     def _apply_temperature(self, probs: NDArray, temperature: float) -> NDArray:
@@ -194,9 +168,8 @@ class PlattScalingTransformer:
     The identity parameters ``a = 1, b = 0`` reproduce the input posteriors exactly (up to floating-point renormalisation),
     so an un-fit transformer is a no-op. ``fit(probs, y_idx)`` minimises mean cross-entropy via L-BFGS-B using analytic gradients.
 
-    Calibration is specific to the posterior distribution it is fit on. Filtered
-    (``lag=0``) and matured (``lag > 0``) posteriors from the same HMM have different
-    entropy profiles, so parameters fit on one regime applied to the other will produce
+    Calibration is specific to the posterior distribution it is fit on. Filtered (``lag=0``) and matured (``lag > 0``)
+    posteriors from the same HMM have different entropy profiles, so parameters fit on one regime applied to the other will produce
     miscalibrated output. Always fit on the same lag regime used at inference.
     """
 
@@ -209,7 +182,7 @@ class PlattScalingTransformer:
         self._validate_configuration()
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> PlattScalingTransformer:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "PlattScalingTransformer", eps=self.eps, normalize=True)
         y = np.asarray(y_idx, dtype=np.int64)
         if y.ndim != 1:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
@@ -247,7 +220,7 @@ class PlattScalingTransformer:
         return self
 
     def transform(self, probs: NDArray) -> NDArray:
-        p = _as_probability_matrix(probs, eps=self.eps)
+        p = _validate_posterior_matrix(probs, "PlattScalingTransformer", eps=self.eps, normalize=True)
         n_classes = p.shape[1]
         a = self.a_ if self.a_ is not None else np.ones(n_classes)
         b = self.b_ if self.b_ is not None else np.zeros(n_classes)
@@ -272,18 +245,16 @@ class PlattScalingTransformer:
 class MaturationAlignTransformer:
     """Align a forward-looking posterior matrix to the timestamp it is actually available at.
 
-    ``predict_proba_fixed_lag(X, lag)`` returns row ``t`` = ``P(z_t | o_1..o_{t+lag})``. In live
-    trading, that posterior for time ``t`` cannot be observed until bar ``t + lag`` arrives,
-    so a decision made *at* time ``t`` must consume the posterior for time ``t - lag`` (the
-    row that was computable with data available up to ``t``).
+    ``predict_proba_fixed_lag(X, lag)`` returns row ``t`` = ``P(z_t | o_1..o_{t+lag})``. In live trading, that posterior
+    for time ``t`` cannot be observed until bar ``t + lag`` arrives, so a decision made *at* time ``t`` must consume the
+    posterior for time ``t - lag`` (the row that was computable with data available up to ``t``).
 
-    This transformer performs that shift: output row ``t`` = input row ``t - lag`` for
-    ``t >= lag``, and a uniform prior ``[1/K, ..., 1/K]`` for ``t < lag``. The result has
-    the same shape as the input and is safe to read by time index in a backtest without
-    leaking future information.
+    This transformer performs that shift: output row ``t`` = input row ``t - lag`` for ``t >= lag``, and a uniform prior
+    ``[1/K, ..., 1/K]`` for ``t < lag``. The result has the same shape as the input and is safe to read by time index in
+    a backtest without leaking future information.
 
-    Alignment is a pure rearrangement: the transformer does not clip or renormalize the
-    input, so degenerate posteriors (e.g. rows with exact zeros) survive unchanged.
+    Alignment is a pure rearrangement: the transformer does not clip or renormalize the input, so degenerate posteriors
+    (e.g. rows with exact zeros) survive unchanged.
     """
 
     def __init__(self, lag: int) -> None:
@@ -292,7 +263,7 @@ class MaturationAlignTransformer:
             raise ValueError(f"lag must be >= 0, got {self.lag}")
 
     def transform(self, probs: NDArray) -> NDArray:
-        p = _as_probability_matrix(probs, normalize=False)
+        p = _validate_posterior_matrix(probs, "MaturationAlignTransformer")
         T, K = p.shape
         out = np.empty((T, K), dtype=p.dtype)
         effective_lag = min(self.lag, T)

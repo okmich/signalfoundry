@@ -11,6 +11,7 @@ dependencies = [
     "pandas==2.3.0",
     "plotly>=6.5.2",
     "ruptures==1.1.10",
+    "tqdm==4.67.3",
     "tstrends==0.3.0",
     "xgboost==3.0.4",
 ]

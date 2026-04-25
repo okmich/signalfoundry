@@ -12,7 +12,7 @@ from ._misc import rolling_high_proximity, high_proximity, session_high_low_pct,
     lagged_delta_returns, pr_skip, sustained_velocity, exponential_velocity, velocity_magnitude, velocity_consistency
 
 from ._williamblau import true_strength_index, stochastic_momentum_index, slope_divergence_tsi, \
-    directional_trend_index_blau, directional_efficiency_index
+    directional_trend_index, directional_efficiency_index
 
 from .david_varadi import aggregate_m, aggregate_m_components, dvo, dv2
 
@@ -140,8 +140,8 @@ def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,
     result["smi_diff"] = smi_dif
 
     # Directional Trend Index
-    dti_val, dti_sig, dti_dif = directional_trend_index_blau(high_price, low_price, q=dti_q, r=dti_r, s=dti_s, u=dti_u,
-                                                             signal=dti_signal, as_percent=True)
+    dti_val, dti_sig, dti_dif = directional_trend_index(high_price, low_price, q=dti_q, r=dti_r, s=dti_s, u=dti_u,
+                                                        signal=dti_signal, as_percent=True)
     result["dti"] = dti_val
     if dti_sig is not None:
         result["dti_signal"] = dti_sig
