@@ -2257,6 +2257,7 @@ dependencies = [
     { name = "pydantic-core" },
     { name = "python-dateutil" },
     { name = "python-dotenv" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -2265,6 +2266,7 @@ requires-dist = [
     { name = "pydantic-core", specifier = "==2.33.2" },
     { name = "python-dateutil", specifier = ">=2.8.0" },
     { name = "python-dotenv", specifier = "==1.1.1" },
+    { name = "requests", specifier = ">=2.0.0" },
 ]
 
 [[package]]

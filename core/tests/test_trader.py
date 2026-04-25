@@ -2,24 +2,19 @@
 Tests for Trader class with single strategy.
 """
 
-import pytest
 from datetime import datetime
-from unittest.mock import Mock
 from okmich_quant_core.trader import Trader
 from okmich_quant_core.base_strategy import BaseStrategy
-
-
-class MockStrategyConfig:
-    """Mock strategy config for testing."""
-    def __init__(self, name):
-        self.name = name
+from okmich_quant_core.config import StrategyConfig
 
 
 class MockStrategy(BaseStrategy):
     """Mock strategy for testing."""
 
     def __init__(self, name="MockStrategy"):
-        self.strategy_config = MockStrategyConfig(name)
+        self.name = name
+        self.strategy_config = StrategyConfig(name=name, symbol="EURUSD", timeframe=1, magic=1)
+        self.notifier = None
         self.run_count = 0
         self.position_check_count = 0
         self.should_fail = False

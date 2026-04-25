@@ -5,13 +5,32 @@ from numpy.typing import NDArray
 from scipy.special import rel_entr, xlogy
 
 
-def _validate_posterior_matrix(probs: NDArray, func_name: str) -> NDArray:
+def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12,
+                               normalize: bool = False) -> NDArray:
+    """Validate a posterior matrix and optionally normalize rows onto the simplex.
+
+    With ``normalize=False`` (default), the returned array is the input cast to
+    ``float`` with no value-side mutation — use this for pure validation and for
+    rearrangement transformers that must not silently alter probabilities.
+
+    With ``normalize=True``, values are clipped to ``eps`` and each row is
+    rescaled to sum to 1. Use this for calibration / smoothing transformers that
+    need log-safe input.
+    """
     p = np.asarray(probs, dtype=float)
     if p.ndim != 2 or p.shape[1] < 2:
         raise ValueError(f"{func_name} requires posterior matrix (T, K) with K >= 2, got shape={p.shape}")
     if p.size > 0 and not np.isfinite(p.sum()):
         raise ValueError(f"{func_name}: posterior matrix contains NaN or Inf values.")
-    return p
+    if not normalize:
+        return p
+
+    clipped = np.clip(p, eps, None)
+    row_sums = clipped.sum(axis=1, keepdims=True)
+    if row_sums.size > 0 and row_sums.min() <= 0.0:
+        raise ValueError(f"{func_name}: posterior rows must have strictly positive sums.")
+    clipped /= row_sums
+    return clipped
 
 
 def _validate_window(window: int, func_name: str) -> None:
