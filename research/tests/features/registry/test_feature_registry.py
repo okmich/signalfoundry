@@ -265,8 +265,8 @@ class TestFilters:
 
     def test_causal_only(self, reg):
         result = reg.causal_only()
-        # All registered features should be causal
-        assert len(result) == len(reg)
+        assert all(e.causal for e in result)
+        assert len(result) == sum(1 for e in reg if e.causal)
 
     def test_needs_only_price(self, reg):
         result = reg.needs_only_price()

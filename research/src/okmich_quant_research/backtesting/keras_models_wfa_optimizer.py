@@ -199,8 +199,9 @@ class ModelWalkForwardAnalysisOptimizer(CheckpointingMixin, WindowGenerationMixi
                  checkpoint_dir: Optional[str] = None, transfer_learning: bool = False,
                  tuning_epochs: int = 10, tuning_val_split: float = 0.2, verbose: int = 1,
                  ensemble_size: int = 1, ensemble_method: str = "best", best_model_selection: str = "most_recent",
-                 best_model_metric: str = None, best_model_lookback: int = 3, early_stopping_patience: int = 3,
-                 early_stopping_min_delta: float = 0.001, track_feature_importance: bool = False, enable_memory_management: bool = True,
+                 best_model_metric: str = None, best_model_lookback: int = 3, enable_early_stopping: bool = True,
+                 early_stopping_patience: int = 3, early_stopping_min_delta: float = 0.001,
+                 track_feature_importance: bool = False, enable_memory_management: bool = True,
                  clear_session_between_windows: bool = True, detect_data_leakage: bool = True,
                  convergence_window_size: int = 3, convergence_threshold: float = 0.05):
 
@@ -258,6 +259,7 @@ class ModelWalkForwardAnalysisOptimizer(CheckpointingMixin, WindowGenerationMixi
         self.best_window_idx = None
         self.best_metric_value = -np.inf
 
+        self.enable_early_stopping = enable_early_stopping
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_min_delta = early_stopping_min_delta
         self.track_feature_importance = track_feature_importance
@@ -280,7 +282,7 @@ class ModelWalkForwardAnalysisOptimizer(CheckpointingMixin, WindowGenerationMixi
 
         self.log.info(f"Best model strategy: {best_model_selection}")
 
-        if self.early_stopping_patience > 1:
+        if self.enable_early_stopping and self.early_stopping_patience > 1:
             self.log.info(f"Early stopping enabled (patience={self.early_stopping_patience})")
         if self.track_feature_importance:
             self.log.info("Feature importance tracking enabled")
@@ -456,7 +458,7 @@ class ModelWalkForwardAnalysisOptimizer(CheckpointingMixin, WindowGenerationMixi
 
     def _get_early_stopping_callback(self) -> Optional[keras.callbacks.EarlyStopping]:
         """Create early stopping callback if enabled."""
-        if self.early_stopping_patience < 1:
+        if not self.enable_early_stopping or self.early_stopping_patience < 1:
             return None
         return keras.callbacks.EarlyStopping(monitor="val_loss", patience=self.early_stopping_patience,
                                              min_delta=self.early_stopping_min_delta, restore_best_weights=True,

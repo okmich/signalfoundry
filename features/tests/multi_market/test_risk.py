@@ -277,7 +277,7 @@ class TestRiskParameterGuards:
 
     # adx guard (in single/trend.py)
     def test_adx_period_zero_raises(self):
-        from okmich_quant_features.timothymasters.trend import adx
+        from okmich_quant_features.timothymasters.single.trend import adx
         close = np.ones(50)
         high = close + 0.5
         low = close - 0.5

@@ -8,12 +8,7 @@ import pandas as pd
 from pathlib import Path
 
 
-def convert_parquet_to_market_file(
-    parquet_path: str,
-    output_filename: str,
-    n_records: int = 1000,
-    skip_records: int = 0
-):
+def convert_parquet_to_market_file(parquet_path: str, output_filename: str, n_records: int = 1000, skip_records: int = 0):
     """
     Convert parquet data to C++ market file format.
 

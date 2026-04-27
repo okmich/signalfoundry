@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from okmich_quant_features.timothymasters.information import (
+from okmich_quant_features.timothymasters.single.information import (
     entropy,
     mutual_information,
 )

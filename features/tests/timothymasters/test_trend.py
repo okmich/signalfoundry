@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from okmich_quant_features.timothymasters.trend import (
+from okmich_quant_features.timothymasters.single.trend import (
     linear_trend,
     quadratic_trend,
     cubic_trend,

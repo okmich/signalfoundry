@@ -6,11 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_features.timothymasters import (
+from okmich_quant_features.timothymasters.utils.single_features_computer import (
     compute_features, list_indicators, list_groups,
     DEFAULT_PARAMS,
-)
-from okmich_quant_features.timothymasters.utils.single_features_computer import (
     ALL_INDICATORS,
     MOMENTUM_INDICATORS,
     TREND_INDICATORS,

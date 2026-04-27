@@ -11,26 +11,26 @@ import pytest
 from pathlib import Path
 
 # Import all Python implementations
-from okmich_quant_features.timothymasters.momentum import (
+from okmich_quant_features.timothymasters.single.momentum import (
     rsi, detrended_rsi, stochastic, stoch_rsi, ma_difference,
     macd, ppo, price_change_osc, close_minus_ma, price_intensity, reactivity
 )
-from okmich_quant_features.timothymasters.trend import (
+from okmich_quant_features.timothymasters.single.trend import (
     linear_trend, quadratic_trend, cubic_trend,
     linear_deviation, quadratic_deviation, cubic_deviation,
     adx, aroon_up, aroon_down, aroon_diff
 )
-from okmich_quant_features.timothymasters.variance import (
+from okmich_quant_features.timothymasters.single.variance import (
     price_variance_ratio, change_variance_ratio
 )
-from okmich_quant_features.timothymasters.volume import (
+from okmich_quant_features.timothymasters.single.volume import (
     intraday_intensity, money_flow, price_volume_fit, vwma_ratio,
     normalized_obv, delta_obv, normalized_pvi, normalized_nvi, volume_momentum
 )
-from okmich_quant_features.timothymasters.information import (
+from okmich_quant_features.timothymasters.single.information import (
     entropy, mutual_information
 )
-from okmich_quant_features.timothymasters.fti import (
+from okmich_quant_features.timothymasters.single.fti import (
     fti_lowpass, fti_best_width, fti_best_period, fti_best_fti
 )
 
@@ -39,6 +39,11 @@ from okmich_quant_features.timothymasters.fti import (
 CPP_EXECUTABLE = r"D:\practise\timothy-masters-indicators\executable_programs\SINGLE.exe"
 TEST_DATA_DIR = Path(__file__).parent / "test_data"
 SCRIPT_FILE = TEST_DATA_DIR / "all_indicators_clean.scr"
+
+pytestmark = pytest.mark.skipif(
+    not Path(CPP_EXECUTABLE).exists(),
+    reason="C++ reference SINGLE.exe not available (Windows-only local fixture)",
+)
 
 
 def load_market_data(filename):

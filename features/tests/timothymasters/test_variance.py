@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from okmich_quant_features.timothymasters.variance import (
+from okmich_quant_features.timothymasters.single.variance import (
     price_variance_ratio,
     change_variance_ratio,
 )

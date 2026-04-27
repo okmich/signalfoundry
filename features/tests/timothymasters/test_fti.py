@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from okmich_quant_features.timothymasters.fti import (
+from okmich_quant_features.timothymasters.single.fti import (
     fti_lowpass,
     fti_best_width,
     fti_best_period,

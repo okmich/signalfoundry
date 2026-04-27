@@ -1,16 +1,8 @@
 import numpy as np
 import pytest
-from okmich_quant_features.timothymasters.volume import (
-    intraday_intensity,
-    money_flow,
-    price_volume_fit,
-    vwma_ratio,
-    normalized_obv,
-    delta_obv,
-    normalized_pvi,
-    normalized_nvi,
-    volume_momentum,
-)
+
+from okmich_quant_features.timothymasters.single import intraday_intensity, money_flow, price_volume_fit, \
+    vwma_ratio,normalized_obv, delta_obv, normalized_pvi, normalized_nvi, volume_momentum
 
 
 class TestIntradayIntensity:

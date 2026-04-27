@@ -1,6 +1,4 @@
-﻿from pathlib import Path
-
-import pandas as pd
+﻿import pandas as pd
 import pytest
 
 from okmich_quant_research.backtesting.vectorbt_analytics import (
@@ -40,8 +38,11 @@ class TestConstructionValidation:
 
 
 class TestTimezoneAndSessionHandling:
-    def test_uses_utc_for_time_dimensions(self):
-        # 09:00 US/Eastern in January is 14:00 UTC
+    def test_hour_dow_use_source_tz_session_uses_utc(self):
+        # 09:00 US/Eastern in January is 14:00 UTC.
+        # hour/dow stay in source_tz so analytics align with the broker clock the
+        # live system reads; only `session` is UTC-anchored since session
+        # boundaries are defined against universal market hours.
         df = pd.DataFrame(
             {
                 "Entry Index": ["2024-01-02 09:00:00"],
@@ -53,7 +54,7 @@ class TestTimezoneAndSessionHandling:
         ta = VbtTradeAnalytics(df, source_tz="US/Eastern")
         row = ta._entry_df.iloc[0]
 
-        assert row["hour"] == 14
+        assert row["hour"] == 9
         assert row["dow"] == "Tuesday"
         assert row["session"] == "NY–London OL"
 
@@ -93,15 +94,11 @@ class TestAggregationsAndDashboard:
 
         assert cnt.loc["Monday", 9] == 2
 
-    def test_show_dashboard_handles_empty_trades(self):
+    def test_show_dashboard_handles_empty_trades(self, tmp_path):
         empty_df = pd.DataFrame(columns=["Entry Index", "Exit Index", "PnL"])
         ta = VbtTradeAnalytics(empty_df)
 
-        out = Path("projects/research/tests/backtesting/vectorbt_analytics_dashboard_test.html")
-        try:
-            fig = ta.show_dashboard(output_html=str(out), height=800)
-            assert fig is not None
-            assert out.exists()
-        finally:
-            if out.exists():
-                out.unlink()
+        out = tmp_path / "vectorbt_analytics_dashboard_test.html"
+        fig = ta.show_dashboard(output_html=str(out), height=800)
+        assert fig is not None
+        assert out.exists()
