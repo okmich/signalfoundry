@@ -1,0 +1,37 @@
+[project]
+name = "okmich-quant-ib"
+version = "0.1.0"
+description = "Interactive Brokers integration and data fetching"
+requires-python = ">=3.12"
+dependencies = [
+    "okmich-quant-core",
+    "okmich-quant-utils",
+    "ib_async>=1.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "pyarrow>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+fetch-ib-data = "okmich_quant_ib.utils.ib_data_fetcher:main"
+
+[tool.uv.sources]
+okmich-quant-core = { workspace = true }
+okmich-quant-utils = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/okmich_quant_ib"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

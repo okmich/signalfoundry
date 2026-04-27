@@ -27,6 +27,7 @@ Examples:
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,7 @@ ALL_PROJECTS = [
     "core",
     "utils",
     "mt5",
+    "ib",
     "features",
     "labelling",
     "ml",
@@ -63,6 +65,9 @@ CLEAN_PATTERNS = [
 ]
 
 CLEAN_FILE_PATTERNS = ["*.pyc", "*.pyo"]
+
+VENV_DIR = ".sf-venv"
+UV_ENV = {**os.environ, "UV_PROJECT_ENVIRONMENT": VENV_DIR}
 
 
 class Colors:
@@ -107,18 +112,10 @@ def print_info(message: str) -> None:
     print(f"{Colors.GRAY}  {message}{Colors.RESET}")
 
 
-def run_command(
-    cmd: list[str], cwd: Path | None = None, check: bool = True
-) -> subprocess.CompletedProcess:
+def run_command(cmd: list[str], cwd: Path | None = None, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=False,
-            text=True,
-            check=check,
-        )
+        result = subprocess.run(cmd, cwd=cwd, capture_output=False, text=True, check=check, env=env)
         return result
     except subprocess.CalledProcessError as e:
         raise e
@@ -188,7 +185,7 @@ def action_sync() -> bool:
     print_header("Syncing Dependencies")
 
     try:
-        run_command(["uv", "sync"], cwd=SCRIPT_DIR)
+        run_command(["uv", "sync", "--all-packages"], cwd=SCRIPT_DIR, env=UV_ENV)
         print_success("Dependencies synced")
         return True
     except subprocess.CalledProcessError:
@@ -226,7 +223,7 @@ def action_test(projects: list[str], no_coverage: bool = False) -> bool:
             cmd.extend([f"--cov={relative_src_path}", "--cov-report=term-missing"])
 
         try:
-            run_command(cmd, cwd=SCRIPT_DIR)
+            run_command(cmd, cwd=SCRIPT_DIR, env=UV_ENV)
             print_success(f"Tests passed for {proj}")
         except subprocess.CalledProcessError:
             failed.append(proj)
@@ -258,7 +255,7 @@ def action_build(projects: list[str]) -> bool:
         try:
             # Build from utilities root, specifying the project directory
             relative_proj_path = proj
-            run_command(["uv", "build", "--directory", relative_proj_path], cwd=SCRIPT_DIR)
+            run_command(["uv", "build", "--directory", relative_proj_path], cwd=SCRIPT_DIR, env=UV_ENV)
             print_success(f"Built {proj}")
         except subprocess.CalledProcessError:
             failed.append(proj)
@@ -289,7 +286,7 @@ def action_lint(projects: list[str]) -> bool:
 
         try:
             relative_src_path = f"{proj}/src"
-            run_command(["uv", "run", "python", "-m", "ruff", "check", relative_src_path], cwd=SCRIPT_DIR)
+            run_command(["uv", "run", "python", "-m", "ruff", "check", relative_src_path], cwd=SCRIPT_DIR, env=UV_ENV)
             print_success(f"Lint passed for {proj}")
         except subprocess.CalledProcessError:
             failed.append(proj)
@@ -322,7 +319,7 @@ def action_format(projects: list[str]) -> bool:
             continue
 
         try:
-            run_command(["uv", "run", "python", "-m", "black"] + paths_to_format, cwd=SCRIPT_DIR)
+            run_command(["uv", "run", "python", "-m", "black"] + paths_to_format, cwd=SCRIPT_DIR, env=UV_ENV)
             print_success(f"Formatted {proj}")
         except subprocess.CalledProcessError:
             print_error(f"Format failed for {proj}")
@@ -347,10 +344,7 @@ def action_typecheck(projects: list[str]) -> bool:
 
         try:
             relative_src_path = f"{proj}/src"
-            run_command(
-                ["uv", "run", "python", "-m", "mypy", relative_src_path, "--ignore-missing-imports"],
-                cwd=SCRIPT_DIR,
-            )
+            run_command(["uv", "run", "python", "-m", "mypy", relative_src_path, "--ignore-missing-imports"], cwd=SCRIPT_DIR, env=UV_ENV)
             print_success(f"Type check passed for {proj}")
         except subprocess.CalledProcessError:
             failed.append(proj)

@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 
 from pydantic import BaseModel, field_validator, model_validator, Field, validator
 
@@ -111,7 +111,7 @@ class FilterConfig(BaseModel):
 class StrategyConfig(BaseModel):
     name: str
     symbol: str
-    timeframe: int
+    timeframe: Union[int, str]
     magic: int
     signal_params: dict = Field(default_factory=dict)
     risk_per_trade: Optional[float] = None

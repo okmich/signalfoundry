@@ -101,6 +101,21 @@ class BaseNotifier(ABC):
     def on_trade_modified(self, symbol: str, ticket: int, sl: float, tp: float):
         ...
 
+    def on_trade_filled(self, symbol: str, order_id: int, qty: float, avg_price: float):
+        """Authoritative fill notification (broker-confirmed execution).
+
+        IB delivers fills asynchronously via execDetailsEvent — submission does not
+        confirm execution, so brokers with async fill semantics fire this hook from
+        their fill handler instead of on_trade_opened/on_trade_closed.
+
+        Default implementation delegates to on_trade_opened so legacy notifiers
+        keep working unchanged. Override for IB-aware messaging.
+        """
+        self.on_trade_opened(
+            symbol=symbol, direction="FILL", volume=qty, price=avg_price,
+            sl=0.0, tp=0.0, magic=0, ticket=order_id,
+        )
+
     @abstractmethod
     def on_error(self, strategy_name: str, error_message: str, context: dict = None):
         ...
