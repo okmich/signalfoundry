@@ -15,6 +15,7 @@ class SecType(StrEnum):
     FUT = "FUT"
     CFD = "CFD"
     OPT = "OPT"
+    CRYPTO = "CRYPTO"  # PAXOS: BTC, ETH, ... (cash account only)
 
 
 @dataclass
@@ -36,6 +37,7 @@ DEFAULT_WHAT_TO_SHOW: dict[SecType, str] = {
     SecType.FUT: "TRADES",
     SecType.CFD: "MIDPOINT",
     SecType.OPT: "TRADES",
+    SecType.CRYPTO: "AGGTRADES",  # PAXOS exposes aggregated trades only
 }
 
 DEFAULT_USE_RTH: dict[SecType, bool] = {
@@ -44,6 +46,7 @@ DEFAULT_USE_RTH: dict[SecType, bool] = {
     SecType.FUT: False,
     SecType.CFD: False,
     SecType.OPT: True,
+    SecType.CRYPTO: False,        # 24/7
 }
 
 
@@ -68,6 +71,10 @@ async def resolve_contract(ib: IB, symbol: str, cfg: IBContractConfig) -> Contra
     elif cfg.sec_type == SecType.OPT:
         raw = Option(symbol, cfg.last_trade_date, cfg.strike, cfg.right, cfg.exchange,
                      currency=cfg.currency)
+    elif cfg.sec_type == SecType.CRYPTO:
+        # IB crypto via PAXOS: secType='CRYPTO', exchange defaults to 'PAXOS'.
+        raw = Contract(symbol=symbol, secType="CRYPTO",
+                       exchange=cfg.exchange or "PAXOS", currency=cfg.currency)
     else:
         raw = Contract(symbol=symbol, secType=str(cfg.sec_type), exchange=cfg.exchange,
                        currency=cfg.currency, primaryExchange=cfg.primary_exchange,
