@@ -202,14 +202,27 @@ def target_arl_threshold(reference_model: ReferenceModel, slack: float | NDArray
             )
         arl_lo = evaluate(h_lo)
 
-    # Bisect.
+    # Bisect. Track best-so-far so we can fall back to closest-h when the ARL
+    # surface is stepwise (e.g., sign CUSUM on a half-integer lattice) and no
+    # finite h refinement can hit tolerance.
+    best_h = h_lo
+    best_err = abs(arl_lo - target_arl)
     last_arl = arl_lo
     for _ in range(_BISECT_MAX_ITER):
         h_mid = 0.5 * (h_lo + h_hi)
         arl_mid = evaluate(h_mid)
         last_arl = arl_mid
-        if abs(arl_mid - target_arl) / target_arl <= _BISECT_TOLERANCE:
+        err = abs(arl_mid - target_arl)
+        if err < best_err:
+            best_err = err
+            best_h = h_mid
+        if err / target_arl <= _BISECT_TOLERANCE:
             return h_mid
+        # Stepwise ARL surface: bracket has collapsed numerically but ARL still
+        # off-target. Return the closest h seen rather than failing — the user
+        # can't get any closer with this reference model.
+        if (h_hi - h_lo) <= 1e-6 * max(1.0, h_hi):
+            return best_h
         if arl_mid < target_arl:
             h_lo = h_mid
         else:
