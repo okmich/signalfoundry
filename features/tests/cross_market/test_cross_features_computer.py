@@ -286,7 +286,7 @@ class TestErrors:
 
 class TestTopLevelImport:
     def test_compute_cross_features_importable_from_timothymasters(self):
-        from okmich_quant_features.timothymasters import compute_cross_features as ccf  # noqa: F401
+        from okmich_quant_features.timothymasters.utils.cross_features_computer import compute_cross_features as ccf  # noqa: F401
         assert callable(ccf)
 
     def test_compute_cross_features_importable_from_utils(self):

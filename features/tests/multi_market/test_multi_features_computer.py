@@ -242,7 +242,7 @@ class TestCustomParams:
 
 class TestTopLevelImport:
     def test_compute_multi_features_importable_from_timothymasters(self):
-        from okmich_quant_features.timothymasters import compute_multi_features as cmf  # noqa: F401
+        from okmich_quant_features.timothymasters.utils.multi_features_computer import compute_multi_features as cmf  # noqa: F401
         assert callable(cmf)
 
     def test_compute_multi_features_importable_from_utils(self):
