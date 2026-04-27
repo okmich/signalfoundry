@@ -2305,6 +2305,7 @@ name = "okmich-quant-features"
 version = "2.4.0"
 source = { editable = "features" }
 dependencies = [
+    { name = "numba" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pywavelets" },
@@ -2317,6 +2318,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "numba", specifier = ">=0.60.0" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pywavelets", specifier = "==1.9.0" },
@@ -2484,6 +2486,7 @@ source = { editable = "pipeline" }
 dependencies = [
     { name = "numpy" },
     { name = "okmich-quant-features" },
+    { name = "okmich-quant-ml" },
     { name = "okmich-quant-utils" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -2493,6 +2496,7 @@ dependencies = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "okmich-quant-features", editable = "features" },
+    { name = "okmich-quant-ml", editable = "ml" },
     { name = "okmich-quant-utils", editable = "utils" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pyarrow", specifier = ">=20.0.0" },

@@ -35,9 +35,6 @@ okmich-quant-labelling = { workspace = true }
 okmich-quant-ml = { workspace = true }
 okmich-quant-neural-net = { workspace = true }
 
-[project.scripts]
-run-experiment = "okmich_quant_research.cli.run_experiment:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

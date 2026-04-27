@@ -18,6 +18,9 @@ jobs:
           - package: okmich-quant-features
             module: okmich_quant_features
             tests: features/tests
+          - package: okmich-quant-ib
+            module: okmich_quant_ib
+            tests: ib/tests
           - package: okmich-quant-labelling
             module: okmich_quant_labelling
             tests: labelling/tests
@@ -52,4 +55,4 @@ jobs:
           uv run --locked --package ${{ matrix.package }} python -c "import ${{ matrix.module }}; print('smoke-ok: ${{ matrix.module }}')"
       - name: Run tests
         if: matrix.tests != ''
-        run: uv run --locked --package ${{ matrix.package }} --with pytest pytest ${{ matrix.tests }}
+        run: uv run --locked --package ${{ matrix.package }} --with pytest --with pytest-asyncio pytest ${{ matrix.tests }}

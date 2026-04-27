@@ -63,7 +63,7 @@ def trained_classifier(prices):
 
 @pytest.fixture(scope='module')
 def algo_result(prices, trained_classifier):
-    return run_tsfdc_algorithm(prices.iloc[400:], STHETA, BTHETA, trained_classifier, initial_capital=10_000.0)
+    return run_tsfdc_algorithm(prices.iloc[400:], STHETA, BTHETA, trained_classifier, initial_capital_down=10_000.0, initial_capital_up=10_000.0)
 
 
 # ---------------------------------------------------------------------------
