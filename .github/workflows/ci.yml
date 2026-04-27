@@ -52,4 +52,4 @@ jobs:
           uv run --locked --package ${{ matrix.package }} python -c "import ${{ matrix.module }}; print('smoke-ok: ${{ matrix.module }}')"
       - name: Run tests
         if: matrix.tests != ''
-        run: uv run --locked --package ${{ matrix.package }} pytest ${{ matrix.tests }}
+        run: uv run --locked --package ${{ matrix.package }} --with pytest pytest ${{ matrix.tests }}

@@ -50,9 +50,8 @@ def _build_gate_metadata(name: str, gate_open: NDArray, params: dict,
 class ArgmaxInferer:
     """Bridge inferer that collapses posterior probabilities to hard labels.
 
-    Validates input shape and NaN/Inf just like the gating inferers, returns ``int64``
-    labels with axis-1 reduction. Use this when the downstream consumer needs a hard
-    label and no confidence gating is desired.
+    Validates input shape and NaN/Inf just like the gating inferers, returns ``int64`` labels with axis-1 reduction.
+    Use this when the downstream consumer needs a hard label and no confidence gating is desired.
     """
 
     def infer(self, probs: NDArray) -> NDArray:
@@ -103,8 +102,7 @@ class MarginGateInferer:
 class EntropyGateInferer:
     """Gate label emission using normalised entropy ``H(p) / log(K)``.
 
-    Opens the gate when ``norm_entropy <= theta_entropy``. Lower normalised entropy means higher concentration,
-    i.e. the posterior is more decisive.
+    Opens the gate when ``norm_entropy <= theta_entropy``. Lower normalised entropy means higher concentration, i.e. the posterior is more decisive.
     """
 
     def __init__(self, theta_entropy: float = 0.50,
@@ -138,11 +136,9 @@ class EntropyGateInferer:
 class StabilityGateInferer:
     """Gate label emission using trailing rolling flip-rate of the argmax label.
 
-    Opens the gate when the fraction of argmax changes over the trailing ``window`` rows
-    is ``<= theta_flip_rate``. Intuition: if the hard label has been thrashing recently,
-    the current argmax is untrustworthy even if the instantaneous posterior is decisive.
-    The first ``window - 1`` rows use an expanding denominator (matches what a live stream
-    would have available).
+    Opens the gate when the fraction of argmax changes over the trailing ``window`` rows is ``<= theta_flip_rate``.
+    Intuition: if the hard label has been thrashing recently, the current argmax is untrustworthy even if the instantaneous posterior is decisive.
+    The first ``window - 1`` rows use an expanding denominator (matches what a live stream would have available).
     """
 
     def __init__(self, theta_flip_rate: float = 0.20, window: int = 5,
