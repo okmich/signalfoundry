@@ -4,22 +4,17 @@ Tests for MultiTrader class with multiple strategies.
 
 import pytest
 from datetime import datetime
-from unittest.mock import Mock
 from okmich_quant_core.multi_trader import MultiTrader
 from okmich_quant_core.base_strategy import BaseStrategy
-
-
-class MockStrategyConfig:
-    """Mock strategy config for testing."""
-    def __init__(self, name):
-        self.name = name
+from okmich_quant_core.config import StrategyConfig
 
 
 class MockStrategy(BaseStrategy):
     """Mock strategy for testing."""
 
-    def __init__(self, name="MockStrategy"):
-        self.strategy_config = MockStrategyConfig(name)
+    def __init__(self, name="MockStrategy", symbol="EURUSD", magic=1):
+        self.name = name
+        self.strategy_config = StrategyConfig(name=name, symbol=symbol, timeframe=1, magic=magic)
         self.notifier = None
         self.run_count = 0
         self.position_check_count = 0
@@ -60,6 +55,41 @@ class TestMultiTrader:
         assert len(multi_trader.health_trackers) == 2
         assert "Strat1" in multi_trader.health_trackers
         assert "Strat2" in multi_trader.health_trackers
+
+    def test_duplicate_names_are_tracked_by_identity(self):
+        """Test same-name strategies on different symbols do not overwrite health state."""
+        strat1 = MockStrategy("MeanReversion", symbol="EURUSD", magic=1001)
+        strat2 = MockStrategy("MeanReversion", symbol="GBPUSD", magic=1001)
+        multi_trader = MultiTrader([strat1, strat2])
+
+        multi_trader.run(datetime.now())
+
+        assert "MeanReversion[EURUSD:1001]" in multi_trader.health_trackers
+        assert "MeanReversion[GBPUSD:1001]" in multi_trader.health_trackers
+        assert multi_trader.health_trackers["MeanReversion[EURUSD:1001]"].successful_runs == 1
+        assert multi_trader.health_trackers["MeanReversion[GBPUSD:1001]"].successful_runs == 1
+
+    def test_duplicate_identity_raises(self):
+        """Test exact duplicate strategy identities are rejected."""
+        strat1 = MockStrategy("MeanReversion", symbol="EURUSD", magic=1001)
+        strat2 = MockStrategy("MeanReversion", symbol="EURUSD", magic=1001)
+
+        with pytest.raises(ValueError, match="Duplicate strategy identity"):
+            MultiTrader([strat1, strat2])
+
+    def test_disable_ambiguous_strategy_name_requires_identity_key(self):
+        """Test ambiguous same-name strategies require the expanded key."""
+        strat1 = MockStrategy("MeanReversion", symbol="EURUSD", magic=1001)
+        strat2 = MockStrategy("MeanReversion", symbol="GBPUSD", magic=1001)
+        multi_trader = MultiTrader([strat1, strat2])
+
+        multi_trader.disable_strategy("MeanReversion")
+        assert multi_trader.health_trackers["MeanReversion[EURUSD:1001]"].is_enabled is True
+        assert multi_trader.health_trackers["MeanReversion[GBPUSD:1001]"].is_enabled is True
+
+        multi_trader.disable_strategy("MeanReversion[EURUSD:1001]")
+        assert multi_trader.health_trackers["MeanReversion[EURUSD:1001]"].is_enabled is False
+        assert multi_trader.health_trackers["MeanReversion[GBPUSD:1001]"].is_enabled is True
 
     def test_all_strategies_run_successfully(self):
         """Test all strategies execute successfully."""
