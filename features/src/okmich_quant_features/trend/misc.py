@@ -32,6 +32,51 @@ def bollinger_band(close_prices: Union[pd.Series, np.ndarray], window: int = 20,
         return upper_band, middle_band, lower_band, percent_b, bb_width
 
 
+def envelope(close_prices: SeriesOrArray, high_prices: SeriesOrArray, low_prices: SeriesOrArray, ma_period: int = 20,
+             atr_period: int = 14, k_atr: float = 2.0) -> Tuple[SeriesOrArray, SeriesOrArray, SeriesOrArray, SeriesOrArray, SeriesOrArray]:
+    """ATR envelope: middle = SMA(close, ma_period); bands = middle +/- k_atr * ATR(atr_period).
+
+    The ATR-based analog of Bollinger Bands. Where Bollinger uses standard deviation of close for the band width, this
+    uses Wilder ATR (talib), making the bands scale-equivariant across instruments and more robust to gaps / fat tails.
+
+    Returns (upper_envelope, middle_envelope, lower_envelope, percent_e, env_width):
+        upper_envelope  = middle + k_atr * ATR
+        middle_envelope = SMA(close, ma_period)
+        lower_envelope  = middle - k_atr * ATR
+        percent_e       = (close - lower) / (upper - lower + eps)   — analog of %B
+        env_width       = (upper - lower) / middle                  — width relative to mid
+    """
+    if isinstance(close_prices, pd.Series):
+        close_values = close_prices.values
+        high_values = high_prices.values
+        low_values = low_prices.values
+        is_series = True
+    else:
+        close_values = close_prices
+        high_values = high_prices
+        low_values = low_prices
+        is_series = False
+
+    middle_band = talib.SMA(close_values, timeperiod=ma_period)
+    atr_values = talib.ATR(high_values, low_values, close_values, timeperiod=atr_period)
+    upper_band = middle_band + k_atr * atr_values
+    lower_band = middle_band - k_atr * atr_values
+
+    env_width = (upper_band - lower_band) / middle_band
+    percent_e = (close_values - lower_band) / (upper_band - lower_band + 1.0e-8)
+
+    if is_series:
+        return (
+            pd.Series(upper_band, index=close_prices.index, name="upper_envelope"),
+            pd.Series(middle_band, index=close_prices.index, name="middle_envelope"),
+            pd.Series(lower_band, index=close_prices.index, name="lower_envelope"),
+            pd.Series(percent_e, index=close_prices.index, name="percent_e"),
+            pd.Series(env_width, index=close_prices.index, name="env_width"),
+        )
+    else:
+        return upper_band, middle_band, lower_band, percent_e, env_width
+
+
 def cci(high_prices: SeriesOrArray, low_prices: SeriesOrArray, close_prices: SeriesOrArray, window: int = 20) -> SeriesOrArray:
     if isinstance(close_prices, pd.Series):
         high_values = high_prices.values
