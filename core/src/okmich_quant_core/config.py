@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import List, Optional, Dict, Union
 
-from pydantic import BaseModel, field_validator, model_validator, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OrderType(Enum):
@@ -38,6 +38,8 @@ class PositionManagerType(Enum):
 
 
 class PositionManagerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: PositionManagerType = PositionManagerType.FIXED_POINT
     sl: Optional[float] = None
     tp: Optional[float] = None
@@ -97,6 +99,46 @@ class PositionManagerConfig(BaseModel):
         return v
 
 
+class PositionSizingType(Enum):
+    FIXED = "fixed"
+    RISK_PCT_OF_EQUITY = "risk_pct_of_equity"
+    KELLY_CRITERION = "kelly_criterion"
+
+
+class PositionSizingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: PositionSizingType = PositionSizingType.FIXED
+    units: Optional[float] = 0.01
+    risk_pct: Optional[float] = None
+    kelly_fraction: Optional[float] = None
+
+    @model_validator(mode="after")
+    def validate_config_for_type(self) -> "PositionSizingConfig":
+        required_fields: Dict[PositionSizingType, list] = {
+            PositionSizingType.FIXED: ["units"],
+            PositionSizingType.RISK_PCT_OF_EQUITY: ["risk_pct"],
+            PositionSizingType.KELLY_CRITERION: ["kelly_fraction"],
+        }
+        if self.type in required_fields:
+            missing_fields = [f for f in required_fields[self.type] if getattr(self, f) is None]
+            if missing_fields:
+                raise ValueError(f"For {self.type.value}, missing required fields: {missing_fields}")
+        return self
+
+    @field_validator("units")
+    def validate_units(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError("units must be > 0")
+        return v
+
+    @field_validator("risk_pct", "kelly_fraction")
+    def validate_fraction(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0 < v <= 1):
+            raise ValueError("risk_pct / kelly_fraction must be in (0, 1]")
+        return v
+
+
 class RunLoopConfig(BaseModel):
     sleep_interval: float = 0.5
     chk_position_interval: float = 30
@@ -109,13 +151,14 @@ class FilterConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     symbol: str
     timeframe: Union[int, str]
     magic: int
     signal_params: dict = Field(default_factory=dict)
-    risk_per_trade: Optional[float] = None
-    fixed_lot_size_per_trade: Optional[float] = 0.01
+    position_sizing: PositionSizingConfig = Field(default_factory=PositionSizingConfig)
     max_number_of_open_positions: int = 1
     bars_to_copy: int = 100
     position_manager: Optional[PositionManagerConfig] = None

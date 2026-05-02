@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from okmich_quant_core import PositionSizingConfig, PositionSizingType
 from okmich_quant_ib.contract import IBContractConfig, SecType
 from okmich_quant_ib.strategy import BaseIBStrategy
 
@@ -21,11 +22,12 @@ class _DummyConfig(SimpleNamespace):
     pass
 
 
-def _make_strategy(*, fixed_lot=None, risk=None, position_manager=None,
-                   max_pos=1) -> BaseIBStrategy:
+def _make_strategy(*, position_sizing=None, position_manager=None, max_pos=1) -> BaseIBStrategy:
+    if position_sizing is None:
+        position_sizing = PositionSizingConfig(type=PositionSizingType.FIXED, units=1.0)
     cfg = _DummyConfig(
         name="t", symbol="AAPL", timeframe="5 mins", magic=42,
-        signal_params={}, risk_per_trade=risk, fixed_lot_size_per_trade=fixed_lot,
+        signal_params={}, position_sizing=position_sizing,
         max_number_of_open_positions=max_pos, bars_to_copy=10,
         position_manager=position_manager, filters=[],
     )
@@ -41,26 +43,28 @@ def _make_strategy(*, fixed_lot=None, risk=None, position_manager=None,
 
 
 def test_calculate_quantity_uses_fixed_lot_and_rounds_to_increment():
-    s = _make_strategy(fixed_lot=12.7)
+    s = _make_strategy(position_sizing=PositionSizingConfig(type=PositionSizingType.FIXED, units=12.7))
     s.contract_info = {"size_increment": 1.0, "min_size": 1.0}
     assert s.calculate_quantity() == 13.0
 
 
 def test_calculate_quantity_respects_min_size():
-    s = _make_strategy(fixed_lot=0.0001)
+    s = _make_strategy(position_sizing=PositionSizingConfig(type=PositionSizingType.FIXED, units=0.0001))
     s.contract_info = {"size_increment": 1.0, "min_size": 1.0}
     assert s.calculate_quantity() == 1.0
 
 
-def test_calculate_quantity_risk_per_trade_raises():
-    s = _make_strategy(fixed_lot=None, risk=0.01)
+def test_calculate_quantity_risk_pct_raises():
+    s = _make_strategy(position_sizing=PositionSizingConfig(
+        type=PositionSizingType.RISK_PCT_OF_EQUITY, risk_pct=0.01,
+    ))
     s.contract_info = {}
-    with pytest.raises(NotImplementedError, match="risk_per_trade"):
+    with pytest.raises(NotImplementedError, match="risk_pct_of_equity"):
         s.calculate_quantity()
 
 
 def test_register_bracket_keys_by_every_orderid():
-    s = _make_strategy(fixed_lot=1)
+    s = _make_strategy()
     trades = [
         SimpleNamespace(order=SimpleNamespace(orderId=10), orderStatus=SimpleNamespace(status="Submitted")),
         SimpleNamespace(order=SimpleNamespace(orderId=11), orderStatus=SimpleNamespace(status="Submitted")),
@@ -74,7 +78,7 @@ def test_register_bracket_keys_by_every_orderid():
 
 @pytest.mark.asyncio
 async def test_place_order_with_sl_or_tp_raises():
-    s = _make_strategy(fixed_lot=1)
+    s = _make_strategy()
     s.contract_info = {"size_increment": 1.0, "min_size": 1.0}
     s.ib = SimpleNamespace()
     s.contract = SimpleNamespace()

@@ -695,9 +695,8 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
 
     Returns df with: 'ma', 'upper', 'lower', 'band_state', binary_col, ternary_col.
 
-    Note: any pre-existing columns named 'ma', 'upper', 'lower', 'band_state',
-    `binary_col`, or `ternary_col` on the input df are overwritten in the
-    returned copy without warning.
+    Note: any pre-existing columns named 'ma', 'upper', 'lower', 'band_state', `binary_col`, or `ternary_col` on the
+    input df are overwritten in the returned copy without warning.
     """
     out = df.copy()
 
@@ -716,11 +715,9 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
 def _infer_tf_minutes(index: pd.DatetimeIndex) -> Optional[int]:
     """Best-effort bar duration in minutes from a DatetimeIndex.
 
-    Uses index.freq when set, else median bar spacing — the latter is robust
-    to weekend / holiday gaps in market data. Returns None when there is not
-    enough information (single bar, non-DatetimeIndex) or when the median
-    spacing is below one minute (sub-minute data should pass `tf_minutes`
-    explicitly rather than relying on inference).
+    Uses index.freq when set, else median bar spacing — the latter is robust to weekend / holiday gaps in market data.
+    Returns None when there is not enough information (single bar, non-DatetimeIndex) or when the median spacing is below
+    one minute (sub-minute data should pass `tf_minutes` explicitly rather than relying on inference).
     """
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
         return None
@@ -745,23 +742,18 @@ def apply_3class_labels(df: pd.DataFrame, omega: float, band: BandParams,
                         ternary_col: str = "ctl_label_3class") -> pd.DataFrame:
     """Attach binary CTL + 3-class labels using a pre-resolved (omega, band) config.
 
-    The caller is responsible for sourcing `omega`, `band`, and
-    `persisted_tf_minutes` — typically from the SymbolMetastore's
-    `htf_ctl_3class_params` block, but this function has no opinion on the
-    source. It only handles label computation and the cross-TF rescaling of
-    band bar-counts.
+    The caller is responsible for sourcing `omega`, `band`, and `persisted_tf_minutes` — typically from the
+    SymbolMetastore's `htf_ctl_3class_params` block, but this function has no opinion on the source. It only handles
+    label computation and the cross-TF rescaling of band bar-counts.
 
     Scaling rule:
-      `ma_period` and `atr_period` are bar counts; they are scaled by
-      `(persisted_tf_minutes / df_tf_minutes)` so the wall-clock window stays
-      constant. Example: persisted `ma_period=480` at 15min = 7200-min window;
+      `ma_period` and `atr_period` are bar counts; they are scaled by `(persisted_tf_minutes / df_tf_minutes)` so the
+      wall-clock window stays constant. Example: persisted `ma_period=480` at 15min = 7200-min window;
       on 5m bars that becomes 1440 bars (still 7200 min).
 
-      `omega` is a percentage threshold and does NOT scale. Note: applying the
-      same omega at finer resolution will produce more flips than at the
-      calibration resolution, because finer close-price paths see more
-      intermediate excursions. If you need flip locations that match the
-      calibration timeframe exactly, compute on calibration-TF bars and
+      `omega` is a percentage threshold and does NOT scale. Note: applying the same omega at finer resolution will produce
+      more flips than at the calibration resolution, because finer close-price paths see more intermediate excursions.
+      If you need flip locations that match the calibration timeframe exactly, compute on calibration-TF bars and
       forward-fill to your trading TF instead.
 
     Args:

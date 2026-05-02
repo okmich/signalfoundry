@@ -29,7 +29,7 @@ from .resilience import (
     MT5PermanentError,
     MT5ConnectionError,
 )
-from okmich_quant_core import StrategyConfig, BaseSignal, BaseStrategy, OrderType
+from okmich_quant_core import StrategyConfig, BaseSignal, BaseStrategy, OrderType, PositionSizingType
 from okmich_quant_core.price_buffer import PriceBuffer
 
 logging.basicConfig(
@@ -352,16 +352,14 @@ class BaseMt5Strategy(BaseStrategy):
             return False
 
     def calculate_lot_size(self) -> float:
-        if self.strategy_config.risk_per_trade:
-            # calculate lot size based on free margin of the account
-            return 0.01
-        elif self.strategy_config.fixed_lot_size_per_trade:
-            return self.strategy_config.fixed_lot_size_per_trade
-        else:
-            raise ValueError(
-                f"Error calculating lot size for {self.strategy_config.symbol}. "
-                f"Reason: Unknown lot size strategy"
-            )
+        sizing = self.strategy_config.position_sizing
+        if sizing.type is PositionSizingType.FIXED:
+            assert sizing.units is not None
+            return sizing.units
+        raise NotImplementedError(
+            f"Position sizing '{sizing.type.value}' is declared but not implemented "
+            f"for MT5. Override calculate_lot_size in a subclass."
+        )
 
 
 class GenericBasicStrategy(BaseMt5Strategy):

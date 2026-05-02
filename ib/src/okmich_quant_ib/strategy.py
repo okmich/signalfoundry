@@ -10,7 +10,7 @@ from typing import Optional, Union
 
 from ib_async import IB, Contract
 
-from okmich_quant_core import BaseSignal, BaseStrategy, OrderType, StrategyConfig
+from okmich_quant_core import BaseSignal, BaseStrategy, OrderType, PositionSizingType, StrategyConfig
 from okmich_quant_core.notification.base import BaseNotifier
 from okmich_quant_core.price_buffer import PriceBuffer
 
@@ -356,15 +356,15 @@ class BaseIBStrategy(BaseStrategy):
 
     def calculate_quantity(self) -> float:
         """Compute instrument-aware size, rounded to ``size_increment``."""
-        if self.strategy_config.fixed_lot_size_per_trade:
-            raw = self.strategy_config.fixed_lot_size_per_trade
-        elif self.strategy_config.risk_per_trade:
-            raise NotImplementedError(
-                "risk_per_trade sizing requires account-aware risk math and must be "
-                "implemented by a subclass. Refusing to submit an arbitrary size."
-            )
+        sizing = self.strategy_config.position_sizing
+        if sizing.type is PositionSizingType.FIXED:
+            assert sizing.units is not None
+            raw = sizing.units
         else:
-            raise ValueError(f"Unknown quantity strategy for {self.strategy_config.symbol}")
+            raise NotImplementedError(
+                f"Position sizing '{sizing.type.value}' is declared but not implemented "
+                f"for IB. Override calculate_quantity in a subclass."
+            )
 
         increment = self.contract_info.get("size_increment", 1.0)
         min_size = self.contract_info.get("min_size", 1.0)
