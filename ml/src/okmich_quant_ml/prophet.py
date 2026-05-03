@@ -5,9 +5,7 @@ from typing import Dict, Any, Tuple
 
 import numpy as np
 import pandas as pd
-import plotly.offline as py
 from prophet import Prophet
-from prophet.plot import plot_components_plotly
 from prophet.serialize import model_from_json, model_to_json
 
 
@@ -349,7 +347,12 @@ class ProphetFeatures:
         }
         return info
 
-    def plot_components(self, figsize=(1200, 600)):
+    def plot_components(self, figsize=(12, 6)):
+        """Plot the forecast components (matplotlib).
+
+        figsize is in inches per matplotlib convention. Returns the
+        matplotlib Figure for further customization or saving.
+        """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before plotting.")
         if self.forecast_hourly is None:
@@ -357,14 +360,10 @@ class ProphetFeatures:
                 "forecast_hourly must be set before plotting. Fit the model again before plotting."
             )
 
-        fig = plot_components_plotly(self.model, self.forecast_hourly)
-        fig.update_layout(width=figsize[0], height=figsize[1])
-        py.iplot(fig)
+        return self.model.plot_components(self.forecast_hourly, figsize=figsize)
 
 
-def create_facebook_prophet_features(
-    df, target_col="tick_volume", add_yearly_seasonality: bool = False
-) -> Tuple[pd.DataFrame, ProphetFeatures]:
+def create_facebook_prophet_features(df, target_col="tick_volume", add_yearly_seasonality: bool = False) -> Tuple[pd.DataFrame, ProphetFeatures]:
     """
     Quick feature generation based on ProphetFeatures.
 
