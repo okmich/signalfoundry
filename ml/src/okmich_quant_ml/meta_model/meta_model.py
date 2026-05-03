@@ -37,7 +37,7 @@ def prepare_meta_dataset(features: pd.DataFrame, labels: pd.DataFrame, target_co
     Examples
     --------
     >>> features = pd.DataFrame({"rsi": rsi_values, "atr": atr_values}, index=prices.index)
-    >>> tbm_labels = apply_tbm(prices, events, config)
+    >>> tbm_labels = get_labels(events, prices, pt_sl=[1.0, 1.0], volatility=vol)
     >>> X, y = prepare_meta_dataset(features, tbm_labels, target_col="label")
     """
     if target_col not in labels.columns:

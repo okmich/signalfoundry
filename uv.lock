@@ -2365,7 +2365,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "okmich-quant-labelling"
-version = "1.3.0"
+version = "2.2.0"
 source = { editable = "labelling" }
 dependencies = [
     { name = "matplotlib" },
@@ -2374,6 +2374,7 @@ dependencies = [
     { name = "pandas" },
     { name = "plotly" },
     { name = "ruptures" },
+    { name = "scikit-learn" },
     { name = "tqdm" },
     { name = "tstrends" },
     { name = "xgboost" },
@@ -2387,6 +2388,7 @@ requires-dist = [
     { name = "pandas", specifier = "==2.3.0" },
     { name = "plotly", specifier = ">=6.5.2" },
     { name = "ruptures", specifier = "==1.1.10" },
+    { name = "scikit-learn", specifier = "==1.7.2" },
     { name = "tqdm", specifier = "==4.67.3" },
     { name = "tstrends", specifier = "==0.3.0" },
     { name = "xgboost", specifier = "==3.0.4" },
@@ -2400,7 +2402,6 @@ dependencies = [
     { name = "lightgbm" },
     { name = "numba" },
     { name = "okmich-quant-features" },
-    { name = "okmich-quant-labelling" },
     { name = "pandas" },
     { name = "pomegranate" },
     { name = "prophet" },
@@ -2415,7 +2416,6 @@ requires-dist = [
     { name = "lightgbm", specifier = "==4.6.0" },
     { name = "numba", specifier = "==0.63.1" },
     { name = "okmich-quant-features", editable = "features" },
-    { name = "okmich-quant-labelling", editable = "labelling" },
     { name = "pandas", specifier = "==2.3.0" },
     { name = "pomegranate", git = "https://github.com/okmich/pomegranate.git?rev=feat%2Fdtype-parameter-and-log-stability" },
     { name = "prophet", specifier = "==1.2.1" },

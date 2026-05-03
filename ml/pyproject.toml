@@ -5,7 +5,6 @@ description = "Classical ML models: state space models, sklearn estimators, and 
 requires-python = ">=3.12"
 dependencies = [
     "okmich-quant-features",
-    "okmich-quant-labelling",
     "numba==0.63.1",
     "pandas==2.3.0",
     "pomegranate @ git+https://github.com/okmich/pomegranate.git@feat/dtype-parameter-and-log-stability",
@@ -19,7 +18,6 @@ dependencies = [
 
 [tool.uv.sources]
 okmich-quant-features = { workspace = true }
-okmich-quant-labelling = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
