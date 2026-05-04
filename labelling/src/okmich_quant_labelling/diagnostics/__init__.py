@@ -15,9 +15,11 @@ NOT valid for:
 - Backtesting (will overstate edge)
 
 Submodules:
-- trend: AmplitudeBasedLabeler, auto_label, CTL, Oracle
+- regime: AmplitudeBasedLabeler, auto_label, CTL, Oracle
 - returns: AutoLabelRegression, AmplitudeBasedRegressionLabeler (regression targets)
-- ruptures: Changepoint detection labelers
+- ruptures: Offline ruptures labelling paired with the causal BOCPD posterior
+  trajectory (``label_with_posteriors`` → ``LabeledPosteriors``). Strictly
+  for hindsight teacher targets in ruptures→BOCPD evaluation studies.
 """
 
 __all__ = []

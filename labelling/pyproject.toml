@@ -5,6 +5,7 @@ description = "Target variable creation and labeling strategies"
 requires-python = ">=3.12"
 dependencies = [
     "okmich-quant-features",
+    "okmich-quant-ml",
 
     "matplotlib>=3.6",
     "numba==0.63.1",
@@ -19,6 +20,7 @@ dependencies = [
 
 [tool.uv.sources]
 okmich-quant-features = { workspace = true }
+okmich-quant-ml = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
