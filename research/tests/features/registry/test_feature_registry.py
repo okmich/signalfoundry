@@ -108,6 +108,7 @@ class TestRegistrySize:
         expected = {
             "microstructure", "timothymasters", "volatility",
             "path_structure", "momentum", "volume", "trend",
+            "directional_change", "tbm",
         }
         missing = expected - modules
         assert not missing, f"Modules missing from registry: {missing}"
@@ -408,6 +409,11 @@ class TestSpotChecks:
         ("aroon_diff",         "timothymasters",    "trend",          True),
         ("pin_proxy",          "microstructure",    "toxicity",       True),
         ("institutional_footprint_score", "microstructure", "composite", True),
+        ("core_momentum_features", "momentum",      "composite",      True),
+        ("directional_trend_index", "momentum",     "trend",          True),
+        ("zscore_trend_features", "trend",          "trend",          True),
+        ("dc_live_features",   "directional_change", "price_structure", True),
+        ("compute_barrier_levels", "tbm",           "volatility",     True),
     ])
     def test_known_feature_metadata(self, reg, name, module_fragment, signal_type, causal):
         # Use qualified lookup to avoid ambiguity
@@ -445,3 +451,7 @@ class TestSpotChecks:
     def test_liquidity_resilience_returns_dataframe(self, reg):
         e = reg.get("liquidity_resilience")
         assert e.output_type == "dataframe"
+
+    def test_stale_blau_dti_name_removed(self, reg):
+        with pytest.raises(KeyError, match="not found"):
+            reg.get("directional_trend_index_blau")

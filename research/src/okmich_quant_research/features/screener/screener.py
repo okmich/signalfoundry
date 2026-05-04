@@ -269,6 +269,9 @@ class FeatureScreener:
             X_sub, y_sub = X, y
 
         stage_reports: list[StageReport] = []
+        s1_scores: dict = {}
+        cluster_info: dict = {"assignments": {}, "representatives": {}}
+        boruta_groups: dict = {"confirmed": [], "tentative": [], "rejected": []}
 
         if self.prefix_dedup:
             self._log("\n[Stage 0] Prefix deduplication")
@@ -276,7 +279,8 @@ class FeatureScreener:
             X_sub = X_sub[X_sub.columns.intersection(X.columns)]
             stage_reports.append(r_dedup)
             if X.shape[1] == 0:
-                return self._empty_result(stage_reports)
+                return self._empty_result(stage_reports, s1_scores=s1_scores, cluster_info=cluster_info,
+                                          boruta_groups=boruta_groups)
 
         self._log("\n[Stage 0] Near-zero variance filter")
         X, r0 = stage0_variance_filter(X, cv_threshold=self.cv_threshold, const_pct_threshold=self.const_pct_threshold,
@@ -284,7 +288,8 @@ class FeatureScreener:
         X_sub = X_sub[X.columns]
         stage_reports.append(r0)
         if X.shape[1] == 0:
-            return self._empty_result(stage_reports)
+            return self._empty_result(stage_reports, s1_scores=s1_scores, cluster_info=cluster_info,
+                                      boruta_groups=boruta_groups)
 
         self._log(f"\n[Stage 1] Hygiene filter ({task})")
         if task == "regime":
@@ -300,7 +305,8 @@ class FeatureScreener:
         X = X[X_sub.columns]
         stage_reports.append(r1)
         if X.shape[1] == 0:
-            return self._empty_result(stage_reports)
+            return self._empty_result(stage_reports, s1_scores=s1_scores, cluster_info=cluster_info,
+                                      boruta_groups=boruta_groups)
 
         self._log("\n[Stage 2] Temporal stability (IC-IR)")
         min_icir = self.regime_icir_threshold if task == "regime" else self.return_icir_threshold
@@ -312,15 +318,18 @@ class FeatureScreener:
         X_sub = X_sub[X_sub.columns.intersection(X.columns)]
         stage_reports.append(r2)
         if X.shape[1] == 0:
-            return self._empty_result(stage_reports)
+            return self._empty_result(stage_reports, s1_scores=s1_scores, cluster_info=cluster_info,
+                                      boruta_groups=boruta_groups)
 
         # ── Stage 3 ──────────────────────────────────────────────────────────
         self._log("\n[Stage 3] Redundancy reduction (clustering)")
-        X, r3 = stage3_redundancy(X, icir_scores=icir_scores, corr_threshold=self.corr_threshold, verbose=self.verbose)
+        X, r3, cluster_info = stage3_redundancy(X, icir_scores=icir_scores, corr_threshold=self.corr_threshold,
+                                                verbose=self.verbose)
         X_sub = X_sub[X_sub.columns.intersection(X.columns)]
         stage_reports.append(r3)
         if X.shape[1] == 0:
-            return self._empty_result(stage_reports)
+            return self._empty_result(stage_reports, s1_scores=s1_scores, cluster_info=cluster_info,
+                                      boruta_groups=boruta_groups)
 
         self._log("\n[Stage 4] Boruta")
         X_boruta_sub, r4, boruta_groups = stage4_boruta(X_sub, y_sub, task=task, max_iter=self.boruta_max_iter,
@@ -349,14 +358,29 @@ class FeatureScreener:
 
         return ScreenerResult(confirmed=confirmed, tentative=tentative, rejected=rejected_total,
                               shap_rank=shap_rank, mda_rank=mda_rank, stage_reports=stage_reports,
-                              icir_scores=icir_scores)
+                              icir_scores=icir_scores, stage1_scores=s1_scores,
+                              cluster_assignments=cluster_info["assignments"],
+                              cluster_representatives=cluster_info["representatives"],
+                              boruta_groups=boruta_groups)
 
     @staticmethod
-    def _empty_result(stage_reports: list[StageReport]) -> ScreenerResult:
-        """Return an empty result when all features were removed."""
+    def _empty_result(stage_reports: list[StageReport], *, s1_scores: dict | None = None,
+                      cluster_info: dict | None = None, boruta_groups: dict | None = None) -> ScreenerResult:
+        """Return an empty result when all features were removed.
+
+        Optional kwargs let early-return paths preserve whatever stage state was
+        already captured before exit (e.g. Stage 1 scores survive even if Stage 2
+        removes every feature).
+        """
         rejected_total: list[str] = []
         for r in stage_reports:
             rejected_total.extend(r.removed)
+        s1_scores = s1_scores or {}
+        cluster_info = cluster_info or {"assignments": {}, "representatives": {}}
+        boruta_groups = boruta_groups or {"confirmed": [], "tentative": [], "rejected": []}
         return ScreenerResult(confirmed=[], tentative=[], rejected=rejected_total,
                               shap_rank=pd.Series(dtype=float), mda_rank=pd.Series(dtype=float),
-                              stage_reports=stage_reports, icir_scores={})
+                              stage_reports=stage_reports, icir_scores={}, stage1_scores=s1_scores,
+                              cluster_assignments=cluster_info["assignments"],
+                              cluster_representatives=cluster_info["representatives"],
+                              boruta_groups=boruta_groups)

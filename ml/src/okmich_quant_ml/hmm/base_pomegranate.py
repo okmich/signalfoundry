@@ -438,14 +438,12 @@ class BasePomegranateHMM(ABC):
 
         Computes P(z_t = k | o_1, ..., o_{min(t+lag, T-1)}) for each t.
 
-        Uses open-end semantics: the backward frontier is always initialized to
-        uniform (log_beta = 0), meaning "no information about what comes after
-        the lag window." This matches live trading where the sequence has no
+        Uses open-end semantics: the backward frontier is always initialized to uniform (log_beta = 0), meaning
+        "no information about what comes after the lag window." This matches live trading where the sequence has no
         known terminal point.
 
-        This is intentionally NOT equivalent to pomegranate's full smoothing at
-        large lags. Pomegranate smoothing uses terminal end-state probabilities,
-        which assume the sequence ends — a finite-sequence assumption that does
+        This is intentionally NOT equivalent to pomegranate's full smoothing at large lags. Pomegranate smoothing uses
+        terminal end-state probabilities, which assume the sequence ends — a finite-sequence assumption that does
         not hold in live streaming.
 
         The posterior for timestep t is frozen once t+L observations are available.

@@ -18,7 +18,7 @@ from ._result import StageReport
 
 
 def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_threshold: float = 0.75,
-                      verbose: bool = True) -> tuple[pd.DataFrame, StageReport]:
+                      verbose: bool = True) -> tuple[pd.DataFrame, StageReport, dict]:
     """
     Hierarchical clustering redundancy filter.
 
@@ -27,23 +27,28 @@ def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_thres
     X : pd.DataFrame
         Feature matrix.
     icir_scores : dict[str, float]
-        IC-IR score per feature (from Stage 2). Used to pick the cluster
-        representative. Falls back to 0.0 for any feature not in the dict.
+        IC-IR score per feature (from Stage 2). Used to pick the cluster representative. Falls back to 0.0 for any feature not in the dict.
     corr_threshold : float
-        Spearman |correlation| above which two features are considered
-        redundant. Default 0.75.
+        Spearman |correlation| above which two features are considered redundant. Default 0.75.
     verbose : bool
 
     Returns
     -------
     X_filtered : pd.DataFrame
     report : StageReport
+    cluster_info : dict ``{"assignments": {cluster_id: [feature_names]}, "representatives": {cluster_id: surviving_feature}}``.
+        Needed by downstream leakage diagnostics to trace which features were absorbed into which cluster representative.
     """
     n_before = X.shape[1]
 
-    if n_before <= 1:
-        report = StageReport("Stage3_Redundancy", n_before, n_before, [])
-        return X, report
+    if n_before == 0:
+        report = StageReport("Stage3_Redundancy", 0, 0, [])
+        return X, report, {"assignments": {}, "representatives": {}}
+
+    if n_before == 1:
+        only = X.columns[0]
+        report = StageReport("Stage3_Redundancy", 1, 1, [])
+        return X, report, {"assignments": {1: [only]}, "representatives": {1: only}}
 
     # Compute Spearman correlation on filled data
     X_filled = X.fillna(X.median())
@@ -63,16 +68,19 @@ def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_thres
     # From each cluster, select the feature with the highest IC-IR
     n_clusters = labels.max()
     kept, removed = [], []
+    assignments: dict[int, list[str]] = {}
+    representatives: dict[int, str] = {}
 
     for cluster_id in range(1, n_clusters + 1):
-        cluster_cols = [
-            col for col, lbl in zip(X.columns, labels) if lbl == cluster_id
-        ]
+        cluster_cols = [col for col, lbl in zip(X.columns, labels) if lbl == cluster_id]
+        assignments[int(cluster_id)] = cluster_cols
         if len(cluster_cols) == 1:
             kept.append(cluster_cols[0])
+            representatives[int(cluster_id)] = cluster_cols[0]
         else:
             best = max(cluster_cols, key=lambda c: icir_scores.get(c, 0.0))
             kept.append(best)
+            representatives[int(cluster_id)] = best
             removed.extend([c for c in cluster_cols if c != best])
 
     if verbose:
@@ -81,4 +89,5 @@ def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_thres
               f"{len(removed)} redundant removed")
 
     report = StageReport(stage="Stage3_Redundancy", n_before=n_before, n_after=len(kept), removed=removed)
-    return X[kept], report
+    cluster_info = {"assignments": assignments, "representatives": representatives}
+    return X[kept], report, cluster_info

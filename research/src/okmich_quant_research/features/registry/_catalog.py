@@ -1,7 +1,8 @@
 """
 Feature Catalog
 ===============
-Domain-knowledge metadata for every feature-computing function in okmich_quant_features. Covers ~272 functions across 12 modules.
+Domain-knowledge metadata for feature-computing functions in okmich_quant_features. Covers 300+ functions across the public
+feature modules.
 
 Shorthand used in this file:
     Relevance  : C=CRITICAL, H=HIGH, M=MEDIUM, L=LOW, N=NONE
@@ -347,6 +348,13 @@ _VOLATILITY = [
     _fe("quantile_based_volatility_labeling","volatility.quantile_based_volatility", "regime",
         "Discrete vol-regime labels (LOW/MEDIUM/HIGH) via quantile thresholds",
         rr=C, ret=L, dr=N, hor=ME, ot="array", notes="Returns categorical array; useful as regime target or input"),
+    _fe("optimize_quantile_based_volatility_labels", "volatility.quantile_based_volatility", "regime",
+        "Research helper to tune quantile-based volatility label thresholds",
+        rr=M, ret=L, dr=N, hor=ME, ot="dataframe", notes="Research/fit-time only; do not use as a live feature."),
+    _fe("core_volatility_features", "volatility", "volatility",
+        "Core OHLC volatility feature bundle: close-to-close, range, ATR, VoV, term structure, and jump metrics",
+        rr=H, ret=M, dr=N, hor=ME, ot="dataframe", vol=True,
+        notes="volume_col is optional; realized volatility features require DatetimeIndex."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -398,6 +406,16 @@ _PATH_STRUCTURE = [
 # VOLUME MODULE
 # ─────────────────────────────────────────────────────────────────────────────
 _VOLUME = [
+    _fe("core_volume_features", "volume", "volume_structure",
+        "Core volume feature bundle: volume momentum, profile, divergence, VWAP, A/D, and MFI variants",
+        rr=H, ret=H, dr=H, hor=ME, wbi=[TR, VO], dir_=True, vol=True, ot="dataframe"),
+    _fe("mfi_volume_features", "volume", "volume_structure",
+        "Comprehensive MFI feature bundle with classic pattern codes plus advanced flow features",
+        rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, vol=True, ot="dataframe"),
+    _fe("discretize_volume", "volume", "volume_structure",
+        "Quantile-bin volume into adaptive participation regimes",
+        rr=M, ret=M, dr=N, hor=I, vol=True, ot="dataframe",
+        notes="Returns bin labels plus bin metadata; fix edges in production to avoid train/live drift."),
     _fe("abnormal_volume",         "volume", "volume_structure",
         "Z-score of volume vs rolling mean — anomalous activity flag", rr=H, ret=M, dr=N, hor=I, wbi=[VO, CR], vol=True),
     _fe("volume_profile",          "volume", "volume_structure",
@@ -428,6 +446,12 @@ _VOLUME = [
         rr=M, ret=H, dr=H, hor=S, wbi=[TR], dir_=True, vol=True),
     _fe("ad","volume", "order_flow", "Accumulation/Distribution (Williams or MT method)",
         rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True, vol=True),
+    _fe("tick_volume_phase_zscore", "volume", "volume_structure",
+        "Session-phase-aware tick-volume z-score",
+        rr=H, ret=M, dr=N, hor=I, wbi=[VO], vol=True),
+    _fe("tick_volume_how_zscore", "volume", "volume_structure",
+        "Hour-of-week tick-volume z-score for recurring liquidity seasonality",
+        rr=H, ret=M, dr=N, hor=I, wbi=[VO], vol=True),
     _fe("market_facilitation_index","volume", "volume_structure",
         "BW MFI + pattern codes (Green/Fade/Fake/Squat)", rr=H, ret=M, dr=N, hor=I, vol=True,
         ot="dataframe", notes="Returns mfi value and pattern code columns"),
@@ -440,6 +464,9 @@ _VOLUME = [
 # MOMENTUM MODULE
 # ─────────────────────────────────────────────────────────────────────────────
 _MOMENTUM = [
+    _fe("core_momentum_features", "momentum", "composite",
+        "Core momentum feature bundle: returns, ROC, oscillators, ADX, William Blau, proximity, velocity, and Aggregate M",
+        rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
     # Rate of Change
     _fe("log_returns","momentum", "momentum", "Log returns: ln(close[t] / close[t-period])",
         rr=L, ret=H, dr=H, hor=I, dir_=True),
@@ -482,13 +509,19 @@ _MOMENTUM = [
     _fe("efficiency_ratio","momentum", "regime",
         "Kaufman efficiency ratio (momentum.py variant)", rr=H, ret=M, dr=N, hor=ME, wbi=[TR, RA]),
     _fe("adx", "momentum", "regime", "Average Directional Index with +DI/-DI (momentum.py variant)",
-        rr=C, ret=M, dr=M, hor=ME, wbi=[TR, RA], ot="dataframe", notes="Returns adx, plus_di, minus_di columns"),
+        rr=C, ret=M, dr=M, hor=ME, wbi=[TR, RA]),
+    _fe("plus_di", "momentum", "trend",
+        "Positive Directional Indicator component of ADX",
+        rr=H, ret=M, dr=H, hor=ME, wbi=[TR], dir_=True),
+    _fe("minus_di", "momentum", "trend",
+        "Negative Directional Indicator component of ADX",
+        rr=H, ret=M, dr=H, hor=ME, wbi=[TR], dir_=True),
     # William Blau
     _fe("true_strength_index", "momentum", "momentum", "Blau True Strength Index with signal line",
         rr=M, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe", notes="Returns tsi and signal columns"),
     _fe("stochastic_momentum_index", "momentum", "momentum",
         "Blau Stochastic Momentum Index with signal", rr=M, ret=H, dr=H, hor=S, dir_=True, ot="dataframe"),
-    _fe("directional_trend_index_blau",  "momentum", "trend",
+    _fe("directional_trend_index",  "momentum", "trend",
         "Blau Directional Trend Index — smoothed directional bias", rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
     _fe("directional_efficiency_index",  "momentum", "regime",
         "Blau Directional Efficiency Index", rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
@@ -520,6 +553,15 @@ _MOMENTUM = [
     # Aggregate & cross-sectional
     _fe("aggregate_m","momentum", "composite",
         "David Varadi's Aggregate M++ multi-timeframe momentum", rr=L, ret=H, dr=H, hor=ME, dir_=True),
+    _fe("aggregate_m_components", "momentum", "composite",
+        "David Varadi Aggregate M component bundle before final aggregation",
+        rr=L, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
+    _fe("dvo", "momentum", "momentum",
+        "David Varadi DV oscillator: short-term mean-reversion pressure from HLC ranks",
+        rr=M, ret=H, dr=H, hor=S, wbi=[RA], dir_=True),
+    _fe("dv2", "momentum", "momentum",
+        "David Varadi DV2 oscillator: two-day-style close position rank",
+        rr=M, ret=H, dr=H, hor=S, wbi=[RA], dir_=True),
     _fe("rolling_sharpe","momentum", "momentum",
         "Rolling Sharpe ratio of returns", rr=M, ret=M, dr=H, hor=ME, dir_=True),
     _fe("imom","momentum", "momentum",
@@ -536,14 +578,56 @@ _MOMENTUM = [
 # TREND MODULE
 # ─────────────────────────────────────────────────────────────────────────────
 _TREND = [
+    _fe("core_trend_features", "trend", "composite",
+        "Core trend feature bundle: bands, CCI, Heikin Ashi, Precision Trend, CTL, persistence, and z-score trend",
+        rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
     # Causal labeling functions (produce 1/-1/0 signals)
     _fe("continuous_trend_labeling", "trend", "trend",
         "State-machine trend label: +1 up, -1 down, 0 neutral", rr=H, ret=M, dr=H, hor=S, dir_=True),
     _fe("continuous_ma_trend_labeling", "trend", "trend",
         "MA-deviation trend label: +1/-1/0/NaN", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
     _fe("zscore_trend_labeling","trend", "trend","Z-score threshold trend label: +1/-1/0", rr=H, ret=M, dr=H, hor=S, dir_=True),
+    _fe("zscore_trend_features", "trend", "trend",
+        "Continuous z-score trend exhaustion features: z-score, derivative, and absolute magnitude",
+        rr=H, ret=H, dr=M, hor=S, wbi=[RA, VO], ot="dataframe"),
     _fe("trend_persistence_labeling",   "trend", "trend",
         "Volatility-adjusted directional drift label", rr=H, ret=H, dr=H, hor=ME, dir_=True),
+    _fe("find_optimal_continuous_trend_parameters", "trend", "trend",
+        "Research helper to tune continuous trend labeling parameters by time-series validation",
+        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("determine_optimal_ma_omega", "trend", "trend",
+        "Research helper to choose MA trend omega for a target neutral-label distribution",
+        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="scalar", notes="Research/fit-time only; not a live feature."),
+    _fe("optimize_zscore_trend_labeling_params", "trend", "trend",
+        "Research helper to tune z-score trend labeling parameters",
+        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("optimize_zscore_params_multiasset", "trend", "trend",
+        "Research helper to tune z-score trend parameters across multiple assets",
+        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("optimize_trend_persistence", "trend", "trend",
+        "Research helper to rank trend-persistence parameter grids",
+        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("evaluate_trend_performance", "trend", "trend",
+        "Evaluate trend labels against realized returns and persistence diagnostics",
+        rr=M, ret=M, dr=M, hor=A, dir_=True, ot="dataframe", notes="Evaluation helper, not a live feature."),
+    _fe("compare_trend_methods", "trend", "trend",
+        "Compare multiple trend labeling methods on common evaluation diagnostics",
+        rr=M, ret=M, dr=M, hor=A, dir_=True, ot="dataframe", notes="Evaluation helper, not a live feature."),
+    _fe("analyze_optimal_ma_omega", "trend", "trend",
+        "Analyze MA trend omega choices over candidate thresholds",
+        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("analyze_instrument_ma_omega", "trend", "trend",
+        "Analyze MA trend omega for one named instrument",
+        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("compare_ma_omega_values", "trend", "trend",
+        "Compare MA trend labels across omega values",
+        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
+    _fe("compute_metrics", "trend", "trend",
+        "Compute strategy and label diagnostics for trend evaluation",
+        rr=L, ret=L, dr=L, hor=A, ot="dataframe", notes="Evaluation helper, not a live feature."),
+    _fe("simulate_strategy_returns", "trend", "trend",
+        "Simulate returns from trend labels and realized returns",
+        rr=L, ret=L, dr=L, hor=A, dir_=True, notes="Evaluation helper, not a live feature."),
     # Supplementary indicators
     _fe("bollinger_band", "trend", "price_structure", "Bollinger Bands: upper/mid/lower/%B/width",
         rr=H, ret=M, dr=M, hor=S, wbi=[RA], ot="dataframe", notes="Returns 5 columns: upper, mid, lower, pct_b, width"),
@@ -768,6 +852,10 @@ _CANDLE = [
 # FRACTIONAL DIFFERENTIATION
 # ─────────────────────────────────────────────────────────────────────────────
 _FRACTIONAL_DIFF = [
+    _fe("get_weights", "fractional_diff", "information",
+        "Compute fractional-differencing weights for a given order d",
+        rr=L, ret=M, dr=N, hor=LG, ot="array",
+        notes="Low-level helper; useful for reproducibility of fractional differentiation studies."),
     _fe("fractional_differentiate_series", "fractional_diff", "information",
         "Apply fractional differentiation (order d) — preserves memory while inducing stationarity",
         rr=M, ret=H, dr=N, hor=LG,
@@ -808,6 +896,16 @@ _TEMPORAL = [
 # MOVING AVERAGE / CHANNEL FEATURES (ma.py)
 # ─────────────────────────────────────────────────────────────────────────────
 _MA_FEATURES = [
+    _fe("sma", "ma", "trend", "Simple moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("ema", "ma", "trend", "Exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("lwma", "ma", "trend", "Linearly weighted moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("dema", "ma", "trend", "Double exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("tema", "ma", "trend", "Triple exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("smma", "ma", "trend", "Smoothed moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
+    _fe("vwap", "ma", "price_structure", "Volume-weighted average price", rr=M, ret=M, dr=M, hor=I, dir_=True, vol=True),
+    _fe("moving_average", "ma", "trend",
+        "Dispatcher for configured moving-average type",
+        rr=L, ret=M, dr=M, hor=S, dir_=True),
     _fe("keltner_channels", "ma", "price_structure",
         "Keltner Channels: EMA ± ATR-multiple bands — volatility-based price channel",
         rr=M, ret=M, dr=M, hor=S, wbi=[TR, RA],
@@ -818,6 +916,12 @@ _MA_FEATURES = [
 # SIGNAL SMOOTHING / FILTERING (filters.py)
 # ─────────────────────────────────────────────────────────────────────────────
 _FILTERS = [
+    _fe("smooth_ema", "filters", "price_structure",
+        "Causal exponential moving-average smoother", rr=L, ret=M, dr=N, hor=A, causal=True),
+    _fe("smooth_sma", "filters", "price_structure",
+        "Causal simple moving-average smoother", rr=L, ret=M, dr=N, hor=A, causal=True),
+    _fe("smooth_wma", "filters", "price_structure",
+        "Causal weighted moving-average smoother", rr=L, ret=M, dr=N, hor=A, causal=True),
     _fe("smooth_kalman", "filters", "price_structure",
         "Causal 1-D Kalman filter smoother — optimal linear state estimation",
         rr=M, ret=M, dr=N, hor=A, causal=True,
@@ -842,6 +946,56 @@ _FILTERS = [
         "LOESS locally-weighted scatterplot smoother",
         rr=L, ret=M, dr=N, hor=A, causal=False,
         notes="NON-CAUSAL: uses future data. Research / offline analysis only. Not suitable for live trading."),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIRECTIONAL CHANGE
+# ─────────────────────────────────────────────────────────────────────────────
+_DIRECTIONAL_CHANGE = [
+    _fe("parse_dc_events", "directional_change", "price_structure",
+        "Parse directional-change events from a price series",
+        rr=H, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe"),
+    _fe("dc_live_features", "directional_change", "price_structure",
+        "Live-safe directional-change state features",
+        rr=H, ret=H, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="dataframe"),
+    _fe("log_r", "directional_change", "price_structure",
+        "Log-return feature over directional-change trend legs",
+        rr=M, ret=H, dr=H, hor=S, dir_=True),
+    _fe("normalise_minmax", "directional_change", "price_structure",
+        "Min-max normalization helper for directional-change features",
+        rr=L, ret=L, dr=N, hor=A, ot="dataframe"),
+    _fe("idc_parse", "directional_change", "price_structure",
+        "Intrinsic directional-change parser with theta and alpha thresholds",
+        rr=H, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe"),
+    _fe("label_alpha_beta_dc", "directional_change", "trend",
+        "Alpha/beta directional-change class labels",
+        rr=H, ret=M, dr=H, hor=ME, dir_=True, ot="dataframe"),
+    _fe("extract_dc_classification_features", "directional_change", "price_structure",
+        "Directional-change classification feature bundle",
+        rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
+    _fe("parse_dual_dc", "directional_change", "price_structure",
+        "Parse short- and broad-threshold directional-change event streams",
+        rr=H, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe"),
+    _fe("label_bbtheta", "directional_change", "trend",
+        "Dual-threshold directional-change labels",
+        rr=H, ret=M, dr=H, hor=ME, dir_=True, ot="dataframe"),
+    _fe("extract_tsfdc_features", "directional_change", "price_structure",
+        "Two-scale directional-change feature bundle",
+        rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIPLE-BARRIER HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+_TBM = [
+    _fe("compute_barrier_levels", "tbm", "volatility",
+        "Compute profit-taking and stop-loss price levels from entry price, volatility, and multipliers",
+        rr=L, ret=M, dr=M, hor=A, dir_=True, ot="dataframe",
+        notes="Triple-barrier labeling helper; use only with causal volatility estimates."),
+    _fe("check_barrier_touch", "tbm", "trend",
+        "Return which triple-barrier side a price touched",
+        rr=L, ret=M, dr=H, hor=A, dir_=True,
+        notes="Triple-barrier labeling helper, not a standalone predictive feature."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -876,4 +1030,6 @@ CATALOG: list[FeatureEntry] = (
     + _TEMPORAL
     + _MA_FEATURES
     + _FILTERS
+    + _DIRECTIONAL_CHANGE
+    + _TBM
 )

@@ -54,6 +54,10 @@ class ScreenerResult:
     mda_rank: pd.Series
     stage_reports: List[StageReport] = field(default_factory=list)
     icir_scores: dict = field(default_factory=dict)
+    stage1_scores: dict = field(default_factory=dict)
+    cluster_assignments: dict = field(default_factory=dict)
+    cluster_representatives: dict = field(default_factory=dict)
+    boruta_groups: dict = field(default_factory=dict)
 
     def summary(self) -> pd.DataFrame:
         """Return a DataFrame summarising the stage-by-stage reduction."""
@@ -98,12 +102,11 @@ class ScreenerResult:
         ----------
         s1_scores : dict or None
             Stage 1 score dict returned by stage1_regime/stage1_return
-            e.g. ``{"mi": pd.Series, "ks": pd.Series}`` or
-            ``{"mi": pd.Series, "dcor": pd.Series}``.
-            Pass this to include Stage 1 scores in the audit.
+            e.g. ``{"mi": pd.Series, "ks": pd.Series}`` or ``{"mi": pd.Series, "dcor": pd.Series}``.
+            When None, falls back to ``self.stage1_scores`` populated by the screener.
         boruta_groups : dict or None
-            ``{"confirmed": [...], "tentative": [...], "rejected": [...]}``
-            returned by stage4_boruta. Pass to include Boruta decision.
+            ``{"confirmed": [...], "tentative": [...], "rejected": [...]}`` returned by stage4_boruta.
+            When None, falls back to ``self.boruta_groups`` populated by the screener.
 
         Returns
         -------
@@ -112,6 +115,10 @@ class ScreenerResult:
             boruta_status, + any Stage 1 score columns provided.
             Sorted: confirmed first, then tentative, then by elimination stage.
         """
+        if s1_scores is None:
+            s1_scores = self.stage1_scores
+        if boruta_groups is None:
+            boruta_groups = self.boruta_groups
         # Build elimination map: feature -> stage name
         eliminated_at: dict[str, str] = {}
         for report in self.stage_reports:

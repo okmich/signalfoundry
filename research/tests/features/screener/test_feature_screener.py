@@ -281,7 +281,7 @@ class TestStage3:
         # feat_0 and feat_5 are near-identical
         X_in = X[["feat_0", "feat_1", "feat_5"]]
         icir = {"feat_0": 2.0, "feat_1": 1.0, "feat_5": 1.5}
-        X_out, report = stage3_redundancy(X_in, icir, corr_threshold=0.80, verbose=False)
+        X_out, report, _ = stage3_redundancy(X_in, icir, corr_threshold=0.80, verbose=False)
         # feat_5 should be absorbed into feat_0's cluster
         assert "feat_5" not in X_out.columns
 
@@ -290,13 +290,13 @@ class TestStage3:
         X_in = X[["feat_0", "feat_5"]]  # near-identical
         # feat_5 has higher IC-IR — it should be kept
         icir = {"feat_0": 1.0, "feat_5": 3.0}
-        X_out, report = stage3_redundancy(X_in, icir, corr_threshold=0.80, verbose=False)
+        X_out, report, _ = stage3_redundancy(X_in, icir, corr_threshold=0.80, verbose=False)
         assert "feat_5" in X_out.columns
         assert "feat_0" not in X_out.columns
 
     def test_single_feature_passthrough(self):
         X = pd.DataFrame({"a": np.random.randn(100)})
-        X_out, report = stage3_redundancy(X, {"a": 1.0}, verbose=False)
+        X_out, report, _ = stage3_redundancy(X, {"a": 1.0}, verbose=False)
         assert "a" in X_out.columns
         assert report.n_removed == 0
 
@@ -306,16 +306,16 @@ class TestStage3:
             "a": np.random.randn(200),
             "b": np.random.randn(200),
         })
-        X_out, report = stage3_redundancy(X, {"a": 1.0, "b": 1.0},
-                                           corr_threshold=0.75, verbose=False)
+        X_out, report, _ = stage3_redundancy(X, {"a": 1.0, "b": 1.0},
+                                              corr_threshold=0.75, verbose=False)
         assert "a" in X_out.columns
         assert "b" in X_out.columns
 
     def test_report_stage_name(self, synthetic_regime_data):
         X, _ = synthetic_regime_data
         X_in = X[["feat_0", "feat_1"]]
-        _, report = stage3_redundancy(X_in, {"feat_0": 1.0, "feat_1": 1.0},
-                                      verbose=False)
+        _, report, _ = stage3_redundancy(X_in, {"feat_0": 1.0, "feat_1": 1.0},
+                                          verbose=False)
         assert report.stage == "Stage3_Redundancy"
 
 
