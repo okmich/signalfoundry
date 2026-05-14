@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -197,7 +199,7 @@ def test_rolling_mean_handles_empty_input() -> None:
     assert transformed.shape == (0, 3)
 
 
-def test_platt_scaling_without_fit_is_identity() -> None:
+def test_platt_scaling_without_fit_warns_and_returns_identity() -> None:
     probs = np.array(
         [
             [0.70, 0.20, 0.10],
@@ -208,9 +210,12 @@ def test_platt_scaling_without_fit_is_identity() -> None:
     )
     transformer = PlattScalingTransformer()
 
-    transformed = transformer.transform(probs)
+    with pytest.warns(UserWarning, match="before fit"):
+        transformed = transformer.transform(probs)
 
     np.testing.assert_allclose(transformed, probs, atol=1e-10)
+    assert transformer.fit_success_ is False
+    assert transformer.fit_message_ == "not fitted"
 
 
 def test_platt_scaling_fit_improves_nll_on_overconfident_predictions() -> None:
@@ -323,7 +328,8 @@ def test_temperature_scaling_fit_improves_nll_on_overconfident_predictions() -> 
     transformed = transformer.transform(probs)
     improved_nll = _nll(transformed, y_idx)
 
-    assert transformer.temperature > 1.0
+    assert transformer.fit_success_ is True
+    assert transformer.temperature_ is not None and transformer.temperature_ > 1.0
     assert improved_nll < baseline_nll
 
 
@@ -354,7 +360,8 @@ def test_maturation_align_shifts_rows_and_prepends_uniform() -> None:
     out = MaturationAlignTransformer(lag=2).transform(probs)
 
     assert out.shape == probs.shape
-    # First `lag` rows are the uniform prior.
+    # First `lag` rows are the uniform prior so downstream gates flow through
+    # the validator instead of being rejected on NaN.
     np.testing.assert_allclose(out[0], np.full(3, 1.0 / 3), atol=1e-12)
     np.testing.assert_allclose(out[1], np.full(3, 1.0 / 3), atol=1e-12)
     # Subsequent rows are the input shifted down by `lag`.
@@ -417,3 +424,66 @@ def test_maturation_align_zero_lag_does_not_clip() -> None:
     out = MaturationAlignTransformer(lag=0).transform(probs)
 
     np.testing.assert_array_equal(out, probs)
+
+
+def test_temperature_scaling_raises_on_optimizer_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([0, 1, 2], dtype=np.int64)
+    transformer = TemperatureScalingTransformer()
+
+    def fake_minimize_scalar(*args, **kwargs):
+        return SimpleNamespace(success=False, x=1.0, message="forced failure for test")
+
+    monkeypatch.setattr("okmich_quant_ml.posterior_inference.transformers.minimize_scalar", fake_minimize_scalar)
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        transformer.fit(probs, y_idx)
+    assert transformer.fit_success_ is False
+    assert "forced failure" in transformer.fit_message_
+    assert transformer.temperature_ is None
+
+
+def test_platt_scaling_raises_on_optimizer_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([0, 1, 2], dtype=np.int64)
+    transformer = PlattScalingTransformer()
+
+    def fake_minimize(*args, **kwargs):
+        return SimpleNamespace(success=False, x=np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]),
+                               message="forced failure for test")
+
+    monkeypatch.setattr("okmich_quant_ml.posterior_inference.transformers.minimize", fake_minimize)
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        transformer.fit(probs, y_idx)
+    assert transformer.fit_success_ is False
+    assert "forced failure" in transformer.fit_message_
+    assert transformer.a_ is None and transformer.b_ is None
+
+
+def test_temperature_scaling_rejects_empty_calibration_set() -> None:
+    probs = np.zeros((0, 3), dtype=float)
+    y_idx = np.array([], dtype=np.int64)
+    with pytest.raises(ValueError, match="empty calibration set"):
+        TemperatureScalingTransformer().fit(probs, y_idx)
+
+
+def test_temperature_scaling_rejects_single_class_calibration_set() -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([1, 1, 1], dtype=np.int64)
+    with pytest.raises(ValueError, match="only one class"):
+        TemperatureScalingTransformer().fit(probs, y_idx)
+
+
+def test_platt_scaling_rejects_empty_calibration_set() -> None:
+    probs = np.zeros((0, 3), dtype=float)
+    y_idx = np.array([], dtype=np.int64)
+    with pytest.raises(ValueError, match="empty calibration set"):
+        PlattScalingTransformer().fit(probs, y_idx)
+
+
+def test_platt_scaling_rejects_single_class_calibration_set() -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([0, 0, 0], dtype=np.int64)
+    with pytest.raises(ValueError, match="only one class"):
+        PlattScalingTransformer().fit(probs, y_idx)

@@ -13,10 +13,12 @@ from okmich_quant_ml.posterior_inference import (
     dwell_length,
     entropy,
     margin,
+    posterior_delta,
     rolling_entropy_std,
     rolling_flip_rate,
     rolling_max_prob_std,
     step_kl,
+    top_prob,
 )
 
 
@@ -352,6 +354,8 @@ def test_dynamic_features_reject_nan_input() -> None:
     with pytest.raises(ValueError, match="NaN or Inf"):
         step_kl(bad)
     with pytest.raises(ValueError, match="NaN or Inf"):
+        posterior_delta(bad)
+    with pytest.raises(ValueError, match="NaN or Inf"):
         rolling_flip_rate(bad, window=2)
     with pytest.raises(ValueError, match="NaN or Inf"):
         rolling_max_prob_std(bad, window=2)
@@ -359,3 +363,105 @@ def test_dynamic_features_reject_nan_input() -> None:
         rolling_entropy_std(bad, window=2)
     with pytest.raises(ValueError, match="NaN or Inf"):
         dwell_length(bad)
+
+
+def test_top_prob_returns_max_per_row() -> None:
+    probs = np.array(
+        [
+            [0.10, 0.70, 0.20],
+            [0.50, 0.30, 0.20],
+            [1.00, 0.00, 0.00],
+        ],
+        dtype=float,
+    )
+
+    np.testing.assert_allclose(top_prob(probs), np.array([0.70, 0.50, 1.00]), atol=1e-12)
+
+
+def test_top_prob_rejects_higher_rank_input() -> None:
+    with pytest.raises(ValueError, match="top_prob requires"):
+        top_prob(np.zeros((2, 3, 4), dtype=float))
+
+
+def test_top_prob_rejects_nan_input() -> None:
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        top_prob(np.array([[0.5, np.nan]], dtype=float))
+
+
+def test_margin_rejects_nan_input() -> None:
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        margin(np.array([[0.5, np.nan]], dtype=float))
+
+
+def test_entropy_rejects_nan_input() -> None:
+    with pytest.raises(ValueError, match="NaN or Inf"):
+        entropy(np.array([[0.5, np.nan]], dtype=float))
+
+
+def test_validator_accepts_floating_point_noise_negatives() -> None:
+    # FP drift from cumsum / smoothing produces negatives at the 1e-15 — 1e-12 scale.
+    # These must be silently accepted as floating-point noise, not corruption.
+    probs = np.array([[0.5 + 1e-15, 0.5 - 1e-15], [-1e-14, 1.0 + 1e-14]], dtype=float)
+    out = entropy(probs)
+    assert out.shape == (2,)
+    assert np.all(np.isfinite(out))
+
+
+def test_validator_rejects_corruption_level_negative_values() -> None:
+    # A meaningful negative (well below -negativity_tol=1e-9) is upstream-model corruption
+    # and must be rejected loudly rather than silently clipped.
+    bad = np.array([[-0.1, 0.6, 0.5]], dtype=float)
+    with pytest.raises(ValueError, match="negative values below"):
+        entropy(bad)
+    with pytest.raises(ValueError, match="negative values below"):
+        top_prob(bad)
+    with pytest.raises(ValueError, match="negative values below"):
+        margin(bad)
+
+
+def test_posterior_delta_row_zero_is_zeros() -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.5, 0.3, 0.2]], dtype=float)
+    out = posterior_delta(probs)
+
+    np.testing.assert_array_equal(out[0], np.zeros(3))
+
+
+def test_posterior_delta_computes_signed_per_state_difference() -> None:
+    probs = np.array(
+        [
+            [0.10, 0.70, 0.20],
+            [0.40, 0.40, 0.20],
+            [0.40, 0.40, 0.20],
+        ],
+        dtype=float,
+    )
+    out = posterior_delta(probs)
+
+    np.testing.assert_allclose(out[1], np.array([0.30, -0.30, 0.00]), atol=1e-12)
+    np.testing.assert_allclose(out[2], np.zeros(3), atol=1e-12)
+
+
+def test_posterior_delta_rows_sum_to_zero_for_simplex_inputs() -> None:
+    rng = np.random.default_rng(42)
+    probs = rng.dirichlet(np.ones(4), size=20)
+
+    np.testing.assert_allclose(posterior_delta(probs).sum(axis=1), 0.0, atol=1e-12)
+
+
+def test_posterior_delta_handles_single_row() -> None:
+    probs = np.array([[0.5, 0.5]], dtype=float)
+    out = posterior_delta(probs)
+
+    assert out.shape == (1, 2)
+    np.testing.assert_array_equal(out, np.zeros((1, 2)))
+
+
+def test_posterior_delta_handles_empty_input() -> None:
+    out = posterior_delta(np.zeros((0, 3), dtype=float))
+
+    assert out.shape == (0, 3)
+
+
+def test_posterior_delta_rejects_non_matrix_input() -> None:
+    with pytest.raises(ValueError, match="posterior_delta requires"):
+        posterior_delta(np.array([0.5, 0.5], dtype=float))
