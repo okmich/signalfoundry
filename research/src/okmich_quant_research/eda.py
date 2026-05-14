@@ -504,9 +504,8 @@ class FeatureEDA:
     # ============================================================================
     # 3. CORRELATION & MULTICOLLINEARITY ANALYSIS
     # ============================================================================
-    def analyze_correlation(
-        self, threshold: float = 0.8, method: str = "pearson"
-    ) -> Tuple[pd.DataFrame, List[Tuple[str, str, float]]]:
+    def analyze_correlation(self, threshold: float = 0.8,
+                            method: str = "pearson") -> Tuple[pd.DataFrame, List[Tuple[str, str, float]]]:
         """
         Correlation analysis and redundant feature detection.
 
