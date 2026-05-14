@@ -6,7 +6,7 @@ from scipy.special import rel_entr, xlogy
 
 
 def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12,
-                               normalize: bool = False) -> NDArray:
+                               normalize: bool = False, negativity_tol: float = 1e-9) -> NDArray:
     """Validate a posterior matrix and optionally normalize rows onto the simplex.
 
     With ``normalize=False`` (default), the returned array is the input cast to
@@ -16,13 +16,29 @@ def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-1
     With ``normalize=True``, values are clipped to ``eps`` and each row is
     rescaled to sum to 1. Use this for calibration / smoothing transformers that
     need log-safe input.
+
+    Values more negative than ``-negativity_tol`` are always rejected as
+    upstream-model corruption regardless of ``normalize``. The default
+    ``negativity_tol=1e-9`` accepts floating-point drift (cumsum / smoothing
+    noise typically in the ``1e-15 — 1e-12`` range) while flagging actual
+    negative probability mass.
     """
     p = np.asarray(probs, dtype=float)
     if p.ndim != 2 or p.shape[1] < 2:
         raise ValueError(f"{func_name} requires posterior matrix (T, K) with K >= 2, got shape={p.shape}")
     if p.size > 0 and not np.isfinite(p.sum()):
         raise ValueError(f"{func_name}: posterior matrix contains NaN or Inf values.")
+    if p.size > 0 and p.min() < -negativity_tol:
+        raise ValueError(
+            f"{func_name}: posterior contains negative values below -{negativity_tol} (min={p.min():.3e}); "
+            f"this indicates upstream model corruption, not floating-point drift."
+        )
     if not normalize:
+        # Tiny FP-noise negatives (within negativity_tol) were accepted above; clip
+        # them to 0 silently so downstream log-based math (entropy, KL) is safe.
+        # No-op when the input is already strictly non-negative.
+        if p.size > 0 and p.min() < 0.0:
+            return np.maximum(p, 0.0)
         return p
 
     clipped = np.clip(p, eps, None)
@@ -39,18 +55,37 @@ def _validate_window(window: int, func_name: str) -> None:
 
 
 def margin(probs: NDArray) -> NDArray:
-    """Return top-minus-second probability margin along the last axis."""
-    p = np.asarray(probs)
-    if p.shape[-1] < 2:
-        raise ValueError(f"margin requires at least 2 classes on the last axis, got {p.shape[-1]}")
-    partitioned = np.partition(p, -2, axis=-1)
-    return partitioned[..., -1] - partitioned[..., -2]
+    """Top-minus-second probability margin per row, shape ``(T,)``.
+
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
+    the validation gate consistent with the rest of the package's public
+    surface.
+    """
+    p = _validate_posterior_matrix(probs, "margin")
+    partitioned = np.partition(p, -2, axis=1)
+    return partitioned[:, -1] - partitioned[:, -2]
+
+
+def top_prob(probs: NDArray) -> NDArray:
+    """Top-class probability per row, shape ``(T,)``.
+
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
+    the validation gate consistent with the rest of the package's public
+    surface.
+    """
+    p = _validate_posterior_matrix(probs, "top_prob")
+    return np.max(p, axis=1)
 
 
 def entropy(probs: NDArray) -> NDArray:
-    """Return Shannon entropy in nats along the last axis."""
-    p = np.asarray(probs)
-    return -xlogy(p, p).sum(axis=-1)
+    """Shannon entropy in nats per row, shape ``(T,)``.
+
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
+    the validation gate consistent with the rest of the package's public
+    surface.
+    """
+    p = _validate_posterior_matrix(probs, "entropy")
+    return -xlogy(p, p).sum(axis=1)
 
 
 def step_kl(probs: NDArray, eps: float = 1e-12) -> NDArray:
@@ -70,6 +105,20 @@ def step_kl(probs: NDArray, eps: float = 1e-12) -> NDArray:
     p_prev = np.clip(p[:-1], eps, None)
     p_curr = p[1:]
     out[1:] = rel_entr(p_curr, p_prev).sum(axis=1)
+    return out
+
+
+def posterior_delta(probs: NDArray) -> NDArray:
+    """Per-state posterior change from t-1 to t, shape ``(T, K)``.
+
+    Row 0 is zeros (no prior row). Signed per-state change in belief between
+    consecutive bars; pairs with ``step_kl`` (scalar magnitude) when consumers
+    need direction as well as size of belief shift.
+    """
+    p = _validate_posterior_matrix(probs, "posterior_delta")
+    out = np.zeros_like(p)
+    if p.shape[0] > 1:
+        out[1:] = p[1:] - p[:-1]
     return out
 
 
@@ -138,6 +187,20 @@ def _rolling_mean_1d(x: NDArray, window: int) -> NDArray:
         prev[window:] = cumsum[:-window]
     window_sum = cumsum - prev
     denom = np.minimum(np.arange(1, T + 1), window).astype(float)
+    return window_sum / denom
+
+
+def _rolling_mean_2d(x: NDArray, window: int) -> NDArray:
+    T = x.shape[0]
+    if T == 0:
+        return np.zeros_like(x, dtype=float)
+    x = np.asarray(x, dtype=float)
+    cumsum = np.cumsum(x, axis=0)
+    prev = np.zeros_like(cumsum)
+    if T > window:
+        prev[window:] = cumsum[:-window]
+    window_sum = cumsum - prev
+    denom = np.minimum(np.arange(1, T + 1), window).astype(float).reshape(-1, 1)
     return window_sum / denom
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from numba import njit
 from numpy.typing import NDArray
@@ -29,7 +31,15 @@ def _scalar_nll(probs: NDArray, y_idx: NDArray, eps: float) -> float:
 
 
 class EmaPosteriorTransformer:
-    """Exponential moving average smoothing on posterior rows."""
+    """Exponential moving average smoothing on posterior rows.
+
+    The recurrence is JIT-compiled via ``@njit(cache=True)``. The very first
+    call after a fresh install incurs a one-time Numba compile cost (~1s);
+    subsequent calls within the same install load the cached artifact and
+    pay no compile overhead. Production deployments that warm the inference
+    path at startup (e.g. a pre-market smoke run against historical data)
+    absorb this transparently.
+    """
 
     def __init__(self, alpha: float = 0.20, eps: float = 1e-12) -> None:
         self.alpha = float(alpha)
@@ -107,6 +117,9 @@ class TemperatureScalingTransformer:
         self.eps = float(eps)
         self.search_min = float(search_min)
         self.search_max = float(search_max)
+        self.temperature_: float | None = None
+        self.fit_success_: bool = False
+        self.fit_message_: str = "not fitted"
         self._validate_configuration()
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> TemperatureScalingTransformer:
@@ -116,8 +129,15 @@ class TemperatureScalingTransformer:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
         if len(y) != len(p):
             raise ValueError(f"y_idx length must equal number of rows in probs. Got {len(y)} vs {len(p)}.")
+        if len(y) == 0:
+            raise ValueError("TemperatureScalingTransformer.fit: empty calibration set; calibration is undefined.")
         if np.any(y < 0) or np.any(y >= p.shape[1]):
             raise ValueError(f"y_idx must be in [0, K-1] where K={p.shape[1]}.")
+        if len(np.unique(y)) < 2:
+            raise ValueError(
+                "TemperatureScalingTransformer.fit: degenerate calibration set — y_idx contains only one class; "
+                "calibration is undefined."
+            )
 
         def nll_at_temperature(t: float) -> float:
             return _scalar_nll(self._apply_temperature(p, t), y, eps=self.eps)
@@ -127,14 +147,20 @@ class TemperatureScalingTransformer:
             bounds=(self.search_min, self.search_max),
             method="bounded",
         )
-        # Guard against Brent returning an invalid solution for pathological input.
-        if result.success:
-            self.temperature = float(result.x)
+        self.fit_success_ = bool(result.success)
+        self.fit_message_ = str(getattr(result, "message", "")) or ("converged" if result.success else "failed")
+        if not result.success:
+            raise RuntimeError(
+                f"TemperatureScalingTransformer.fit: optimizer did not converge ({self.fit_message_}). "
+                f"Inspect the calibration data for degeneracies (e.g., single-class y_idx, near-constant probs)."
+            )
+        self.temperature_ = float(result.x)
         return self
 
     def transform(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "TemperatureScalingTransformer", eps=self.eps, normalize=True)
-        return self._apply_temperature(p, self.temperature)
+        t = self.temperature_ if self.temperature_ is not None else self.temperature
+        return self._apply_temperature(p, t)
 
     def _apply_temperature(self, probs: NDArray, temperature: float) -> NDArray:
         if temperature <= 0.0:
@@ -179,6 +205,8 @@ class PlattScalingTransformer:
         self.tol = float(tol)
         self.a_: np.ndarray | None = None
         self.b_: np.ndarray | None = None
+        self.fit_success_: bool = False
+        self.fit_message_: str = "not fitted"
         self._validate_configuration()
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> PlattScalingTransformer:
@@ -188,9 +216,16 @@ class PlattScalingTransformer:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
         if len(y) != len(p):
             raise ValueError(f"y_idx length must equal number of rows in probs. Got {len(y)} vs {len(p)}.")
+        if len(y) == 0:
+            raise ValueError("PlattScalingTransformer.fit: empty calibration set; calibration is undefined.")
         n_classes = p.shape[1]
         if np.any(y < 0) or np.any(y >= n_classes):
             raise ValueError(f"y_idx must be in [0, K-1] where K={n_classes}.")
+        if len(np.unique(y)) < 2:
+            raise ValueError(
+                "PlattScalingTransformer.fit: degenerate calibration set — y_idx contains only one class; "
+                "calibration is undefined."
+            )
 
         log_p = np.log(p)
         y_onehot = np.zeros_like(p)
@@ -214,6 +249,13 @@ class PlattScalingTransformer:
         theta0 = np.concatenate([np.ones(n_classes), np.zeros(n_classes)])
         result = minimize(loss_and_grad, x0=theta0, jac=True, method="L-BFGS-B",
                           options={"maxiter": self.max_iter, "ftol": self.tol, "gtol": self.tol})
+        self.fit_success_ = bool(result.success)
+        self.fit_message_ = str(getattr(result, "message", "")) or ("converged" if result.success else "failed")
+        if not result.success:
+            raise RuntimeError(
+                f"PlattScalingTransformer.fit: optimizer did not converge ({self.fit_message_}). "
+                f"Inspect the calibration data for degeneracies (e.g., single-class y_idx, separable probs)."
+            )
         theta = result.x
         self.a_ = np.asarray(theta[:n_classes], dtype=float)
         self.b_ = np.asarray(theta[n_classes:], dtype=float)
@@ -222,6 +264,12 @@ class PlattScalingTransformer:
     def transform(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "PlattScalingTransformer", eps=self.eps, normalize=True)
         n_classes = p.shape[1]
+        if self.a_ is None or self.b_ is None:
+            warnings.warn(
+                "PlattScalingTransformer.transform called before fit; falling back to identity. "
+                "Call fit(probs, y_idx) first to learn calibration parameters.",
+                UserWarning, stacklevel=2,
+            )
         a = self.a_ if self.a_ is not None else np.ones(n_classes)
         b = self.b_ if self.b_ is not None else np.zeros(n_classes)
         if len(a) != n_classes or len(b) != n_classes:
@@ -249,12 +297,15 @@ class MaturationAlignTransformer:
     for time ``t`` cannot be observed until bar ``t + lag`` arrives, so a decision made *at* time ``t`` must consume the
     posterior for time ``t - lag`` (the row that was computable with data available up to ``t``).
 
-    This transformer performs that shift: output row ``t`` = input row ``t - lag`` for ``t >= lag``, and a uniform prior
-    ``[1/K, ..., 1/K]`` for ``t < lag``. The result has the same shape as the input and is safe to read by time index in
-    a backtest without leaking future information.
+    This transformer performs that shift: output row ``t`` = input row ``t - lag`` for ``t >= lag``, and the uniform
+    prior ``[1/K, ..., 1/K]`` for ``t < lag`` (warmup). Uniform prior is chosen over NaN because every gate inferer in
+    this package validates and rejects NaN at entry — emitting NaN would break pipeline composition with the standard
+    gates. The trade-off: aggregate metrics computed naively across the full output (e.g. ``mean(top_prob(out))``) will
+    include ``1/K`` placeholder mass for the first ``lag`` rows; callers reporting aggregates should slice off the
+    warmup region or use NaN-aware aggregation upstream.
 
-    Alignment is a pure rearrangement: the transformer does not clip or renormalize the input, so degenerate posteriors
-    (e.g. rows with exact zeros) survive unchanged.
+    Alignment is a pure rearrangement on the post-warmup tail: the transformer does not clip or renormalize the input,
+    so degenerate posteriors (e.g. rows with exact zeros) survive unchanged.
     """
 
     def __init__(self, lag: int) -> None:
