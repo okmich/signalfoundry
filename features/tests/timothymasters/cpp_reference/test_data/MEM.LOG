@@ -1,137 +1,137 @@
-SINGLE memory log D:\projects\quant-studies\signalfoundry\features\tests\timothymasters\cpp_reference\test_data\MEM.LOG  4/27/26  14:36:32
-Alloc=26478432:0  8192 bytes  1 allocs  total memory=0 MB
-Alloc=26486672:0  16384 bytes  2 allocs  total memory=0 MB
-Alloc=26503104:0  16384 bytes  3 allocs  total memory=0 MB
-Alloc=26519536:0  16384 bytes  4 allocs  total memory=0 MB
-Alloc=26535968:0  16384 bytes  5 allocs  total memory=0 MB
-Alloc=26552400:0  16384 bytes  6 allocs  total memory=0 MB
-Alloc=27523184:0  800 bytes  7 allocs  total memory=0 MB
-Alloc=27524032:0  800 bytes  8 allocs  total memory=0 MB
-Alloc=26568832:0  800 bytes  9 allocs  total memory=0 MB
-Alloc=26569680:0  800 bytes  10 allocs  total memory=0 MB
-Alloc=26570528:0  800 bytes  11 allocs  total memory=0 MB
-Alloc=26571376:0  800 bytes  12 allocs  total memory=0 MB
-Alloc=26572224:0  800 bytes  13 allocs  total memory=0 MB
-Alloc=26573072:0  800 bytes  14 allocs  total memory=0 MB
-Alloc=26573920:0  800 bytes  15 allocs  total memory=0 MB
-Alloc=26574768:0  800 bytes  16 allocs  total memory=0 MB
-Alloc=26575616:0  800 bytes  17 allocs  total memory=0 MB
-Alloc=26576464:0  800 bytes  18 allocs  total memory=0 MB
-Alloc=26577312:0  800 bytes  19 allocs  total memory=0 MB
-Alloc=26578160:0  800 bytes  20 allocs  total memory=0 MB
-Alloc=26579008:0  800 bytes  21 allocs  total memory=0 MB
-Alloc=26579856:0  800 bytes  22 allocs  total memory=0 MB
-Alloc=26580704:0  800 bytes  23 allocs  total memory=0 MB
-Alloc=26590960:0  800 bytes  24 allocs  total memory=0 MB
-Alloc=26596976:0  800 bytes  25 allocs  total memory=0 MB
-Alloc=26593584:0  800 bytes  26 allocs  total memory=0 MB
-Alloc=26594432:0  800 bytes  27 allocs  total memory=0 MB
-Alloc=26597824:0  800 bytes  28 allocs  total memory=0 MB
-Alloc=26596128:0  800 bytes  29 allocs  total memory=0 MB
-Alloc=26595280:0  800 bytes  30 allocs  total memory=0 MB
-Alloc=26598672:0  800 bytes  31 allocs  total memory=0 MB
-Alloc=26591888:0  800 bytes  32 allocs  total memory=0 MB
-Alloc=26592736:0  800 bytes  33 allocs  total memory=0 MB
-Alloc=26609600:0  800 bytes  34 allocs  total memory=0 MB
-Alloc=26605360:0  800 bytes  35 allocs  total memory=0 MB
-Alloc=26615536:0  800 bytes  36 allocs  total memory=0 MB
-Alloc=26607056:0  800 bytes  37 allocs  total memory=0 MB
-Alloc=26610448:0  800 bytes  38 allocs  total memory=0 MB
-Alloc=26601968:0  800 bytes  39 allocs  total memory=0 MB
-Alloc=26611296:0  800 bytes  40 allocs  total memory=0 MB
-Alloc=26607904:0  800 bytes  41 allocs  total memory=0 MB
-Alloc=26616384:0  800 bytes  42 allocs  total memory=0 MB
-Alloc=26604512:0  800 bytes  43 allocs  total memory=0 MB
+SINGLE memory log D:\projects\quant-studies\signalfoundry\features\tests\timothymasters\cpp_reference\test_data\MEM.LOG  5/17/26  0:55:17
+Alloc=24905568:0  8192 bytes  1 allocs  total memory=0 MB
+Alloc=24913808:0  16384 bytes  2 allocs  total memory=0 MB
+Alloc=24930240:0  16384 bytes  3 allocs  total memory=0 MB
+Alloc=24946672:0  16384 bytes  4 allocs  total memory=0 MB
+Alloc=24963104:0  16384 bytes  5 allocs  total memory=0 MB
+Alloc=24979536:0  16384 bytes  6 allocs  total memory=0 MB
+Alloc=25950320:0  800 bytes  7 allocs  total memory=0 MB
+Alloc=25951168:0  800 bytes  8 allocs  total memory=0 MB
+Alloc=24995968:0  800 bytes  9 allocs  total memory=0 MB
+Alloc=24996816:0  800 bytes  10 allocs  total memory=0 MB
+Alloc=24997664:0  800 bytes  11 allocs  total memory=0 MB
+Alloc=24998512:0  800 bytes  12 allocs  total memory=0 MB
+Alloc=24999360:0  800 bytes  13 allocs  total memory=0 MB
+Alloc=25000208:0  800 bytes  14 allocs  total memory=0 MB
+Alloc=25001056:0  800 bytes  15 allocs  total memory=0 MB
+Alloc=25001904:0  800 bytes  16 allocs  total memory=0 MB
+Alloc=25002752:0  800 bytes  17 allocs  total memory=0 MB
+Alloc=25003600:0  800 bytes  18 allocs  total memory=0 MB
+Alloc=25004448:0  800 bytes  19 allocs  total memory=0 MB
+Alloc=25005296:0  800 bytes  20 allocs  total memory=0 MB
+Alloc=25006144:0  800 bytes  21 allocs  total memory=0 MB
+Alloc=25006992:0  800 bytes  22 allocs  total memory=0 MB
+Alloc=25007840:0  800 bytes  23 allocs  total memory=0 MB
+Alloc=25018096:0  800 bytes  24 allocs  total memory=0 MB
+Alloc=25019024:0  800 bytes  25 allocs  total memory=0 MB
+Alloc=25020720:0  800 bytes  26 allocs  total memory=0 MB
+Alloc=25022416:0  800 bytes  27 allocs  total memory=0 MB
+Alloc=25024960:0  800 bytes  28 allocs  total memory=0 MB
+Alloc=25024112:0  800 bytes  29 allocs  total memory=0 MB
+Alloc=25023264:0  800 bytes  30 allocs  total memory=0 MB
+Alloc=25021568:0  800 bytes  31 allocs  total memory=0 MB
+Alloc=25025808:0  800 bytes  32 allocs  total memory=0 MB
+Alloc=25019872:0  800 bytes  33 allocs  total memory=0 MB
+Alloc=25032496:0  800 bytes  34 allocs  total memory=0 MB
+Alloc=25030800:0  800 bytes  35 allocs  total memory=0 MB
+Alloc=25031648:0  800 bytes  36 allocs  total memory=0 MB
+Alloc=25039280:0  800 bytes  37 allocs  total memory=0 MB
+Alloc=25033344:0  800 bytes  38 allocs  total memory=0 MB
+Alloc=25036736:0  800 bytes  39 allocs  total memory=0 MB
+Alloc=25042672:0  800 bytes  40 allocs  total memory=0 MB
+Alloc=25038432:0  800 bytes  41 allocs  total memory=0 MB
+Alloc=25040128:0  800 bytes  42 allocs  total memory=0 MB
+Alloc=25034192:0  800 bytes  43 allocs  total memory=0 MB
 Entropy constructor (3)
-Alloc=27524880:0  32 bytes  44 allocs  total memory=0 MB
+Alloc=25952016:0  32 bytes  44 allocs  total memory=0 MB
 Entropy destructor
-Free=27524880:0  43 allocs  total memory=0 MB
-Alloc=26612144:0  800 bytes  44 allocs  total memory=0 MB
+Free=25952016:0  43 allocs  total memory=0 MB
+Alloc=25035040:0  800 bytes  44 allocs  total memory=0 MB
 MutInf constructor (3)
-Alloc=27524880:0  64 bytes  45 allocs  total memory=0 MB
+Alloc=25952016:0  64 bytes  45 allocs  total memory=0 MB
 MutInf destructor
-Free=27524880:0  44 allocs  total memory=0 MB
-Alloc=26602816:0  800 bytes  45 allocs  total memory=0 MB
+Free=25952016:0  44 allocs  total memory=0 MB
+Alloc=25035888:0  800 bytes  45 allocs  total memory=0 MB
 FTI: FTI constructor
-Alloc=26617440:0  640 bytes  46 allocs  total memory=0 MB
-Alloc=26618128:0  8184 bytes  47 allocs  total memory=0 MB
-Alloc=26626352:0  264 bytes  48 allocs  total memory=0 MB
-Alloc=26626656:0  264 bytes  49 allocs  total memory=0 MB
-Alloc=26626960:0  264 bytes  50 allocs  total memory=0 MB
-Alloc=27524880:0  132 bytes  51 allocs  total memory=0 MB
-Alloc=26627264:0  400 bytes  52 allocs  total memory=0 MB
-Alloc=26627712:0  400 bytes  53 allocs  total memory=0 MB
-Alloc=26628160:0  264 bytes  54 allocs  total memory=0 MB
+Alloc=25044576:0  640 bytes  46 allocs  total memory=0 MB
+Alloc=25045264:0  8184 bytes  47 allocs  total memory=0 MB
+Alloc=25053488:0  264 bytes  48 allocs  total memory=0 MB
+Alloc=25053792:0  264 bytes  49 allocs  total memory=0 MB
+Alloc=25054096:0  264 bytes  50 allocs  total memory=0 MB
+Alloc=25952016:0  132 bytes  51 allocs  total memory=0 MB
+Alloc=25054400:0  400 bytes  52 allocs  total memory=0 MB
+Alloc=25054848:0  400 bytes  53 allocs  total memory=0 MB
+Alloc=25055296:0  264 bytes  54 allocs  total memory=0 MB
 FTI: FTI destructor
-Free=26617440:0  53 allocs  total memory=0 MB
-Free=26618128:0  52 allocs  total memory=0 MB
-Free=26626352:0  51 allocs  total memory=0 MB
-Free=26626656:0  50 allocs  total memory=0 MB
-Free=26626960:0  49 allocs  total memory=0 MB
-Free=27524880:0  48 allocs  total memory=0 MB
-Free=26627264:0  47 allocs  total memory=0 MB
-Free=26627712:0  46 allocs  total memory=0 MB
-Free=26628160:0  45 allocs  total memory=0 MB
-Alloc=26603664:0  800 bytes  46 allocs  total memory=0 MB
+Free=25044576:0  53 allocs  total memory=0 MB
+Free=25045264:0  52 allocs  total memory=0 MB
+Free=25053488:0  51 allocs  total memory=0 MB
+Free=25053792:0  50 allocs  total memory=0 MB
+Free=25054096:0  49 allocs  total memory=0 MB
+Free=25952016:0  48 allocs  total memory=0 MB
+Free=25054400:0  47 allocs  total memory=0 MB
+Free=25054848:0  46 allocs  total memory=0 MB
+Free=25055296:0  45 allocs  total memory=0 MB
+Alloc=25043520:0  800 bytes  46 allocs  total memory=0 MB
 FTI: FTI constructor
-Alloc=26617440:0  640 bytes  47 allocs  total memory=0 MB
-Alloc=26618128:0  8184 bytes  48 allocs  total memory=0 MB
-Alloc=26626352:0  264 bytes  49 allocs  total memory=0 MB
-Alloc=26626656:0  264 bytes  50 allocs  total memory=0 MB
-Alloc=26626960:0  264 bytes  51 allocs  total memory=0 MB
-Alloc=27524880:0  132 bytes  52 allocs  total memory=0 MB
-Alloc=26627264:0  400 bytes  53 allocs  total memory=0 MB
-Alloc=26627712:0  400 bytes  54 allocs  total memory=0 MB
-Alloc=26628160:0  264 bytes  55 allocs  total memory=0 MB
+Alloc=25044576:0  640 bytes  47 allocs  total memory=0 MB
+Alloc=25045264:0  8184 bytes  48 allocs  total memory=0 MB
+Alloc=25053488:0  264 bytes  49 allocs  total memory=0 MB
+Alloc=25053792:0  264 bytes  50 allocs  total memory=0 MB
+Alloc=25054096:0  264 bytes  51 allocs  total memory=0 MB
+Alloc=25952016:0  132 bytes  52 allocs  total memory=0 MB
+Alloc=25054400:0  400 bytes  53 allocs  total memory=0 MB
+Alloc=25054848:0  400 bytes  54 allocs  total memory=0 MB
+Alloc=25055296:0  264 bytes  55 allocs  total memory=0 MB
 FTI: FTI destructor
-Free=26617440:0  54 allocs  total memory=0 MB
-Free=26618128:0  53 allocs  total memory=0 MB
-Free=26626352:0  52 allocs  total memory=0 MB
-Free=26626656:0  51 allocs  total memory=0 MB
-Free=26626960:0  50 allocs  total memory=0 MB
-Free=27524880:0  49 allocs  total memory=0 MB
-Free=26627264:0  48 allocs  total memory=0 MB
-Free=26627712:0  47 allocs  total memory=0 MB
-Free=26628160:0  46 allocs  total memory=0 MB
-Alloc=26601120:0  800 bytes  47 allocs  total memory=0 MB
+Free=25044576:0  54 allocs  total memory=0 MB
+Free=25045264:0  53 allocs  total memory=0 MB
+Free=25053488:0  52 allocs  total memory=0 MB
+Free=25053792:0  51 allocs  total memory=0 MB
+Free=25054096:0  50 allocs  total memory=0 MB
+Free=25952016:0  49 allocs  total memory=0 MB
+Free=25054400:0  48 allocs  total memory=0 MB
+Free=25054848:0  47 allocs  total memory=0 MB
+Free=25055296:0  46 allocs  total memory=0 MB
+Alloc=25029952:0  800 bytes  47 allocs  total memory=0 MB
 FTI: FTI constructor
-Alloc=26617440:0  640 bytes  48 allocs  total memory=0 MB
-Alloc=26618128:0  8184 bytes  49 allocs  total memory=0 MB
-Alloc=26626352:0  264 bytes  50 allocs  total memory=0 MB
-Alloc=26626656:0  264 bytes  51 allocs  total memory=0 MB
-Alloc=26626960:0  264 bytes  52 allocs  total memory=0 MB
-Alloc=27524880:0  132 bytes  53 allocs  total memory=0 MB
-Alloc=26627264:0  400 bytes  54 allocs  total memory=0 MB
-Alloc=26627712:0  400 bytes  55 allocs  total memory=0 MB
-Alloc=26628160:0  264 bytes  56 allocs  total memory=0 MB
+Alloc=25044576:0  640 bytes  48 allocs  total memory=0 MB
+Alloc=25045264:0  8184 bytes  49 allocs  total memory=0 MB
+Alloc=25053488:0  264 bytes  50 allocs  total memory=0 MB
+Alloc=25053792:0  264 bytes  51 allocs  total memory=0 MB
+Alloc=25054096:0  264 bytes  52 allocs  total memory=0 MB
+Alloc=25952016:0  132 bytes  53 allocs  total memory=0 MB
+Alloc=25054400:0  400 bytes  54 allocs  total memory=0 MB
+Alloc=25054848:0  400 bytes  55 allocs  total memory=0 MB
+Alloc=25055296:0  264 bytes  56 allocs  total memory=0 MB
 FTI: FTI destructor
-Free=26617440:0  55 allocs  total memory=0 MB
-Free=26618128:0  54 allocs  total memory=0 MB
-Free=26626352:0  53 allocs  total memory=0 MB
-Free=26626656:0  52 allocs  total memory=0 MB
-Free=26626960:0  51 allocs  total memory=0 MB
-Free=27524880:0  50 allocs  total memory=0 MB
-Free=26627264:0  49 allocs  total memory=0 MB
-Free=26627712:0  48 allocs  total memory=0 MB
-Free=26628160:0  47 allocs  total memory=0 MB
-Alloc=26614688:0  800 bytes  48 allocs  total memory=0 MB
+Free=25044576:0  55 allocs  total memory=0 MB
+Free=25045264:0  54 allocs  total memory=0 MB
+Free=25053488:0  53 allocs  total memory=0 MB
+Free=25053792:0  52 allocs  total memory=0 MB
+Free=25054096:0  51 allocs  total memory=0 MB
+Free=25952016:0  50 allocs  total memory=0 MB
+Free=25054400:0  49 allocs  total memory=0 MB
+Free=25054848:0  48 allocs  total memory=0 MB
+Free=25055296:0  47 allocs  total memory=0 MB
+Alloc=25037584:0  800 bytes  48 allocs  total memory=0 MB
 FTI: FTI constructor
-Alloc=26617440:0  640 bytes  49 allocs  total memory=0 MB
-Alloc=26618128:0  8184 bytes  50 allocs  total memory=0 MB
-Alloc=26626352:0  264 bytes  51 allocs  total memory=0 MB
-Alloc=26626656:0  264 bytes  52 allocs  total memory=0 MB
-Alloc=26626960:0  264 bytes  53 allocs  total memory=0 MB
-Alloc=27524880:0  132 bytes  54 allocs  total memory=0 MB
-Alloc=26627264:0  400 bytes  55 allocs  total memory=0 MB
-Alloc=26627712:0  400 bytes  56 allocs  total memory=0 MB
-Alloc=26628160:0  264 bytes  57 allocs  total memory=0 MB
+Alloc=25044576:0  640 bytes  49 allocs  total memory=0 MB
+Alloc=25045264:0  8184 bytes  50 allocs  total memory=0 MB
+Alloc=25053488:0  264 bytes  51 allocs  total memory=0 MB
+Alloc=25053792:0  264 bytes  52 allocs  total memory=0 MB
+Alloc=25054096:0  264 bytes  53 allocs  total memory=0 MB
+Alloc=25952016:0  132 bytes  54 allocs  total memory=0 MB
+Alloc=25054400:0  400 bytes  55 allocs  total memory=0 MB
+Alloc=25054848:0  400 bytes  56 allocs  total memory=0 MB
+Alloc=25055296:0  264 bytes  57 allocs  total memory=0 MB
 FTI: FTI destructor
-Free=26617440:0  56 allocs  total memory=0 MB
-Free=26618128:0  55 allocs  total memory=0 MB
-Free=26626352:0  54 allocs  total memory=0 MB
-Free=26626656:0  53 allocs  total memory=0 MB
-Free=26626960:0  52 allocs  total memory=0 MB
-Free=27524880:0  51 allocs  total memory=0 MB
-Free=26627264:0  50 allocs  total memory=0 MB
-Free=26627712:0  49 allocs  total memory=0 MB
-Free=26628160:0  48 allocs  total memory=0 MB
+Free=25044576:0  56 allocs  total memory=0 MB
+Free=25045264:0  55 allocs  total memory=0 MB
+Free=25053488:0  54 allocs  total memory=0 MB
+Free=25053792:0  53 allocs  total memory=0 MB
+Free=25054096:0  52 allocs  total memory=0 MB
+Free=25952016:0  51 allocs  total memory=0 MB
+Free=25054400:0  50 allocs  total memory=0 MB
+Free=25054848:0  49 allocs  total memory=0 MB
+Free=25055296:0  48 allocs  total memory=0 MB

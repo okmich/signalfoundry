@@ -22,8 +22,8 @@ rather than fitting — the package no longer ships any parameter optimizers.
 import pandas as pd
 import numpy as np
 
-from .continous_trend import continuous_trend_labeling
-from .misc import bollinger_band, cci
+from .continuous_trend import continuous_trend_labeling
+from .oscillators import bollinger_band, cci
 from .trend_persistence import trend_persistence_labeling
 from .z_score_trend import zscore_trend_features
 

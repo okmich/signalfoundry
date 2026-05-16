@@ -13,7 +13,7 @@ from ._variance_ratio import variance_ratio
 from ._zigzag_density import zigzag_density
 from ._stats import kendall_tau, runs_test, shannon_entropy, ljung_box_test, bds_test
 from ..momentum import efficiency_ratio
-from ..trend.misc import bollinger_band
+from ..trend.oscillators import bollinger_band
 from ..utils import logit_transformation
 
 

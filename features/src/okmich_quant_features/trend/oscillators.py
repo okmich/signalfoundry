@@ -9,6 +9,14 @@ SeriesOrArray = Union[pd.Series, np.ndarray]
 
 def bollinger_band(close_prices: Union[pd.Series, np.ndarray], window: int = 20, deviation_up: float = 2.0,
                    deviation_down: float = 2.0) -> Tuple[SeriesOrArray, SeriesOrArray, SeriesOrArray, SeriesOrArray, SeriesOrArray]:
+    """Bollinger Bands via talib: SMA(close, window) +/- (deviation * stdev(close, window)).
+
+    Returns (upper, middle, lower, percent_b, bb_width):
+        percent_b = (close - lower) / (upper - lower + eps)   — position within band, 0..1 inside
+        bb_width  = (upper - lower) / middle                  — width relative to mid
+
+    Type-preserving: pd.Series in -> 5 pd.Series out (named); np.ndarray in -> 5 np.ndarray out.
+    """
     if isinstance(close_prices, pd.Series):
         values = close_prices.values
         is_series = True
@@ -78,6 +86,12 @@ def envelope(close_prices: SeriesOrArray, high_prices: SeriesOrArray, low_prices
 
 
 def cci(high_prices: SeriesOrArray, low_prices: SeriesOrArray, close_prices: SeriesOrArray, window: int = 20) -> SeriesOrArray:
+    """Commodity Channel Index via talib.
+
+    CCI = (typical_price - SMA(typical_price, window)) / (0.015 * mean_abs_deviation), where
+    typical_price = (H + L + C) / 3. Vol-normalised (by MAD) — values are roughly bounded to
+    +/-100 in calm regimes, with extremes around +/-200. Type-preserving.
+    """
     if isinstance(close_prices, pd.Series):
         high_values = high_prices.values
         low_values = low_prices.values

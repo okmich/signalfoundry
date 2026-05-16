@@ -17,107 +17,75 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
-from .misc import envelope
+from .oscillators import envelope
 
 
-def continuous_trend_labeling(prices: Union[pd.Series | np.ndarray], omega=0.15):
+def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float = 0.15) -> Union[pd.Series, np.ndarray]:
+    """Continuous Trend Labeling (CTL) — sequential, no look-ahead.
+
+    Implements Algorithm 1 from the reference paper. Tracks running extremes; once price moves omega% from the
+    initial price, declares a trend; flips when price retraces omega% from the running extreme.
+
+    Returns float64 with values:
+        +1.0  uptrend
+        -1.0  downtrend
+        NaN   pre-trigger warmup (and the whole series if no significant move ever occurs)
+
+    Return type mirrors input: pd.Series -> pd.Series (index preserved); np.ndarray -> np.ndarray.
     """
-    Implements the Continuous Trend Labeling (CTL) method without look-ahead bias.
-    Processes data sequentially, only using past information for utils.
-
-    Parameters:
-    -----------
-    prices : pandas.Series or numpy.ndarray
-        Input time series data (prices)
-    omega : float, optional (default=0.15)
-        Threshold parameter for trend detection (15% as in the paper)
-
-    Returns:
-    --------
-    numpy.ndarray
-        Array of trend: 1 for upward trends, -1 for downward trends, 0 for neutral
-    """
-    # Convert pandas Series to numpy array
-    if isinstance(prices, pd.Series):
-        x = prices.values
-    else:
-        x = np.asarray(prices)
-
+    is_series = isinstance(prices, pd.Series)
+    x = prices.values if is_series else np.asarray(prices)
     n = len(x)
-    labels = np.zeros(n)  # Initialize trend as neutral (0)
 
-    # Handle empty input
+    labels = np.full(n, np.nan, dtype=np.float64)
+
     if n == 0:
-        return labels
+        return pd.Series(labels, index=prices.index) if is_series else labels
 
-    # Initialize variables (Algorithm 1 from paper)
-    FP = x[0]  # First price
-    xH = x[0]  # Current highest price
-    HT = 0  # Time of highest price
-    xL = x[0]  # Current lowest price
-    LT = 0  # Time of lowest price
-    Cid = 0  # Current direction (0=neutral, 1=up, -1=down)
-    FP_N = 0  # Index of first significant move
+    # Algorithm 1 from paper; lowercase per PEP 8, paper symbols in comments.
+    first_price = x[0]            # paper: FP
+    x_high = x[0]                 # paper: xH — running max
+    t_high = 0                    # paper: HT — index of running max
+    x_low = x[0]                  # paper: xL — running min
+    t_low = 0                     # paper: LT — index of running min
+    direction = 0                 # paper: Cid (0 = pre-trigger, 1 = up, -1 = down)
+    trigger_idx = 0               # paper: FP_N — index of first significant move
 
-    # First pass: Find initial trend direction (sequential)
+    # First pass: find initial trend direction (sequential)
     for i in range(n):
-        if x[i] > FP + x[0] * omega:  # Upward threshold
-            xH = x[i]
-            HT = i
-            FP_N = i
-            Cid = 1
+        if x[i] > first_price + first_price * omega:
+            x_high = x[i]; t_high = i; trigger_idx = i; direction = 1
             break
-        elif x[i] < FP - x[0] * omega:  # Downward threshold
-            xL = x[i]
-            LT = i
-            FP_N = i
-            Cid = -1
+        elif x[i] < first_price - first_price * omega:
+            x_low = x[i]; t_low = i; trigger_idx = i; direction = -1
             break
 
-    # If no significant trend found, return neutral trend
-    if Cid == 0:
-        return labels
+    # No significant move ever -> whole series stays NaN (unknown regime).
+    if direction == 0:
+        return pd.Series(labels, index=prices.index) if is_series else labels
 
-    # Initialize the first segment (neutral until first significant move)
-    labels[:FP_N] = 0
+    # Pre-trigger region stays NaN; signal starts at trigger_idx.
+    for i in range(trigger_idx, n):
+        if direction == 1:
+            if x[i] > x_high:
+                x_high = x[i]; t_high = i
+            labels[i] = 1.0
+            # t_low <= t_high guard: ensures we haven't already flipped on this leg.
+            # The <= is safe because x_high was just updated above on a same-bar new high,
+            # making t_low < t_high strictly; the equality case only arises at the very
+            # first trigger when both timestamps are 0 and x_high was set to x[trigger_idx].
+            if x[i] < x_high - x_high * omega and t_low <= t_high:
+                x_low = x[i]; t_low = i; direction = -1
+                labels[i] = -1.0
+        else:  # direction == -1
+            if x[i] < x_low:
+                x_low = x[i]; t_low = i
+            labels[i] = -1.0
+            if x[i] > x_low + x_low * omega and t_high <= t_low:
+                x_high = x[i]; t_high = i; direction = 1
+                labels[i] = 1.0
 
-    # Second pass: Track trends and reversals (sequential, no look-ahead)
-    for i in range(FP_N, n):
-        if Cid == 1:  # Current upward trend
-            if x[i] > xH:  # Update highest price
-                xH = x[i]
-                HT = i
-
-            # Label current point as upward trend
-            labels[i] = 1
-
-            # Check for downward reversal (using only past information)
-            if x[i] < xH - xH * omega and LT <= HT:
-                # Switch to downward trend
-                xL = x[i]
-                LT = i
-                Cid = -1
-                # Label the reversal point as downward trend
-                labels[i] = -1
-
-        elif Cid == -1:  # Current downward trend
-            if x[i] < xL:  # Update lowest price
-                xL = x[i]
-                LT = i
-
-            # Label current point as downward trend
-            labels[i] = -1
-
-            # Check for upward reversal (using only past information)
-            if x[i] > xL + xL * omega and HT <= LT:
-                # Switch to upward trend
-                xH = x[i]
-                HT = i
-                Cid = 1
-                # Label the reversal point as upward trend
-                labels[i] = 1
-
-    return labels
+    return pd.Series(labels, index=prices.index) if is_series else labels
 
 
 ##############################################################################################################
@@ -197,7 +165,10 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
         out["close"], out["high"], out["low"],
         ma_period=band.ma_period, atr_period=band.atr_period, k_atr=band.k_atr,
     )
-    ctl = np.asarray(continuous_trend_labeling(out["close"], omega=omega), dtype=np.int8)
+    # CTL emits NaN during pre-trigger warmup; map to 0 to preserve the int8 output contract
+    # of the 3-class chain (warmup is equivalent to "no signal" for the gated label).
+    ctl_raw = np.asarray(continuous_trend_labeling(out["close"], omega=omega), dtype=np.float64)
+    ctl = np.where(np.isnan(ctl_raw), 0, ctl_raw).astype(np.int8)
     bs = compute_band_state(out["close"], out["upper"], out["lower"])
     out["band_state"] = bs
     out[binary_col] = ctl
