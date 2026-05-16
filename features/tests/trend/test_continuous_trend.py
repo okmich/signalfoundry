@@ -118,3 +118,17 @@ def test_pre_trigger_region_is_nan():
     assert np.isnan(out.iloc[0])
     assert np.isnan(out.iloc[1])
     assert out.iloc[2] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Parameter validation
+# ---------------------------------------------------------------------------
+
+def test_omega_zero_raises():
+    with pytest.raises(ValueError, match="omega must be > 0"):
+        continuous_trend_labeling(pd.Series([100.0, 110.0]), omega=0)
+
+
+def test_omega_negative_raises():
+    with pytest.raises(ValueError, match="omega must be > 0"):
+        continuous_trend_labeling(pd.Series([100.0, 110.0]), omega=-0.1)

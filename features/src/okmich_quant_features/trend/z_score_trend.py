@@ -17,6 +17,11 @@ def zscore_trend_features(price_series: pd.Series, window: int = 30, deriv_windo
         - zscore_deriv_{window}: rolling mean of z-score changes (acceleration / deceleration)
         - zscore_abs_{window}: absolute z-score (magnitude of extremity, direction-agnostic)
     """
+    if window < 2:
+        raise ValueError(f"window must be >= 2, got {window}")
+    if deriv_window < 1:
+        raise ValueError(f"deriv_window must be >= 1, got {deriv_window}")
+
     returns = np.log(price_series / price_series.shift())
     rolling_mean = returns.rolling(window=window).mean()
     rolling_std = returns.rolling(window=window).std()

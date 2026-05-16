@@ -24,6 +24,11 @@ def trend_persistence_labeling(price_series: pd.Series, window: int = 20, smooth
     NaN marks warmup (insufficient data to compute the rolling vol normaliser); 0.0 marks
     bars where the smoothed score is inside +/-0.25.
     """
+    if window < 2:
+        raise ValueError(f"window must be >= 2, got {window}")
+    if smooth < 1:
+        raise ValueError(f"smooth must be >= 1, got {smooth}")
+
     px = price_series.astype(float)
     px_shifted = px.shift(window)
 
@@ -35,8 +40,11 @@ def trend_persistence_labeling(price_series: pd.Series, window: int = 20, smooth
     score = drift / denominator
 
     if zscore_norm:
-        mu = score.rolling(window, min_periods=1).mean()
-        sd = score.rolling(window, min_periods=1).std()
+        # Require the full window for normalization to avoid spurious early labels — a tiny rolling sample produces
+        # tiny std, which makes (score - mu) / sd explode and trigger the +/-0.25 threshold on noise. This extends
+        # total warmup to ~2*window bars (vol warmup + zscore_norm warmup).
+        mu = score.rolling(window, min_periods=window).mean()
+        sd = score.rolling(window, min_periods=window).std()
         score = (score - mu) / (sd + 1e-12)
 
     score = score.rolling(smooth, min_periods=1).mean()

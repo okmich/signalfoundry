@@ -114,6 +114,16 @@ def test_three_class_length_mismatch_raises():
         emit_three_class(ctl, bs)
 
 
+def test_three_class_handles_nan_ctl_directly():
+    """Direct callers passing raw CTL output (with NaN warmup) get safe int8 output."""
+    ctl = np.array([np.nan, np.nan, 1.0, 1.0, -1.0, -1.0], dtype=np.float64)
+    bs = np.array([1, 0, 1, -1, -1, 0], dtype=np.int8)
+    out = emit_three_class(ctl, bs)
+    # NaN CTL is treated as no-signal; +1 ctl survives even when band_state=-1 (gate-only).
+    np.testing.assert_array_equal(out, np.array([0, 0, 1, 1, -1, 0], dtype=np.int8))
+    assert out.dtype == np.int8
+
+
 # ---------------------------------------------------------------------------
 # attach_labels — full chain
 # ---------------------------------------------------------------------------

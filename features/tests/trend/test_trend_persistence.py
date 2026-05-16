@@ -216,14 +216,14 @@ def test_drift_calculation():
 def test_volatility_calculation():
     """Test volatility calculation doesn't cause division by zero (post-warmup region)."""
     small_changes = pd.DataFrame(
-        {"Close": 100 + np.cumsum([0.001] * 50)}
+        {"Close": 100 + np.cumsum([0.001] * 60)}
     )
 
     result = trend_persistence_labeling(small_changes["Close"])
     assert isinstance(result, pd.Series)
-    # Warmup spans ~window+1 rows (vol min_periods + zscore_norm needs >=2 samples).
+    # Default window=20 with zscore_norm=True -> warmup ~2*window = 40 bars.
     # Past that, labels must be finite (no div-by-zero blowup).
-    assert not result.iloc[25:].isna().any()
+    assert not result.iloc[45:].isna().any()
 
 
 # Data Type and Structure Tests
@@ -270,11 +270,11 @@ def test_performance_with_large_dataset():
 @pytest.mark.parametrize("scale", [1e-6, 1e-3, 1, 1e3, 1e6])
 def test_numerical_stability(scale):
     """Test numerical stability with different scales (post-warmup region)."""
-    scaled_data = pd.DataFrame({"Close": np.linspace(100 * scale, 150 * scale, 50)})
+    scaled_data = pd.DataFrame({"Close": np.linspace(100 * scale, 150 * scale, 60)})
     result = trend_persistence_labeling(scaled_data["Close"])
     assert isinstance(result, pd.Series)
-    # Post-warmup labels (past vol + zscore_norm warmup of ~window+1) must be finite at all scales.
-    assert not result.iloc[25:].isna().any()
+    # Default window=20 + zscore_norm=True warmup ~ 2*window = 40 bars; post-warmup must be finite.
+    assert not result.iloc[45:].isna().any()
 
 
 # Integration Tests
@@ -338,9 +338,9 @@ def test_negative_prices():
 
 
 # Parameter Boundary Tests
-@pytest.mark.parametrize("window", [1, 2, 100, 200])
+@pytest.mark.parametrize("window", [2, 100, 200])
 def test_window_boundary_values(trend_data, window):
-    """Test window parameter at boundary values."""
+    """Test window parameter at boundary values (window must be >= 2)."""
     if window <= len(trend_data):
         result = trend_persistence_labeling(trend_data["Close"], window=window)
         assert len(result) == len(trend_data)

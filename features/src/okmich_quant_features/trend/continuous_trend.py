@@ -11,6 +11,7 @@ ATR envelope: bars inside the band are forced to 0 (low-confidence / noise zone)
 apply_3class_labels.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -33,6 +34,9 @@ def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float
 
     Return type mirrors input: pd.Series -> pd.Series (index preserved); np.ndarray -> np.ndarray.
     """
+    if omega <= 0:
+        raise ValueError(f"omega must be > 0, got {omega}")
+
     is_series = isinstance(prices, pd.Series)
     x = prices.values if is_series else np.asarray(prices)
     n = len(x)
@@ -137,13 +141,30 @@ def compute_band_state(close: pd.Series, upper: pd.Series, lower: pd.Series) -> 
 
 
 def emit_three_class(ctl_labels: np.ndarray, band_state: np.ndarray) -> np.ndarray:
-    """Quasi-posterior 3-class label: ctl_label when band has signal, else 0."""
+    """Quasi-posterior 3-class label: ctl_label when band has signal, else 0.
+
+    The band acts as a **confidence gate, not a direction check**. The function takes the CTL label as the source of
+    truth for direction and only zeros it out when price sits inside the envelope. This means a CTL label can survive
+    a disagreement with band direction:
+
+        ctl_label = +1, band_state = +1  ->  +1   (agree, above upper band)
+        ctl_label = +1, band_state = -1  ->  +1   (CTL still says up; price just broke lower band but CTL hasn't flipped yet)
+        ctl_label = -1, band_state =  0  ->   0   (price inside band, gated to neutral)
+        ctl_label = NaN, band_state = +1 ->   0   (warmup CTL is treated as no-signal)
+
+    If you want sign-agreement semantics (zero out disagreements), do it at the caller.
+
+    Accepts ctl_labels as float64 (with NaN warmup, as produced by continuous_trend_labeling) or int8. Output is int8;
+    NaN bars map to 0.
+    """
     if len(ctl_labels) != len(band_state):
         raise ValueError(
             f"emit_three_class: length mismatch — "
             f"ctl_labels={len(ctl_labels)}, band_state={len(band_state)}"
         )
-    return np.where(band_state != 0, ctl_labels, 0).astype(np.int8)
+    ctl_arr = np.asarray(ctl_labels, dtype=np.float64)
+    ctl_safe = np.where(np.isnan(ctl_arr), 0, ctl_arr)
+    return np.where(band_state != 0, ctl_safe, 0).astype(np.int8)
 
 
 def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
@@ -165,14 +186,12 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
         out["close"], out["high"], out["low"],
         ma_period=band.ma_period, atr_period=band.atr_period, k_atr=band.k_atr,
     )
-    # CTL emits NaN during pre-trigger warmup; map to 0 to preserve the int8 output contract
-    # of the 3-class chain (warmup is equivalent to "no signal" for the gated label).
     ctl_raw = np.asarray(continuous_trend_labeling(out["close"], omega=omega), dtype=np.float64)
-    ctl = np.where(np.isnan(ctl_raw), 0, ctl_raw).astype(np.int8)
     bs = compute_band_state(out["close"], out["upper"], out["lower"])
     out["band_state"] = bs
-    out[binary_col] = ctl
-    out[ternary_col] = emit_three_class(ctl, bs)
+    # Persist binary CTL as int8 (warmup NaN -> 0) for stable downstream dtype.
+    out[binary_col] = np.where(np.isnan(ctl_raw), 0, ctl_raw).astype(np.int8)
+    out[ternary_col] = emit_three_class(ctl_raw, bs)
     return out
 
 
@@ -211,9 +230,10 @@ def apply_3class_labels(df: pd.DataFrame, omega: float, band: BandParams,
     label computation and the cross-TF rescaling of band bar-counts.
 
     Scaling rule:
-      `ma_period` and `atr_period` are bar counts; they are scaled by `(persisted_tf_minutes / df_tf_minutes)` so the
-      wall-clock window stays constant. Example: persisted `ma_period=480` at 15min = 7200-min window;
-      on 5m bars that becomes 1440 bars (still 7200 min).
+      `ma_period` and `atr_period` are bar counts; they are scaled by `(persisted_tf_minutes / df_tf_minutes)` with
+      `math.ceil()` so the wall-clock window is never shorter than the calibration window. Example:
+      persisted `ma_period=480` at 15min = 7200-min window; on 5m bars that becomes 1440 bars (still 7200 min).
+      Edge case: `ma_period=3` at 15min scaled to 10m bars -> 3 * 1.5 = 4.5 -> ceil to 5 (rather than rounding to 4).
 
       `omega` is a percentage threshold and does NOT scale. Note: applying the same omega at finer resolution will produce
       more flips than at the calibration resolution, because finer close-price paths see more intermediate excursions.
@@ -258,9 +278,12 @@ def apply_3class_labels(df: pd.DataFrame, omega: float, band: BandParams,
         raise ValueError(f"tf_minutes must be positive, got {tf_minutes}")
 
     scale = persisted_tf_minutes / tf_minutes
+    # Use ceil rather than round so the scaled wall-clock window is never shorter than the
+    # calibrated window. Banker's rounding (round-half-to-even) can shorten the lookback
+    # in edge cases (e.g., 4.5 -> 4), which destabilises the band in fine-TF inference.
     scaled_band = BandParams(
-        ma_period=max(2, int(round(band.ma_period * scale))),
-        atr_period=max(2, int(round(band.atr_period * scale))),
+        ma_period=max(2, math.ceil(band.ma_period * scale)),
+        atr_period=max(2, math.ceil(band.atr_period * scale)),
         k_atr=band.k_atr,
     )
     return attach_labels(df, omega=omega, band=scaled_band,
