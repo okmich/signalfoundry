@@ -400,6 +400,14 @@ _PATH_STRUCTURE = [
         ot="dataframe", notes="Returns stat and pvalue columns"),
     _fe("bds_test", "path_structure", "regime", "BDS nonlinearity test — detects non-random structure",
         rr=H, ret=H, dr=N, hor=ME, ot="dataframe", notes="Returns stat and pvalue per dimension"),
+    _fe("variance_ratio_test", "path_structure._variance_ratio", "regime",
+        "Multi-lag variance ratio test with z-statistics under the random-walk null",
+        rr=H, ret=M, dr=N, hor=LG, ot="dataframe",
+        notes="One-shot diagnostic (not rolling): returns DataFrame of VR and z-stat per lag. Research/diagnostic helper."),
+    _fe("find_threshold_for_reversals", "path_structure._zigzag_density", "regime",
+        "Tune the zigzag-density threshold for a target reversal density or minimum count",
+        rr=L, ret=L, dr=N, hor=A, ot="scalar",
+        notes="Research/fit-time helper for calibrating zigzag_density; returns (threshold, diagnostics dict)."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -572,6 +580,18 @@ _MOMENTUM = [
         "Peer-relative z-score momentum", rr=L, ret=H, dr=H, hor=ME, dir_=True, bench=True),
     _fe("idiomatic_intraday_mom","momentum", "momentum",
         "Idiomatic intraday momentum signal", rr=L, ret=H, dr=H, hor=I, dir_=True),
+    _fe("momentum_slope", "momentum._misc", "momentum",
+        "OLS slope of price over forward window using sklearn LinearRegression",
+        rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True,
+        notes="Not re-exported from momentum/__init__.py; import from momentum._misc. Forward-looking implementation — verify causal use before deploying."),
+    _fe("returns_sign_persistence", "momentum._misc", "regime",
+        "Rolling fraction of return signs matching the first sign in the window — directional persistence",
+        rr=H, ret=M, dr=H, hor=S, wbi=[TR, RA], dir_=True,
+        notes="Not re-exported from momentum/__init__.py; import from momentum._misc."),
+    _fe("triple_ema", "momentum._williamblau", "trend",
+        "Triple-cascade EMA smoother (p1, p2, p3) used as a building block for William Blau indicators",
+        rr=L, ret=M, dr=M, hor=S, dir_=True,
+        notes="Building block, not a standalone feature; passes through unchanged when period==1."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -579,72 +599,40 @@ _MOMENTUM = [
 # ─────────────────────────────────────────────────────────────────────────────
 _TREND = [
     _fe("core_trend_features", "trend", "composite",
-        "Core trend feature bundle: bands, CCI, Heikin Ashi, Precision Trend, CTL, persistence, and z-score trend",
+        "Core trend feature bundle: bands, CCI, Heikin Ashi, CTL, persistence, and continuous z-score features",
         rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
     # Causal labeling functions (produce 1/-1/0 signals)
     _fe("continuous_trend_labeling", "trend", "trend",
         "State-machine trend label: +1 up, -1 down, 0 neutral", rr=H, ret=M, dr=H, hor=S, dir_=True),
-    _fe("continuous_ma_trend_labeling", "trend", "trend",
-        "MA-deviation trend label: +1/-1/0/NaN", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
-    _fe("zscore_trend_labeling","trend", "trend","Z-score threshold trend label: +1/-1/0", rr=H, ret=M, dr=H, hor=S, dir_=True),
     _fe("zscore_trend_features", "trend", "trend",
         "Continuous z-score trend exhaustion features: z-score, derivative, and absolute magnitude",
         rr=H, ret=H, dr=M, hor=S, wbi=[RA, VO], ot="dataframe"),
     _fe("trend_persistence_labeling",   "trend", "trend",
         "Volatility-adjusted directional drift label", rr=H, ret=H, dr=H, hor=ME, dir_=True),
-    _fe("find_optimal_continuous_trend_parameters", "trend", "trend",
-        "Research helper to tune continuous trend labeling parameters by time-series validation",
-        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("determine_optimal_ma_omega", "trend", "trend",
-        "Research helper to choose MA trend omega for a target neutral-label distribution",
-        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="scalar", notes="Research/fit-time only; not a live feature."),
-    _fe("optimize_zscore_trend_labeling_params", "trend", "trend",
-        "Research helper to tune z-score trend labeling parameters",
-        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("optimize_zscore_params_multiasset", "trend", "trend",
-        "Research helper to tune z-score trend parameters across multiple assets",
-        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("optimize_trend_persistence", "trend", "trend",
-        "Research helper to rank trend-persistence parameter grids",
-        rr=M, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("evaluate_trend_performance", "trend", "trend",
-        "Evaluate trend labels against realized returns and persistence diagnostics",
-        rr=M, ret=M, dr=M, hor=A, dir_=True, ot="dataframe", notes="Evaluation helper, not a live feature."),
-    _fe("compare_trend_methods", "trend", "trend",
-        "Compare multiple trend labeling methods on common evaluation diagnostics",
-        rr=M, ret=M, dr=M, hor=A, dir_=True, ot="dataframe", notes="Evaluation helper, not a live feature."),
-    _fe("analyze_optimal_ma_omega", "trend", "trend",
-        "Analyze MA trend omega choices over candidate thresholds",
-        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("analyze_instrument_ma_omega", "trend", "trend",
-        "Analyze MA trend omega for one named instrument",
-        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("compare_ma_omega_values", "trend", "trend",
-        "Compare MA trend labels across omega values",
-        rr=L, ret=L, dr=L, hor=A, dir_=True, ot="dataframe", notes="Research/fit-time only; not a live feature."),
-    _fe("compute_metrics", "trend", "trend",
-        "Compute strategy and label diagnostics for trend evaluation",
-        rr=L, ret=L, dr=L, hor=A, ot="dataframe", notes="Evaluation helper, not a live feature."),
-    _fe("simulate_strategy_returns", "trend", "trend",
-        "Simulate returns from trend labels and realized returns",
-        rr=L, ret=L, dr=L, hor=A, dir_=True, notes="Evaluation helper, not a live feature."),
     # Supplementary indicators
     _fe("bollinger_band", "trend", "price_structure", "Bollinger Bands: upper/mid/lower/%B/width",
         rr=H, ret=M, dr=M, hor=S, wbi=[RA], ot="dataframe", notes="Returns 5 columns: upper, mid, lower, pct_b, width"),
     _fe("cci","trend", "momentum", "Commodity Channel Index oscillator", rr=M, ret=M, dr=H, hor=S, dir_=True),
-    _fe("fibonacci_range", "trend", "price_structure",
-        "Fibonacci support/resistance levels from OHLC range", rr=M, ret=M, dr=M, hor=ME, wbi=[RA], ot="dataframe"),
-    _fe("heiken_ashi", "trend", "price_structure", "Heikin Ashi candle values (smoothed OHLC)",
-        rr=M, ret=M, dr=H, hor=I, dir_=True, ot="dataframe", notes="Returns HA open, high, low, close, flag columns"),
-    _fe("heiken_ashi_momentum", "trend", "momentum",
-        "Momentum of Heikin Ashi close vs open", rr=M, ret=H, dr=H, hor=S, wbi=[TR], dir_=True),
-    _fe("heiken_ashi_momentum_advanced","trend", "momentum",
-        "Advanced HA momentum with smoothing", rr=M, ret=H, dr=H, hor=S, wbi=[TR], dir_=True, ot="dataframe"),
-    _fe("precision_trend", "trend", "trend",
-        "Precision Trend indicator", rr=H, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
-    _fe("trading_the_trend", "trend", "trend",
-        "Trading The Trend (TTT) indicator", rr=H, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
-    _fe("ttm_trend", "trend", "trend", "TTM Trend indicator", rr=M, ret=M, dr=H, hor=S, dir_=True),
+    _fe("envelope", "trend.misc", "price_structure",
+        "ATR envelope: SMA(close) ± k_atr · ATR — Bollinger analog with ATR-based bands",
+        rr=H, ret=M, dr=M, hor=S, wbi=[TR, RA], ot="dataframe",
+        notes="Returns (upper, middle, lower, percent_e, env_width). Scale-equivariant; more robust to gaps than Bollinger."),
+    _fe("compute_band_state", "trend.continous_trend", "regime",
+        "Ternary band state from close vs envelope bands: +1 above upper, -1 below lower, 0 inside",
+        rr=H, ret=M, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="array",
+        notes="Building block for 3-class label construction with envelope-gated CTL."),
+    _fe("emit_three_class", "trend.continous_trend", "trend",
+        "Quasi-posterior 3-class label: CTL label where band has signal, else 0",
+        rr=H, ret=M, dr=H, hor=S, dir_=True, ot="array",
+        notes="Gating combinator: zeros out CTL labels when band_state==0 (inside envelope)."),
+    _fe("attach_labels", "trend.continous_trend", "trend",
+        "Compute envelope + binary CTL + 3-class labels and attach to DataFrame",
+        rr=M, ret=M, dr=H, hor=S, dir_=True, ot="dataframe",
+        notes="Convenience wrapper combining envelope, continuous_trend_labeling, compute_band_state, and emit_three_class."),
+    _fe("apply_3class_labels", "trend.continous_trend", "trend",
+        "Attach binary CTL + 3-class labels using pre-resolved (omega, band) config with cross-TF rescaling",
+        rr=H, ret=H, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="dataframe",
+        notes="Production entry point for HTF CTL 3-class labels. Scales ma_period/atr_period by (persisted_tf/df_tf); omega does NOT scale."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -869,27 +857,19 @@ _FRACTIONAL_DIFF = [
 # ─────────────────────────────────────────────────────────────────────────────
 # TEMPORAL / CALENDAR FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
+# NOTE: temporal features are exposed as METHODS on the TemporalFeature class,
+# not module-level functions. Usage:
+#     from okmich_quant_features.temporal import TemporalFeature
+#     tf = TemporalFeature(df)  # df must have a DatetimeIndex
+#     tf.hour_of_day(); tf.day_of_week(); tf.hour_of_day_cyclic(); ...
 _TEMPORAL = [
-    _fe("hour_of_day", "temporal", "temporal",
-        "Hour of day (0–23) from DatetimeIndex — captures intraday session patterns",
-        rr=M, ret=M, dr=N, hor=I,
-        notes="Part of TemporalFeature class. Requires DatetimeIndex."),
-    _fe("day_of_week", "temporal", "temporal",
-        "Day of week (0=Monday, 6=Sunday) from DatetimeIndex — captures weekly seasonality",
-        rr=M, ret=M, dr=N, hor=S,
-        notes="Part of TemporalFeature class."),
-    _fe("hour_of_day_cyclic", "temporal", "temporal",
-        "Cyclic sin/cos encoding of hour-of-day — preserves circular periodicity for ML",
-        rr=M, ret=M, dr=N, hor=I, ot="dataframe",
-        notes="Returns (hour_sin, hour_cos) tuple. Preferred over raw hour for gradient-based models."),
-    _fe("day_of_week_cyclic", "temporal", "temporal",
-        "Cyclic sin/cos encoding of day-of-week — preserves circular periodicity for ML",
-        rr=M, ret=M, dr=N, hor=S, ot="dataframe",
-        notes="Returns (dow_sin, dow_cos) tuple."),
-    _fe("market_session", "temporal", "temporal",
-        "Market session label: closed / pre_market / open / after_hours",
-        rr=M, ret=M, dr=N, hor=I,
-        notes="Supports US, EU, ASIA markets. Timezone-aware. Part of TemporalFeature class."),
+    _fe("TemporalFeature", "temporal", "temporal",
+        "Calendar/session feature class: hour_of_day, day_of_week, day_of_month, month, quarter, "
+        "hour_of_day_cyclic, day_of_week_cyclic, market_session, is_market_open",
+        rr=M, ret=M, dr=N, hor=I, ot="series",
+        notes="Class, not a function — instantiate with TemporalFeature(df) (DatetimeIndex required), then call "
+              "individual methods. Cyclic methods return (sin, cos) tuples; market_session returns categorical labels "
+              "for US/EU/ASIA timezone-aware sessions."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -999,6 +979,30 @@ _TBM = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SAMPLE PRICE FEATURE BUNDLES
+# ─────────────────────────────────────────────────────────────────────────────
+_SAMPLE_PRICE_FEATURES = [
+    _fe("create_price_based_features", "sample_price_features", "composite",
+        "Sample price-derived feature bundle: lagged log-returns, MAs (SMA/EMA/DEMA/TEMA) with diffs, rolling skew/kurt",
+        rr=M, ret=H, dr=M, hor=ME, dir_=True, ot="dataframe",
+        notes="Convenience bundle for quick feature prototyping; configurable returns lags and MA periods. Not a single feature — emits many columns."),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATS-DRIVEN PARAMETER SEARCH (RESEARCH HELPERS)
+# ─────────────────────────────────────────────────────────────────────────────
+_STATS_OPTIMAL_SEARCH = [
+    _fe("optimal_autocorrelation_param_search", "stats_optimal_search", "regime",
+        "Grid-search optimal (window, lag) for rolling autocorrelation by objective: absolute_autocorr, trading_profit, or stat_significance",
+        rr=L, ret=L, dr=N, hor=A, ot="scalar",
+        notes="Research/fit-time only; returns (best_params dict, best_score). Not a live feature."),
+    _fe("optimal_variance_ratio_param_search", "stats_optimal_search", "regime",
+        "Grid-search optimal (window, q) for rolling variance ratio by objective: max_deviation, trading_profit, or stat_significance",
+        rr=L, ret=L, dr=N, hor=A, ot="scalar",
+        notes="Research/fit-time only; returns (best_params dict, best_score). Not a live feature."),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FULL CATALOG
 # ─────────────────────────────────────────────────────────────────────────────
 CATALOG: list[FeatureEntry] = (
@@ -1032,4 +1036,6 @@ CATALOG: list[FeatureEntry] = (
     + _FILTERS
     + _DIRECTIONAL_CHANGE
     + _TBM
+    + _SAMPLE_PRICE_FEATURES
+    + _STATS_OPTIMAL_SEARCH
 )
