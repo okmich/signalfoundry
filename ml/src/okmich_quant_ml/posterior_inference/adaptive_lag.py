@@ -20,10 +20,11 @@ Caveats:
   only with screener-validated per-axis HMMs.
 - **Disagreement policy is implicit LOCK.** Early commit is final. Revisit-at-K and gated-revisit
   policies are deferred (see ``IDEA_adaptive_lag_maturation.md`` caution #2).
-- **Backtest accounting requires per-bar maturation alignment.** Use ``result.as_of_labels()`` to
-  produce a causally aligned series, or consume ``result.commit_lag`` and align externally.
-  ``MaturationAlignTransformer``'s current constant-K behavior is incompatible with adaptive lag
-  until that extension lands (IDEA spec, remaining item 4).
+- **Backtest accounting requires per-bar maturation alignment.** Use ``result.as_of_labels()`` for
+  a causally aligned label series, or ``result.as_of_posterior()`` for the ``(T, K)`` posterior
+  matrix that feeds downstream gate inferers / calibration / EMA. ``MaturationAlignTransformer``'s
+  constant-K shift is incompatible with adaptive lag — the methods on ``AdaptiveLagResult`` are
+  the supported path; they replace the originally-proposed transformer extension.
 
 Usage
 -----
@@ -72,8 +73,9 @@ class AdaptiveLagResult:
 
     **Causal-leakage warning.** ``regime_label[t]`` is the label *for* bar t but it is only
     *available* once enough future evidence has accumulated — specifically at bar
-    ``t + commit_lag[t]`` (see ``available_at``). Using ``regime_label`` directly at decision
-    time leaks future information. For causal alignment, use ``as_of_labels()``.
+    ``t + commit_lag[t]`` (see ``available_at``). Using ``regime_label`` or ``committed_posterior``
+    directly at decision time leaks future information. For causal alignment use
+    ``as_of_labels()`` (labels) or ``as_of_posterior()`` (full ``(T, K)`` posterior matrix).
 
     Attributes
     ----------
@@ -122,16 +124,56 @@ class AdaptiveLagResult:
         at decision time t is a causal-leakage trap; this helper resolves it deterministically.
         """
         T = len(self.commit_lag)
-        avail = self.available_at
-        order = np.argsort(avail, kind="stable")
-        sorted_avail = avail[order]
-        max_s_at_arrival = np.maximum.accumulate(order.astype(np.int64))
-
+        sorted_avail, max_s_at_arrival = self._as_of_index()
         idx = np.searchsorted(sorted_avail, np.arange(T), side="right") - 1
         out = np.full(T, abstain_label, dtype=np.int64)
         valid = idx >= 0
         out[valid] = self.regime_label[max_s_at_arrival[idx[valid]]]
         return out
+
+    def as_of_posterior(self) -> NDArray:
+        """Causally aligned posterior series.
+
+        Returns shape ``(T, K)``, dtype ``float``. ``output[t]`` is ``committed_posterior[s]`` for
+        the latest target bar ``s`` whose label has become available by time t — same selection
+        rule as ``as_of_labels`` but emitting the full posterior row instead of the argmax label.
+        Rows before any label has arrived receive the uniform prior ``[1/K, ..., 1/K]``.
+
+        This is the view downstream ``(T, K)`` posterior consumers should use — gate inferers,
+        calibration transformers, EMA, anything indexed by decision time. Without it, joining
+        ``committed_posterior`` directly to a returns series leaks 1..k_max bars of future
+        evidence per row, concentrated on the regime-transition bars where edge lives. See
+        ``MaturationAlignTransformer`` for the constant-lag analogue.
+
+        Warmup uses uniform ``1/K`` (not NaN) for parity with ``MaturationAlignTransformer`` and
+        to keep composition with the standard gate inferers — every gate in this package
+        validates and rejects NaN at entry. Aggregate metrics over the full output include
+        ``1/K`` placeholder mass for the warmup region; slice off the first
+        ``result.available_at.min()`` rows (the index of the first matured bar — not
+        ``commit_lag[0]``, which is only correct under constant lag) or use NaN-aware
+        aggregation upstream if that contaminates a diagnostic.
+        """
+        T, K = self.committed_posterior.shape
+        sorted_avail, max_s_at_arrival = self._as_of_index()
+        idx = np.searchsorted(sorted_avail, np.arange(T), side="right") - 1
+        out = np.full((T, K), 1.0 / K, dtype=float)
+        valid = idx >= 0
+        out[valid] = self.committed_posterior[max_s_at_arrival[idx[valid]]]
+        return out
+
+    def _as_of_index(self) -> tuple[NDArray, NDArray]:
+        """Shared index for ``as_of_labels`` and ``as_of_posterior``.
+
+        Returns ``(sorted_avail, max_s_at_arrival)``: arrival times sorted ascending, and the
+        running max of the source bar ``s`` whose label has arrived by each sorted position.
+        ``np.maximum.accumulate(order)`` resolves the "most recent target bar" question when
+        late-arriving low-s labels coexist with already-arrived higher-s ones.
+        """
+        avail = self.available_at
+        order = np.argsort(avail, kind="stable")
+        sorted_avail = avail[order]
+        max_s_at_arrival = np.maximum.accumulate(order.astype(np.int64))
+        return sorted_avail, max_s_at_arrival
 
 
 def _validate_trajectories(trajectories: NDArray) -> NDArray:
@@ -381,6 +423,12 @@ def lag_commitment_audit(trajectories: NDArray, result: AdaptiveLagResult,
         raise ValueError(
             f"result.fired shape {result.fired.shape} does not match trajectories T={T}"
         )
+    K = P.shape[2]
+    if result.committed_posterior.shape != (T, K):
+        raise ValueError(
+            f"result.committed_posterior shape {result.committed_posterior.shape} does not match "
+            f"trajectories (T, K)=({T}, {K}); likely a result built from different trajectories."
+        )
     if T > 0:
         lag_min = int(result.commit_lag.min())
         lag_max = int(result.commit_lag.max())
@@ -388,6 +436,18 @@ def lag_commitment_audit(trajectories: NDArray, result: AdaptiveLagResult,
             raise ValueError(
                 f"result.commit_lag values out of range [0, {k_max}] (min={lag_min}, max={lag_max}); "
                 f"likely a result built from different trajectories."
+            )
+        expected_label = np.argmax(result.committed_posterior, axis=1).astype(np.int64)
+        if not np.array_equal(result.regime_label.astype(np.int64), expected_label):
+            raise ValueError(
+                "result.regime_label disagrees with argmax(result.committed_posterior); the result "
+                "is internally inconsistent (likely manually constructed or stale)."
+            )
+        expected_fired = result.commit_lag < k_max
+        if not np.array_equal(result.fired.astype(bool), expected_fired):
+            raise ValueError(
+                "result.fired disagrees with (result.commit_lag < k_max); the result is internally "
+                "inconsistent (likely manually constructed or stale)."
             )
 
     oracle_map = np.argmax(P[k_max], axis=1).astype(np.int64)
@@ -415,7 +475,12 @@ def lag_commitment_audit(trajectories: NDArray, result: AdaptiveLagResult,
     dist = np.minimum(fwd, bwd)
 
     if dist_bins is None:
-        dist_bins = [(0, 0, "at_change"), (1, 2, "near"), (3, k_max, "medium"), (k_max + 1, sent, "far")]
+        # ``far`` starts above the union of ``at_change`` and ``near`` (max distance 2) to avoid
+        # overlap when ``k_max < 3`` (e.g. k_max=1 would otherwise put distance 2 in both
+        # ``near=[1,2]`` and ``far=[k_max+1, sent]=[2, sent]``). ``medium`` collapses to empty
+        # when k_max < 3.
+        far_lo = max(k_max + 1, 3)
+        dist_bins = [(0, 0, "at_change"), (1, 2, "near"), (3, k_max, "medium"), (far_lo, sent, "far")]
 
     audit: dict = {
         "n_bars": int(T),

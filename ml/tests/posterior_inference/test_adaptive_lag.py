@@ -16,6 +16,7 @@ import pytest
 from okmich_quant_ml.posterior_inference import (
     AdaptiveLagInferer,
     AdaptiveLagResult,
+    MaturationAlignTransformer,
     StabilityCriterion,
     compute_trajectories,
     lag_commitment_audit,
@@ -281,6 +282,135 @@ def test_as_of_labels_respects_custom_abstain_label() -> None:
     assert out[2] == 0
 
 
+def test_as_of_posterior_matches_maturation_align_for_constant_lag() -> None:
+    """Cross-check: for a constant per-bar commit_lag=K, as_of_posterior() must produce the same
+    (T, K) matrix as MaturationAlignTransformer(K) applied to committed_posterior. This locks the
+    posterior-side aligner to the constant-K contract that already governs MaturationAlign."""
+    K_LAG = 3
+    T, K = 12, 3
+    rng = np.random.default_rng(42)
+    logits = rng.standard_normal((T, K))
+    committed = np.exp(logits)
+    committed /= committed.sum(axis=1, keepdims=True)
+
+    result = AdaptiveLagResult(
+        commit_lag=np.full(T, K_LAG, dtype=np.int64),
+        regime_label=np.argmax(committed, axis=1).astype(np.int64),
+        fired=np.ones(T, dtype=bool),
+        committed_posterior=committed,
+        metadata={},
+    )
+
+    expected = MaturationAlignTransformer(lag=K_LAG).transform(committed)
+    np.testing.assert_allclose(result.as_of_posterior(), expected)
+
+
+def test_as_of_posterior_emits_uniform_prior_during_warmup() -> None:
+    """Rows before any label has arrived must carry the uniform prior 1/K, matching
+    MaturationAlignTransformer's warmup contract."""
+    K = 3
+    T = 6
+    committed = np.full((T, K), 1.0 / K)
+    # All bars commit at lag 2 → first matured label arrives at t=2.
+    result = AdaptiveLagResult(
+        commit_lag=np.full(T, 2, dtype=np.int64),
+        regime_label=np.zeros(T, dtype=np.int64),
+        fired=np.ones(T, dtype=bool),
+        committed_posterior=committed,
+        metadata={},
+    )
+
+    out = result.as_of_posterior()
+    np.testing.assert_allclose(out[:2], np.full((2, K), 1.0 / K))
+    np.testing.assert_allclose(out[2:], committed[: T - 2])
+
+
+def test_as_of_posterior_forward_fills_between_commitments() -> None:
+    """When commit_lag varies, the most-recently-matured target bar's posterior should persist
+    until a fresher matured bar replaces it. Concretely: bar 0 arrives at t=2 and bar 2 arrives
+    at t=3; t=2 should reflect bar 0, t=3 onward should reflect bar 2 (the freshest matured bar)."""
+    committed = np.array([
+        [0.9, 0.1],   # bar 0 posterior
+        [0.5, 0.5],   # bar 1 posterior
+        [0.2, 0.8],   # bar 2 posterior
+        [0.6, 0.4],   # bar 3 posterior
+        [0.7, 0.3],   # bar 4 posterior
+    ], dtype=float)
+    commit_lag = np.array([2, 4, 1, 1, 1], dtype=np.int64)
+    # available_at = [2, 5, 3, 4, 5]
+    result = AdaptiveLagResult(
+        commit_lag=commit_lag,
+        regime_label=np.argmax(committed, axis=1).astype(np.int64),
+        fired=np.ones(5, dtype=bool),
+        committed_posterior=committed,
+        metadata={},
+    )
+
+    out = result.as_of_posterior()
+    # t=0, t=1: warmup uniform 1/2
+    np.testing.assert_allclose(out[0], [0.5, 0.5])
+    np.testing.assert_allclose(out[1], [0.5, 0.5])
+    # t=2: bar 0 arrives → its posterior
+    np.testing.assert_allclose(out[2], committed[0])
+    # t=3: bar 2 arrives → its posterior (newer target than bar 0)
+    np.testing.assert_allclose(out[3], committed[2])
+    # t=4: bar 3 arrives → its posterior (newer than bar 2)
+    np.testing.assert_allclose(out[4], committed[3])
+
+
+def test_as_of_posterior_prefers_newer_target_on_simultaneous_arrival() -> None:
+    """When a late-arriving low-s label and an already-arrived higher-s label coexist, the
+    selection must pick the highest s (newest target). Parallels test_as_of_labels_picks_most_
+    recent_target_even_with_late_arrivals; verifies the same precedence for posteriors."""
+    committed = np.array([
+        [0.1, 0.9],   # bar 0 — late arrival
+        [0.4, 0.6],   # bar 1
+        [0.5, 0.5],   # bar 2
+        [0.6, 0.4],   # bar 3
+        [0.7, 0.3],   # bar 4 — should dominate over bar 0 at t=5
+        [0.8, 0.2],   # bar 5
+    ], dtype=float)
+    commit_lag = np.array([5, 1, 1, 1, 1, 1], dtype=np.int64)
+    # available_at = [5, 2, 3, 4, 5, 6]; at t=5 both bar 0 and bar 4 are available; max s = 4.
+    result = AdaptiveLagResult(
+        commit_lag=commit_lag,
+        regime_label=np.argmax(committed, axis=1).astype(np.int64),
+        fired=np.ones(6, dtype=bool),
+        committed_posterior=committed,
+        metadata={},
+    )
+
+    out = result.as_of_posterior()
+    # t=5: bar 4 wins (later target), not bar 0 (late arrival but older target).
+    np.testing.assert_allclose(out[5], committed[4])
+
+
+def test_as_of_posterior_returns_t_k_shape_and_simplex_rows() -> None:
+    """Output shape (T, K), dtype float, every row sums to 1.0 (warmup uniform sums to 1; matured
+    rows are direct copies of committed_posterior rows which were validated as simplex upstream)."""
+    P = _constant_trajectory(n_lags=8, T=15, row=[0.7, 0.2, 0.1])
+    result = AdaptiveLagInferer().infer(P)
+
+    out = result.as_of_posterior()
+    assert out.shape == (15, 3)
+    assert out.dtype == np.float64
+    np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-12)
+
+
+def test_as_of_posterior_matches_argmax_alignment_with_as_of_labels() -> None:
+    """argmax(as_of_posterior()) must equal as_of_labels() on every non-warmup row. (Warmup rows
+    diverge by design: as_of_labels emits abstain, as_of_posterior emits uniform whose argmax is
+    state 0; the test slices off warmup before comparing.)"""
+    P = _constant_trajectory(n_lags=8, T=12, row=[0.85, 0.15])
+    result = AdaptiveLagInferer().infer(P)
+
+    posterior = result.as_of_posterior()
+    labels = result.as_of_labels(abstain_label=-1)
+    matured = labels != -1
+
+    np.testing.assert_array_equal(np.argmax(posterior[matured], axis=1), labels[matured])
+
+
 def test_compute_trajectories_stacks_per_lag_outputs() -> None:
     """compute_trajectories wraps predict_proba_fixed_lag_sweep and stacks the dict into (n_lags, T, K)."""
 
@@ -356,6 +486,77 @@ def test_lag_commitment_audit_rejects_commit_lag_out_of_range() -> None:
     )
     with pytest.raises(ValueError, match="out of range"):
         lag_commitment_audit(P, bad)
+
+
+def test_lag_commitment_audit_rejects_mismatched_committed_posterior_shape() -> None:
+    """audit must reject a result whose committed_posterior K disagrees with trajectories K —
+    otherwise downstream metrics are computed against a posterior that was not produced from
+    this P."""
+    P = _constant_trajectory(n_lags=8, T=5, row=[0.9, 0.1])  # K=2
+    bad = AdaptiveLagResult(
+        commit_lag=np.array([1, 1, 1, 1, 1], dtype=np.int64),
+        regime_label=np.zeros(5, dtype=np.int64),
+        fired=np.ones(5, dtype=bool),
+        committed_posterior=np.full((5, 3), 1.0 / 3),  # K=3 mismatch
+        metadata={},
+    )
+    with pytest.raises(ValueError, match="committed_posterior shape"):
+        lag_commitment_audit(P, bad)
+
+
+def test_lag_commitment_audit_rejects_regime_label_argmax_inconsistency() -> None:
+    """audit must reject a result whose regime_label is not argmax(committed_posterior) — the
+    invariant is guaranteed by AdaptiveLagInferer.infer() and a violation indicates a manually
+    constructed or stale result."""
+    P = _constant_trajectory(n_lags=8, T=5, row=[0.9, 0.1])
+    committed = np.tile(np.array([0.9, 0.1]), (5, 1))
+    bad = AdaptiveLagResult(
+        commit_lag=np.array([1, 1, 1, 1, 1], dtype=np.int64),
+        regime_label=np.ones(5, dtype=np.int64),  # argmax is 0, not 1
+        fired=np.ones(5, dtype=bool),
+        committed_posterior=committed,
+        metadata={},
+    )
+    with pytest.raises(ValueError, match="regime_label disagrees with argmax"):
+        lag_commitment_audit(P, bad)
+
+
+def test_lag_commitment_audit_rejects_fired_commit_lag_inconsistency() -> None:
+    """audit must reject a result whose fired flag disagrees with (commit_lag < k_max)."""
+    P = _constant_trajectory(n_lags=8, T=5, row=[0.9, 0.1])  # k_max = 7
+    committed = np.tile(np.array([0.9, 0.1]), (5, 1))
+    bad = AdaptiveLagResult(
+        commit_lag=np.array([1, 1, 1, 1, 1], dtype=np.int64),
+        regime_label=np.zeros(5, dtype=np.int64),
+        fired=np.zeros(5, dtype=bool),  # should be all True (1 < 7)
+        committed_posterior=committed,
+        metadata={},
+    )
+    with pytest.raises(ValueError, match="fired disagrees"):
+        lag_commitment_audit(P, bad)
+
+
+def test_lag_commitment_audit_default_bins_have_no_overlap_at_small_k_max() -> None:
+    """When k_max is small (here, k_max=1) the default bin scheme used to produce overlapping
+    ``near=[1,2]`` and ``far=[k_max+1, sent]=[2, sent]`` — meaning distance 2 was double-counted.
+    far now starts at max(k_max+1, 3) so the bins partition correctly for any k_max."""
+    # k_max = 1 ⇒ n_lags = 2. m_consec=1 to allow commit at lag 1 within this budget.
+    P = _constant_trajectory(n_lags=2, T=20, row=[0.9, 0.1])
+    result = AdaptiveLagInferer(m_consec=1).infer(P)
+    audit = lag_commitment_audit(P, result)
+
+    # All bars should be in exactly one bin: at_change + near + medium + far == n_bars.
+    assert audit["n_at_change"] + audit["n_near"] + audit["n_medium"] + audit["n_far"] == audit["n_bars"]
+
+
+def test_lag_commitment_audit_default_bins_unchanged_for_lab_k_max() -> None:
+    """At the lab-validated k_max=7, the bin partition must be unchanged by the small-k_max fix:
+    far starts at k_max+1=8."""
+    P = _constant_trajectory(n_lags=8, T=40, row=[0.9, 0.1])
+    result = AdaptiveLagInferer().infer(P)
+    audit = lag_commitment_audit(P, result)
+    # All four bins accounted for; partition is exhaustive.
+    assert audit["n_at_change"] + audit["n_near"] + audit["n_medium"] + audit["n_far"] == audit["n_bars"]
 
 
 def test_committed_posterior_matches_trajectory_at_commit_lag() -> None:
