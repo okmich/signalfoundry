@@ -3,13 +3,13 @@ from typing import Optional
 import pandas as pd
 
 from ._adx import adx, plus_di, minus_di
+from ._cci import cci
 from ._core_momentum import roc, roc_smoothed, momentum, macd, log_returns, momentum_acceleration, roc_velocity, \
     momentum_volatility_ratio, rolling_slope, stochastic, mean_adjusted_ratio, rsi, rolling_sharpe, jerk, williams_r, \
     ema_residual, trend_quality, detrended_price, vol_adj_mom_osc
 from ._cross_sectional_momentum import imom, csz_mom, peer_rel_z_mom, idiomatic_intraday_mom
-from ._efficiency_ratio import efficiency_ratio
 from ._misc import rolling_high_proximity, high_proximity, session_high_low_pct, lagged_return_skip, \
-    lagged_delta_returns, pr_skip, sustained_velocity, exponential_velocity, velocity_magnitude, velocity_consistency
+    lagged_delta_returns, pr_skip, sustained_velocity, exponential_velocity
 
 from ._williamblau import true_strength_index, stochastic_momentum_index, slope_divergence_tsi, \
     directional_trend_index, directional_efficiency_index
@@ -26,12 +26,11 @@ def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,
                            # Oscillator parameters
                            stoch_fastk: int = 14,
                            stoch_slowk: int = 3,
+                           cci_window: int = 24,
                            # MACD parameters
                            macd_signal: int = 9,
                            # Volatility-adjusted parameters
                            mom_vol_ratio_period: int = 14, vol_adj_osc_period: int = 14,
-                           # Efficiency ratio
-                           efficiency_ratio_window: int = 10,
                            # ADX parameters
                            adx_period: int = 14,
                            # William Blau indicators
@@ -96,6 +95,9 @@ def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,
     # Williams %R
     result["williams_r"] = williams_r(high_price, low_price, close_price, period=window)
 
+    # Commodity Channel Index
+    result[f"cci_{cci_window}"] = cci(high_price, low_price, close_price, window=cci_window)
+
     # Mean-adjusted ratio
     result["mean_adjusted_ratio"] = mean_adjusted_ratio(close_price, n=window)
     result["ema_residual"] = ema_residual(close_price, period=window)
@@ -110,9 +112,6 @@ def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,
                                                                     period=mom_vol_ratio_period)
     result["trend_quality"] = trend_quality(close_price, high_price, low_price, period=window)
     result["vol_adj_mom_osc"] = vol_adj_mom_osc(df, n=vol_adj_osc_period)
-
-    # ==================== Efficiency Ratio ====================
-    result["efficiency_ratio"] = efficiency_ratio(close_price, window=efficiency_ratio_window)
 
     # ==================== ADX ====================
     result["adx"] = adx(high_price, low_price, close_price, period=adx_period)
@@ -168,8 +167,6 @@ def core_momentum_features(df: pd.DataFrame, window: int=18, long_window:int=40,
     # ==================== Velocity-Based Momentum ====================
     result["sustained_velocity"] = sustained_velocity(close_price, lookback=window)
     result["exponential_velocity"] = exponential_velocity(close_price, lookback=exp_vel_lookback, alpha=exp_vel_alpha)
-    result["velocity_magnitude"] = velocity_magnitude(close_price, lookback=window)
-    result["velocity_consistency"] = velocity_consistency(close_price, lookback=window)
 
     # ==================== Aggregate Indicators ====================
     result["aggregate_m"] = aggregate_m(

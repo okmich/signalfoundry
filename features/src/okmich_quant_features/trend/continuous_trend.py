@@ -18,7 +18,7 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 
-from .oscillators import envelope
+from .channels import envelope
 
 
 def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float = 0.15) -> Union[pd.Series, np.ndarray]:

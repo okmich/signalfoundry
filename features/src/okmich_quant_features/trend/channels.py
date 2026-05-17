@@ -1,8 +1,28 @@
-from typing import Union, Tuple
+"""Price channels: a mean line +/- a vol-based half-width.
+
+Members:
+    bollinger_band     SMA(close)  +/- k * stdev(close)
+    envelope           SMA(close)  +/- k_atr * ATR
+    keltner_channels   MA(close)   +/- k_atr * ATR   (MA-type selectable)
+
+All three share the same shape (upper, middle, lower) and a common interpretation:
+%position-in-channel and channel width are useful derived features.
+"""
+from typing import Tuple, Union
 
 import numpy as np
 import pandas as pd
 import talib
+
+from .normalized_ma import MovingAverageType
+
+_TALIB_MA_FN = {
+    MovingAverageType.SIMPLE: talib.SMA,
+    MovingAverageType.EXPONENTIAL: talib.EMA,
+    MovingAverageType.LINEAR_WEIGHTED: talib.WMA,
+    MovingAverageType.DOUBLE_EXPONENTIAL: talib.DEMA,
+    MovingAverageType.TRIPLE_EXPONENTIAL: talib.TEMA,
+}
 
 SeriesOrArray = Union[pd.Series, np.ndarray]
 
@@ -85,26 +105,41 @@ def envelope(close_prices: SeriesOrArray, high_prices: SeriesOrArray, low_prices
         return upper_band, middle_band, lower_band, percent_e, env_width
 
 
-def cci(high_prices: SeriesOrArray, low_prices: SeriesOrArray, close_prices: SeriesOrArray, window: int = 20) -> SeriesOrArray:
-    """Commodity Channel Index via talib.
+def keltner_channels(high: SeriesOrArray, low: SeriesOrArray, close: SeriesOrArray,
+                     ma_type: MovingAverageType = MovingAverageType.EXPONENTIAL, ma_period: int = 20,
+                     atr_period: int = 14, atr_multiplier: float = 2.0) -> Tuple[SeriesOrArray, SeriesOrArray, SeriesOrArray]:
+    """Keltner Channels: raw MA(close) +/- atr_multiplier * ATR.
 
-    CCI = (typical_price - SMA(typical_price, window)) / (0.015 * mean_abs_deviation), where
-    typical_price = (H + L + C) / 3. Vol-normalised (by MAD) — values are roughly bounded to
-    +/-100 in calm regimes, with extremes around +/-200. Type-preserving.
+    Like envelope, but the middle line uses a configurable moving-average type (EMA is the textbook default).
+    The middle MA is computed via talib directly — no dependency on normalized_ma — and is restricted to talib-native
+    flavors: SIMPLE, EXPONENTIAL, LINEAR_WEIGHTED, DOUBLE_EXPONENTIAL, TRIPLE_EXPONENTIAL.
+
+    Returns (upper, middle, lower) in the input type (pd.Series or np.ndarray).
     """
-    if isinstance(close_prices, pd.Series):
-        high_values = high_prices.values
-        low_values = low_prices.values
-        close_values = close_prices.values
-        is_series = True
-    else:
-        high_values = high_prices
-        low_values = low_prices
-        close_values = close_prices
-        is_series = False
+    if ma_type not in _TALIB_MA_FN:
+        raise ValueError(f"keltner_channels supports only talib-native MA types {list(_TALIB_MA_FN)}; got {ma_type}")
 
-    cci_values = talib.CCI(high_values, low_values, close_values, timeperiod=window)
-    if is_series:
-        return pd.Series(cci_values, index=close_prices.index, name="cci")
+    if isinstance(close, pd.Series):
+        high_arr = high.values
+        low_arr = low.values
+        close_arr = close.values
+        index = close.index
     else:
-        return cci_values
+        high_arr = high
+        low_arr = low
+        close_arr = close
+        index = None
+
+    if not (len(high_arr) == len(low_arr) == len(close_arr)):
+        raise ValueError("High, low, and close arrays must have the same length")
+
+    middle = _TALIB_MA_FN[ma_type](close_arr.astype(np.float64), timeperiod=ma_period)
+    atr = talib.ATR(high_arr, low_arr, close_arr, timeperiod=atr_period)
+    upper = middle + atr_multiplier * atr
+    lower = middle - atr_multiplier * atr
+
+    if index is not None:
+        return (pd.Series(upper, index=index, name="upper_keltner"),
+                pd.Series(middle, index=index, name="middle_keltner"),
+                pd.Series(lower, index=index, name="lower_keltner"))
+    return upper, middle, lower

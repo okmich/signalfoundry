@@ -7,13 +7,14 @@ import numpy as np
 
 from ._auto_corr import auto_corr
 from ._choppiness_index import choppiness_index
+from ._efficiency_ratio import efficiency_ratio
 from ._hurst import hurst_exponent
+from ._stats import kendall_tau, runs_test, shannon_entropy, ljung_box_test, bds_test
 from ._trend_strength import trend_strength, detrended_trend_strength
 from ._variance_ratio import variance_ratio
+from ._velocity_path import returns_sign_persistence, velocity_consistency, velocity_magnitude
 from ._zigzag_density import zigzag_density
-from ._stats import kendall_tau, runs_test, shannon_entropy, ljung_box_test, bds_test
-from ..momentum import efficiency_ratio
-from ..trend.oscillators import bollinger_band
+from ..trend.channels import bollinger_band
 from ..utils import logit_transformation
 
 
@@ -37,6 +38,8 @@ def core_path_structure_features(df: pd.DataFrame,
     atr_window: int = 14,
     # Efficiency Ratio parameters
     efficiency_ratio_window: int = 20,
+    # Velocity path-shape parameters
+    velocity_window: int = 20,
     # Statistical test parameters
     kendall_tau_window: int = 50, runs_test_window: int = 50, shannon_entropy_window: int = 50, shannon_entropy_bins: int = 20,
     ljung_box_window: int = 50, ljung_box_lags: int = 20, bds_window: int = 50, bds_max_dim: int = 2,
@@ -110,6 +113,10 @@ def core_path_structure_features(df: pd.DataFrame,
     # ==================== Efficiency Ratio ====================
     er_col = f"efficiency_ratio_{efficiency_ratio_window}"
     result[er_col] = efficiency_ratio(close_price, window=efficiency_ratio_window)
+
+    # ==================== Velocity Path-Shape ====================
+    result[f"velocity_magnitude_{velocity_window}"] = velocity_magnitude(close_price, lookback=velocity_window)
+    result[f"velocity_consistency_{velocity_window}"] = velocity_consistency(close_price, lookback=velocity_window)
 
     # ==================== Statistical Tests ====================
     # Kendall's tau (rolling)

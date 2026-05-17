@@ -385,6 +385,15 @@ _PATH_STRUCTURE = [
     _fe("efficiency_ratio",   "path_structure", "regime",
         "Kaufman efficiency ratio — net displacement / total path length",
         rr=H, ret=M, dr=N, hor=ME, wbi=[TR, RA]),
+    _fe("velocity_magnitude", "path_structure._velocity_path", "regime",
+        "|mean(log_returns)| — direction-agnostic momentum strength (trending vs ranging)",
+        rr=M, ret=M, dr=N, hor=ME),
+    _fe("velocity_consistency", "path_structure._velocity_path", "regime",
+        "Coefficient of variation of returns — path smoothness; low = smooth trends, high = choppy",
+        rr=H, ret=M, dr=N, hor=ME, wbi=[TR, RA]),
+    _fe("returns_sign_persistence", "path_structure._velocity_path", "regime",
+        "Fraction of return signs matching the first sign in the window — directional persistence",
+        rr=H, ret=M, dr=H, hor=S, wbi=[TR, RA], dir_=True),
     _fe("kendall_tau",        "path_structure", "regime",
         "Rolling Kendall rank correlation — monotonic trend test",
         rr=H, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
@@ -513,9 +522,7 @@ _MOMENTUM = [
     _fe("trend_quality", "momentum", "regime",
         "OLS slope divided by ATR — trend quality ratio", rr=H, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
     _fe("vol_adj_mom_osc","momentum", "momentum", "ROC normalised by ATR", rr=M, ret=H, dr=H, hor=ME, dir_=True),
-    # Efficiency & directional strength
-    _fe("efficiency_ratio","momentum", "regime",
-        "Kaufman efficiency ratio (momentum.py variant)", rr=H, ret=M, dr=N, hor=ME, wbi=[TR, RA]),
+    # Directional strength
     _fe("adx", "momentum", "regime", "Average Directional Index with +DI/-DI (momentum.py variant)",
         rr=C, ret=M, dr=M, hor=ME, wbi=[TR, RA]),
     _fe("plus_di", "momentum", "trend",
@@ -554,10 +561,6 @@ _MOMENTUM = [
         "Average velocity (dP/dt) over lookback window", rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
     _fe("exponential_velocity", "momentum", "momentum",
         "EWMA velocity — exponentially weighted dP/dt", rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
-    _fe("velocity_magnitude",    "momentum", "momentum",
-        "Absolute velocity — speed regardless of direction", rr=M, ret=M, dr=N, hor=ME),
-    _fe("velocity_consistency",  "momentum", "regime",
-        "Coefficient of variation of velocity — trend smoothness", rr=H, ret=M, dr=N, hor=ME, wbi=[TR, RA]),
     # Aggregate & cross-sectional
     _fe("aggregate_m","momentum", "composite",
         "David Varadi's Aggregate M++ multi-timeframe momentum", rr=L, ret=H, dr=H, hor=ME, dir_=True),
@@ -580,18 +583,11 @@ _MOMENTUM = [
         "Peer-relative z-score momentum", rr=L, ret=H, dr=H, hor=ME, dir_=True, bench=True),
     _fe("idiomatic_intraday_mom","momentum", "momentum",
         "Idiomatic intraday momentum signal", rr=L, ret=H, dr=H, hor=I, dir_=True),
-    _fe("momentum_slope", "momentum._misc", "momentum",
-        "OLS slope of price over forward window using sklearn LinearRegression",
-        rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True,
-        notes="Not re-exported from momentum/__init__.py; import from momentum._misc. Forward-looking implementation — verify causal use before deploying."),
-    _fe("returns_sign_persistence", "momentum._misc", "regime",
-        "Rolling fraction of return signs matching the first sign in the window — directional persistence",
-        rr=H, ret=M, dr=H, hor=S, wbi=[TR, RA], dir_=True,
-        notes="Not re-exported from momentum/__init__.py; import from momentum._misc."),
     _fe("triple_ema", "momentum._williamblau", "trend",
         "Triple-cascade EMA smoother (p1, p2, p3) used as a building block for William Blau indicators",
         rr=L, ret=M, dr=M, hor=S, dir_=True,
         notes="Building block, not a standalone feature; passes through unchanged when period==1."),
+    _fe("cci", "momentum", "momentum", "Commodity Channel Index oscillator", rr=M, ret=M, dr=H, hor=S, dir_=True),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,7 +595,7 @@ _MOMENTUM = [
 # ─────────────────────────────────────────────────────────────────────────────
 _TREND = [
     _fe("core_trend_features", "trend", "composite",
-        "Core trend feature bundle: bands, CCI, Heikin Ashi, CTL, persistence, and continuous z-score features",
+        "Core trend feature bundle: Bollinger bands, CTL, persistence, and continuous z-score features",
         rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
     # Causal labeling functions (produce 1/-1/0 signals)
     _fe("continuous_trend_labeling", "trend", "trend",
@@ -612,8 +608,7 @@ _TREND = [
     # Supplementary indicators
     _fe("bollinger_band", "trend", "price_structure", "Bollinger Bands: upper/mid/lower/%B/width",
         rr=H, ret=M, dr=M, hor=S, wbi=[RA], ot="dataframe", notes="Returns 5 columns: upper, mid, lower, pct_b, width"),
-    _fe("cci","trend", "momentum", "Commodity Channel Index oscillator", rr=M, ret=M, dr=H, hor=S, dir_=True),
-    _fe("envelope", "trend.oscillators", "price_structure",
+    _fe("envelope", "trend.channels", "price_structure",
         "ATR envelope: SMA(close) ± k_atr · ATR — Bollinger analog with ATR-based bands",
         rr=H, ret=M, dr=M, hor=S, wbi=[TR, RA], ot="dataframe",
         notes="Returns (upper, middle, lower, percent_e, env_width). Scale-equivariant; more robust to gaps than Bollinger."),
@@ -873,23 +868,28 @@ _TEMPORAL = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MOVING AVERAGE / CHANNEL FEATURES (ma.py)
+# NORMALIZED MA — trend-feature MA primitives (trend/normalized_ma.py)
+# Smoothing (smooth_*) lives in filters.py; this section is for MA used as a trend ingredient.
 # ─────────────────────────────────────────────────────────────────────────────
-_MA_FEATURES = [
-    _fe("sma", "ma", "trend", "Simple moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("ema", "ma", "trend", "Exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("lwma", "ma", "trend", "Linearly weighted moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("dema", "ma", "trend", "Double exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("tema", "ma", "trend", "Triple exponential moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("smma", "ma", "trend", "Smoothed moving average", rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("vwap", "ma", "price_structure", "Volume-weighted average price", rr=M, ret=M, dr=M, hor=I, dir_=True, vol=True),
-    _fe("moving_average", "ma", "trend",
-        "Dispatcher for configured moving-average type",
-        rr=L, ret=M, dr=M, hor=S, dir_=True),
-    _fe("keltner_channels", "ma", "price_structure",
-        "Keltner Channels: EMA ± ATR-multiple bands — volatility-based price channel",
+_NORMALIZED_MA = [
+    _fe("norm_sma", "trend.normalized_ma", "trend", "log(close / SMA(close, period)) — signed distance from SMA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_ema", "trend.normalized_ma", "trend", "log(close / EMA(close, period)) — signed distance from EMA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_lwma", "trend.normalized_ma", "trend", "log(close / WMA(close, period)) — signed distance from linear-weighted MA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_dema", "trend.normalized_ma", "trend", "log(close / DEMA(close, period)) — signed distance from double-EMA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_tema", "trend.normalized_ma", "trend", "log(close / TEMA(close, period)) — signed distance from triple-EMA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_smma", "trend.normalized_ma", "trend", "log(close / SMMA(close, period)) — signed distance from Wilder-smoothed MA", rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("norm_vwap", "trend.normalized_ma", "price_structure", "log(close / VWAP(close, vol, period)) — signed distance from rolling VWAP", rr=H, ret=M, dr=H, hor=I, wbi=[TR], dir_=True, vol=True),
+    _fe("norm_moving_average", "trend.normalized_ma", "trend",
+        "Dispatcher returning log(close / MA) for the configured MA type",
+        rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True),
+    _fe("ma_slope_norm", "trend.normalized_ma", "trend",
+        "Per-bar slope of raw MA normalized by ATR — trend strength comparable across instruments",
+        rr=H, ret=M, dr=H, hor=S, wbi=[TR], dir_=True,
+        notes="Reads in units of ATRs/bar. Pass high/low for true ATR; otherwise falls back to close-only vol proxy. Talib-native MA types only."),
+    _fe("keltner_channels", "trend.channels", "price_structure",
+        "Keltner Channels: raw MA ± ATR-multiple bands — volatility-based price channel",
         rr=M, ret=M, dr=M, hor=S, wbi=[TR, RA],
-        ot="dataframe", notes="Returns (upper, mid, lower) tuple of Series/arrays"),
+        ot="dataframe", notes="Returns (upper, mid, lower) tuple. Talib-native MA types only: SIMPLE/EXPONENTIAL/LINEAR_WEIGHTED/DOUBLE_EXPONENTIAL/TRIPLE_EXPONENTIAL."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -979,16 +979,6 @@ _TBM = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SAMPLE PRICE FEATURE BUNDLES
-# ─────────────────────────────────────────────────────────────────────────────
-_SAMPLE_PRICE_FEATURES = [
-    _fe("create_price_based_features", "sample_price_features", "composite",
-        "Sample price-derived feature bundle: lagged log-returns, MAs (SMA/EMA/DEMA/TEMA) with diffs, rolling skew/kurt",
-        rr=M, ret=H, dr=M, hor=ME, dir_=True, ot="dataframe",
-        notes="Convenience bundle for quick feature prototyping; configurable returns lags and MA periods. Not a single feature — emits many columns."),
-]
-
-# ─────────────────────────────────────────────────────────────────────────────
 # STATS-DRIVEN PARAMETER SEARCH (RESEARCH HELPERS)
 # ─────────────────────────────────────────────────────────────────────────────
 _STATS_OPTIMAL_SEARCH = [
@@ -1032,10 +1022,9 @@ CATALOG: list[FeatureEntry] = (
     + _CANDLE
     + _FRACTIONAL_DIFF
     + _TEMPORAL
-    + _MA_FEATURES
+    + _NORMALIZED_MA
     + _FILTERS
     + _DIRECTIONAL_CHANGE
     + _TBM
-    + _SAMPLE_PRICE_FEATURES
     + _STATS_OPTIMAL_SEARCH
 )
