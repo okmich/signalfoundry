@@ -275,6 +275,14 @@ class BaseIBStrategy(BaseStrategy):
             "ask_size": self._ticker.askSize or 0.0,
         }
 
+    def _notify_trade_failed(self, direction: str, reason: str, retcode: int = None) -> None:
+        if not self.notifier:
+            return
+        self.notifier.on_trade_failed(
+            symbol=self.strategy_config.symbol, direction=direction, reason=reason,
+            retcode=retcode, context={"strategy_name": self.strategy_config.name},
+        )
+
     async def open_position(self, action: str, quantity: Optional[float] = None) -> bool:
         qty = quantity if quantity is not None else self.calculate_quantity()
         try:
@@ -283,9 +291,11 @@ class BaseIBStrategy(BaseStrategy):
             return True
         except (IBTransientError, IBConnectionError) as e:
             logger.error(f"Failed to open position after retries: {e}")
+            self._notify_trade_failed(action, str(e), getattr(e, "code", None))
             return False
         except IBPermanentError as e:
             logger.error(f"Failed to open position (permanent): {e}")
+            self._notify_trade_failed(action, str(e), e.code)
             return False
 
     async def place_order(self, order_type: Union[str, OrderType], price: float = 0.0,
@@ -315,9 +325,11 @@ class BaseIBStrategy(BaseStrategy):
             return True
         except (IBTransientError, IBConnectionError) as e:
             logger.error(f"Failed to place {order_type}: {e}")
+            self._notify_trade_failed(ot, str(e), getattr(e, "code", None))
             return False
         except IBPermanentError as e:
             logger.error(f"Failed to place {order_type} (permanent): {e}")
+            self._notify_trade_failed(ot, str(e), e.code)
             return False
 
     async def close_position(self, position: dict) -> bool:
@@ -326,9 +338,11 @@ class BaseIBStrategy(BaseStrategy):
             return True
         except (IBTransientError, IBConnectionError) as e:
             logger.error(f"Close failed after retries: {e}")
+            self._notify_trade_failed("CLOSE", str(e), getattr(e, "code", None))
             return False
         except IBPermanentError as e:
             logger.error(f"Close failed (permanent): {e}")
+            self._notify_trade_failed("CLOSE", str(e), e.code)
             return False
 
     async def place_bracket(self, action: str, take_profit: float, stop_loss: float,
@@ -345,9 +359,11 @@ class BaseIBStrategy(BaseStrategy):
             return trades
         except (IBTransientError, IBConnectionError) as e:
             logger.error(f"Bracket order failed: {e}")
+            self._notify_trade_failed(f"BRACKET {action}", str(e), getattr(e, "code", None))
             return []
         except IBPermanentError as e:
             logger.error(f"Bracket order rejected (permanent): {e}")
+            self._notify_trade_failed(f"BRACKET {action}", str(e), e.code)
             return []
 
     def _register_bracket(self, trades: list) -> None:

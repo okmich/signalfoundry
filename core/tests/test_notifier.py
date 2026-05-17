@@ -121,6 +121,80 @@ class TestTelegramNotifier:
         assert "MyStrat" in sent[0]
         assert "something broke" in sent[0]
 
+    def test_on_trade_failed(self):
+        notifier, sent = _make_notifier()
+        notifier.on_trade_failed(
+            symbol="BTCUSD", direction="buy", reason="AutoTrading disabled by client",
+            retcode=10089, context={"strategy_name": "MyStrat"},
+        )
+        notifier._dispatcher.flush()
+        assert len(sent) == 1
+        assert "TRADE FAILED" in sent[0]
+        assert "BTCUSD" in sent[0]
+        assert "buy" in sent[0]
+        assert "MyStrat" in sent[0]
+        assert "AutoTrading disabled by client" in sent[0]
+        assert "10089" in sent[0]
+
+    def test_on_trade_failed_no_retcode(self):
+        notifier, sent = _make_notifier()
+        notifier.on_trade_failed(
+            symbol="EURUSD", direction="CLOSE", reason="ticket=42 not found",
+            context={"strategy_name": "MyStrat"},
+        )
+        notifier._dispatcher.flush()
+        assert "TRADE FAILED" in sent[0]
+        assert "CLOSE" in sent[0]
+        assert "ticket=42 not found" in sent[0]
+        assert "retcode" not in sent[0]
+
+    def test_on_trade_failed_html_escaping(self):
+        """HTML-special chars in reason must be escaped or Telegram drops the message."""
+        notifier, sent = _make_notifier()
+        notifier.on_trade_failed(
+            symbol="BTCUSD", direction="buy",
+            reason="'<NoneType>' object has no attribute 'retcode' & state=<bad>",
+            context={"strategy_name": "MyStrat"},
+        )
+        notifier._dispatcher.flush()
+        # Raw HTML metacharacters from the reason must not appear unescaped
+        assert "<NoneType>" not in sent[0]
+        assert "<bad>" not in sent[0]
+        assert "&lt;NoneType&gt;" in sent[0]
+        assert "&amp;" in sent[0]
+
+
+class TestBaseNotifierDefaults:
+    """on_trade_failed has a default impl that delegates to on_error so
+    third-party notifiers that don't override it still produce some signal."""
+
+    def test_default_on_trade_failed_calls_on_error(self):
+        calls = []
+
+        class CustomNotifier(BaseNotifier):
+            def on_trade_opened(self, *a, **k): pass
+            def on_trade_closed(self, *a, **k): pass
+            def on_trade_modified(self, *a, **k): pass
+            def on_error(self, strategy_name, error_message, context=None):
+                calls.append((strategy_name, error_message, context))
+            def on_circuit_breaker_tripped(self, *a, **k): pass
+            def on_connection_lost(self, *a, **k): pass
+            def on_connection_restored(self, *a, **k): pass
+            def close(self): pass
+
+        n = CustomNotifier()
+        n.on_trade_failed(
+            symbol="BTCUSD", direction="buy", reason="Trade disabled",
+            retcode=10017, context={"strategy_name": "MyStrat"},
+        )
+        assert len(calls) == 1
+        strategy_name, error_message, context = calls[0]
+        assert strategy_name == "MyStrat"
+        assert "BTCUSD" in error_message
+        assert "buy" in error_message
+        assert "Trade disabled" in error_message
+        assert "10017" in error_message
+
     def test_on_circuit_breaker_tripped(self):
         notifier, sent = _make_notifier()
         notifier.on_circuit_breaker_tripped("MyStrat", 5)

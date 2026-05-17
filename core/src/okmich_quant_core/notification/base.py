@@ -116,6 +116,21 @@ class BaseNotifier(ABC):
             sl=0.0, tp=0.0, magic=0, ticket=order_id,
         )
 
+    def on_trade_failed(self, symbol: str, direction: str, reason: str, retcode: int = None, context: dict = None):
+        """A trade was decided by the strategy but the broker/platform rejected it.
+
+        Distinct from on_error: signal logic was fine, the rejection is operational
+        (AutoTrading disabled, symbol trading disabled, invalid stops, connection
+        lost mid-send, etc.). The *reason* carries the broker-specific cause.
+
+        Default implementation delegates to on_error() so legacy notifiers keep
+        working unchanged. Override for distinct formatting.
+        """
+        ctx = context or {}
+        strategy_name = ctx.get("strategy_name", "")
+        suffix = f" (retcode {retcode})" if retcode is not None else ""
+        self.on_error(strategy_name, f"Trade failed {symbol} {direction}: {reason}{suffix}", ctx)
+
     @abstractmethod
     def on_error(self, strategy_name: str, error_message: str, context: dict = None):
         ...

@@ -1,3 +1,4 @@
+import html
 from typing import Any, Dict
 
 import requests
@@ -70,6 +71,19 @@ class TelegramNotifier(BaseNotifier):
 
     def on_trade_modified(self, symbol: str, ticket: int, sl: float, tp: float):
         msg = f"<b>✏️ MODIFIED</b> {self._broker_tag}{symbol} #{ticket}  SL→{sl}  TP→{tp}"
+        self._dispatcher.dispatch(msg)
+
+    def on_trade_failed(self, symbol: str, direction: str, reason: str, retcode: int = None, context: dict = None):
+        # reason and direction may contain raw broker comments / exception
+        # messages with '<', '>', '&'; HTML-escape so Telegram's HTML parser
+        # doesn't reject the message and silently drop the alert.
+        ctx = context or {}
+        strategy_name = html.escape(ctx.get("strategy_name", ""))
+        header_tag = f"[{strategy_name}] " if strategy_name else ""
+        suffix = f" (retcode {retcode})" if retcode is not None else ""
+        msg = \
+            f"<b>🛑 TRADE FAILED</b> {header_tag}{self._broker_tag}{html.escape(symbol)} " \
+            f"{html.escape(direction)}\n{html.escape(reason)}{suffix}"
         self._dispatcher.dispatch(msg)
 
     def on_error(self, strategy_name: str, error_message: str, context: dict = None):

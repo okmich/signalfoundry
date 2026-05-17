@@ -170,6 +170,14 @@ class BaseMt5Strategy(BaseStrategy):
             return None
         return tick_info
 
+    def _notify_trade_failed(self, direction: str, reason: str, retcode: int = None) -> None:
+        if not self.notifier:
+            return
+        self.notifier.on_trade_failed(
+            symbol=self.strategy_config.symbol, direction=direction, reason=reason,
+            retcode=retcode, context={"strategy_name": self.strategy_config.name},
+        )
+
     def open_position(self, direction, price):
         """
         Open a market order position.
@@ -192,21 +200,18 @@ class BaseMt5Strategy(BaseStrategy):
             return True
         except (MT5TransientError, MT5ConnectionError) as e:
             # Transient errors already retried by decorator - log and fail
-            logger.error(
-                f"Failed to open position after retries: {e}"
-            )
+            logger.error(f"Failed to open position after retries: {e}")
+            self._notify_trade_failed(direction, str(e), getattr(e, "retcode", None))
             return False
         except MT5PermanentError as e:
             # Permanent errors - log and fail immediately
-            logger.error(
-                f"Failed to open position (permanent error): {e}"
-            )
+            logger.error(f"Failed to open position (permanent error): {e}")
+            self._notify_trade_failed(direction, str(e), e.retcode)
             return False
         except Exception as e:
             # Unexpected errors
-            logger.error(
-                f"Unexpected error opening position: {e}"
-            )
+            logger.error(f"Unexpected error opening position: {e}")
+            self._notify_trade_failed(direction, f"unexpected: {e}")
             return False
 
     def place_order(
@@ -282,7 +287,6 @@ class BaseMt5Strategy(BaseStrategy):
                     f"(SL={sl}, TP={tp}, Expiration={expiration})"
                 )
                 return True
-
             else:
                 logger.error(f"Invalid order type: {order_type}")
                 return False
@@ -290,18 +294,22 @@ class BaseMt5Strategy(BaseStrategy):
         except (MT5TransientError, MT5ConnectionError) as e:
             # Transient errors already retried by decorator - log and fail
             logger.error(f"Failed to place {order_type} order after retries: {e}")
+            self._notify_trade_failed(order_type_str, str(e), getattr(e, "retcode", None))
             return False
         except MT5PermanentError as e:
             # Permanent errors - log and fail immediately
             logger.error(f"Failed to place {order_type} order (permanent error): {e}")
+            self._notify_trade_failed(order_type_str, str(e), e.retcode)
             return False
         except ValueError as e:
             # Validation errors (invalid parameters)
             logger.error(f"Invalid parameters for {order_type} order: {e}")
+            self._notify_trade_failed(order_type_str, f"invalid params: {e}")
             return False
         except Exception as e:
             # Unexpected errors
             logger.error(f"Unexpected error placing {order_type} order: {e}")
+            self._notify_trade_failed(order_type_str, f"unexpected: {e}")
             return False
 
     def get_pending_orders_for_strategy(self):
@@ -337,18 +345,22 @@ class BaseMt5Strategy(BaseStrategy):
         except (MT5TransientError, MT5ConnectionError) as e:
             # Transient errors already retried by decorator - log and fail
             logger.error(f"Failed to close position {ticket} after retries: {e}")
+            self._notify_trade_failed("CLOSE", f"ticket={ticket}: {e}", getattr(e, "retcode", None))
             return False
         except MT5PermanentError as e:
             # Permanent errors - log and fail immediately
             logger.error(f"Failed to close position {ticket} (permanent error): {e}")
+            self._notify_trade_failed("CLOSE", f"ticket={ticket}: {e}", e.retcode)
             return False
         except ValueError as e:
             # Position not found
             logger.error(f"Position {ticket} not found: {e}")
+            self._notify_trade_failed("CLOSE", f"ticket={ticket} not found: {e}")
             return False
         except Exception as e:
             # Unexpected errors
             logger.error(f"Unexpected error closing position {ticket}: {e}")
+            self._notify_trade_failed("CLOSE", f"ticket={ticket} unexpected: {e}")
             return False
 
     def calculate_lot_size(self) -> float:
