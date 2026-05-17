@@ -42,13 +42,11 @@ def build_hmm(algo: str, n_states: int, mm_n_components: int, random_state: int 
 class HmmScreenerConfig:
     """Configuration for an HmmFeatureScreener run.
 
-    The screener fits one HMM per candidate feature subset using ``(algo,
-    n_states, mm_n_components)`` and computes axis-matched diagnostics against
-    the ``signal_type``'s evaluator.
+    The screener fits one HMM per candidate feature subset using ``(algo, n_states, mm_n_components)`` and
+    computes axis-matched diagnostics against the ``signal_type``'s evaluator.
 
-    Strict-default off-axis check: ``allowed_signal_types`` defaults to
-    ``frozenset({signal_type})``. To screen a model that legitimately combines
-    multiple axes, pass a wider set explicitly.
+    Strict-default off-axis check: ``allowed_signal_types`` defaults to ``frozenset({signal_type})``. To screen a model
+    that legitimately combines multiple axes, pass a wider set explicitly.
     """
     signal_type: str
     algo: str

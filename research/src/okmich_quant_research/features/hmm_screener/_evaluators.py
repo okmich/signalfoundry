@@ -1,15 +1,12 @@
 """Per-signal-type axis evaluators.
 
-Each ``evaluate_*`` function takes a fitted HMM's outputs plus the raw OHLC data
-and returns an ``AxisEvaluation`` carrying:
-  * ``axis_separation`` — the primary axis-matched spread across states
-    (forward-return spread for direction/momentum, forward-vol spread for
-    volatility, choppiness-index spread for path structure).
+Each ``evaluate_*`` function takes a fitted HMM's outputs plus the raw OHLC data and returns an ``AxisEvaluation`` carrying:
+  * ``axis_separation`` — the primary axis-matched spread across states (forward-return spread for direction/momentum,
+                          forward-vol spread for volatility, choppiness-index spread for path structure).
   * ``secondary_robustness`` — an axis-appropriate count / monotonicity stat.
 
-Wraps the existing ``okmich_quant_labelling.utils.label_util`` mapper functions
-with ``return_diagnostics=True`` so the heavy lifting of statistical scoring
-lives in one place.
+Wraps the existing ``okmich_quant_labelling.utils.label_util`` mapper functions with ``return_diagnostics=True`` so the
+heavy lifting of statistical scoring lives in one place.
 """
 from __future__ import annotations
 
@@ -50,10 +47,8 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         return AxisEvaluation(0.0, 0.0, "n_significant_states",
                               raw_details={"error": "fewer than 30 valid forward returns"})
 
-    mapping, diag = map_label_to_trend_direction(
-        fwd_df, state_col="state", return_col="returns",
-        method="conservative", return_diagnostics=True,
-    )
+    mapping, diag = map_label_to_trend_direction(fwd_df, state_col="state", return_col="returns",
+        method="conservative", return_diagnostics=True)
     n_significant = sum(1 for v in mapping.values() if v != 0)
 
     valid = diag.dropna(subset=["mean"]) if "mean" in diag.columns else diag.iloc[0:0]
@@ -70,9 +65,8 @@ def evaluate_momentum(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Dat
                      horizons: tuple[int, ...], is_directional: bool = True, **_ignored) -> AxisEvaluation:
     """Momentum axis: forward log-return rank spread + count of distinct momentum scores.
 
-    ``is_directional`` selects between signed momentum (rank by signed median) and
-    magnitude-only momentum (rank by ``|median|``). The screener decides by
-    inspecting the baseline features' registry-declared ``directional`` flag.
+    ``is_directional`` selects between signed momentum (rank by signed median) and magnitude-only momentum
+    (rank by ``|median|``). The screener decides by inspecting the baseline features' registry-declared ``directional`` flag.
     """
     primary_horizon = horizons[0] if horizons else 12
     fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon)
@@ -150,8 +144,7 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
         axis_separation=sep,
         secondary_robustness=float(n_distinct),
         secondary_label="n_distinct_buckets",
-        raw_details={"horizon": primary_horizon,
-                     "mapping": {int(k): int(v) for k, v in mapping.items()}},
+        raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()}},
     )
 
 
@@ -166,9 +159,8 @@ def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: 
 
     df = raw_data.copy()
     df["regime"] = state_labels[:len(df)]
-    mapping, diag = map_regime_to_path_structure_score(
-        df, regime_col="regime", method="id_chop", return_diagnostics=True,
-    )
+    mapping, diag = map_regime_to_path_structure_score(df, regime_col="regime", method="id_chop",
+                                                       return_diagnostics=True)
 
     if "median_chop" in diag.columns:
         valid = diag.dropna(subset=["median_chop"])
@@ -189,28 +181,21 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
                        horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
     """Liquidity axis: forward median volume spread + bucket monotonicity.
 
-    Computes the forward cumulative volume over ``horizons[0]`` bars, then ranks
-    states by median forward volume via ``map_regime_to_volatility_score``
-    (mechanically generic — any non-negative scalar proxy works). Higher buckets
+    Computes the forward cumulative volume over ``horizons[0]`` bars, then ranks states by median forward volume via
+    ``map_regime_to_volatility_score`` (mechanically generic — any non-negative scalar proxy works). Higher buckets
     = more active / liquid (higher forward volume per period).
 
-    **Why forward volume, not Amihud.** The classical Amihud measure
-    ``|forward return| / forward volume`` directly captures price impact per unit
-    traded, but introduces explicit volatility contamination via the
-    return-magnitude numerator: a volatile feature subset can look "illiquid"
-    just because returns are large. Forward median volume retains the
-    activity-based liquidity intuition (active = liquid) without algebraic
-    volatility coupling. Residual entanglement remains (volatile periods often
-    have high volume on FX/equity) but it is structural, not formulaic.
+    **Why forward volume, not Amihud.** The classical Amihud measure ``|forward return| / forward volume`` directly
+    captures price impact per unit traded, but introduces explicit volatility contamination via the
+    return-magnitude numerator: a volatile feature subset can look "illiquid" just because returns are large.
+    Forward median volume retains the activity-based liquidity intuition (active = liquid) without algebraic volatility
+    coupling. Residual entanglement remains (volatile periods often have high volume on FX/equity) but it is structural, not formulaic.
 
-    Polarity: with ``map_regime_to_volatility_score`` ranking ascending by
-    median, bucket 0 = lowest forward volume = LEAST liquid; bucket k = highest
-    forward volume = MOST liquid. Surfaced in ``raw_details['polarity']``.
+    Polarity: with ``map_regime_to_volatility_score`` ranking ascending by median, bucket 0 = lowest forward volume = LEAST liquid;
+    bucket k = highest forward volume = MOST liquid. Surfaced in ``raw_details['polarity']``.
 
-    Requires ``raw_data`` to contain ``close`` and a volume column. Accepts
-    ``tick_volume`` or ``volume`` (in that order of preference); if neither is
-    present, returns a zero-separation result with a clear error message in
-    ``raw_details``.
+    Requires ``raw_data`` to contain ``close`` and a volume column. Accepts ``tick_volume`` or ``volume`` (in that order of preference);
+    if neither is present, returns a zero-separation result with a clear error message in ``raw_details``.
     """
     primary_horizon = horizons[0] if horizons else 12
 
@@ -293,6 +278,5 @@ AXIS_EVALUATORS: dict[str, AxisEvaluator] = {
 def get_evaluator(signal_type: str) -> AxisEvaluator:
     """Look up the evaluator for a registry signal_type."""
     if signal_type not in AXIS_EVALUATORS:
-        raise KeyError(f"No evaluator registered for signal_type={signal_type!r}. "
-                       f"Known: {sorted(AXIS_EVALUATORS)}")
+        raise KeyError(f"No evaluator registered for signal_type={signal_type!r}. Known: {sorted(AXIS_EVALUATORS)}")
     return AXIS_EVALUATORS[signal_type]
