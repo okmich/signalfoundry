@@ -44,8 +44,7 @@ class SubsetEvaluation:
 class HmmScreenerResult:
     """Output of ``HmmFeatureScreener.screen()``.
 
-    Combines per-subset evaluations, a tidy DataFrame view for ranking, and the
-    stage reports describing what was pre-filtered.
+    Combines per-subset evaluations, a tidy DataFrame view for ranking, and the stage reports describing what was pre-filtered.
     """
     evaluations: list[SubsetEvaluation]
     results_: pd.DataFrame
@@ -71,11 +70,9 @@ class HmmScreenerResult:
     def fragile(self) -> list[SubsetEvaluation]:
         """Subsets flagged FRAGILE for structural degeneracy.
 
-        These failed the Phase-A quality gate (missing states, balance ratio
-        beyond ``config.max_balance_ratio``, or fewer than
-        ``config.min_significant_states`` distinguished states). They never
-        reached the Pareto check and should be investigated as model-structure
-        failures before any decision is made about the feature subset.
+        These failed the Phase-A quality gate (missing states, balance ratio beyond ``config.max_balance_ratio``, or fewer than
+        ``config.min_significant_states`` distinguished states). They never reached the Pareto check and should be
+        investigated as model-structure failures before any decision is made about the feature subset.
         """
         return sorted(
             (e for e in self.evaluations if e.pareto_status == ParetoStatus.FRAGILE),
@@ -88,5 +85,4 @@ class HmmScreenerResult:
         n_trap = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.TRAP)
         n_frag = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.FRAGILE)
         n_err = sum(1 for e in self.evaluations if e.error is not None)
-        return (f"HmmScreenerResult({n} subsets, {n_keep} keepers, {n_trap} traps, "
-                f"{n_frag} fragile, {n_err} errors)")
+        return f"HmmScreenerResult({n} subsets, {n_keep} keepers, {n_trap} traps, {n_frag} fragile, {n_err} errors)"

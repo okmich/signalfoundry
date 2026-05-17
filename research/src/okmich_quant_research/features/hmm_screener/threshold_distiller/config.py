@@ -51,9 +51,8 @@ class ThresholdMethod(StrEnum):
 class UnivariateHmmThresholdConfig:
     """Settings for fitting and distilling a univariate HMM.
 
-    The distiller is exploratory by design: it inspects which univariate feature
-    geometry produces coherent latent regimes, then emits static raw-feature
-    thresholds that approximate the fitted HMM's state assignments.
+    The distiller is exploratory by design: it inspects which univariate feature geometry produces coherent latent regimes,
+    then emits static raw-feature thresholds that approximate the fitted HMM's state assignments.
     """
 
     axis_type: AxisType

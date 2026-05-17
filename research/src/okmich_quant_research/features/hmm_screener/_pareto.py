@@ -12,18 +12,14 @@ class ParetoStatus(StrEnum):
     The screener classifies in two phases:
 
     Phase A — structural quality gate, before the Pareto check:
-      FRAGILE  — the HMM produced a structurally degenerate state structure
-                 (states collapsed below the minimum, or one state dominates the
-                 rest beyond the configured balance ratio, or the axis evaluator
-                 found too few significant states). Fix the model before judging
-                 axis content.
+      FRAGILE  — the HMM produced a structurally degenerate state structure (states collapsed below the minimum, or one
+                 state dominates the rest beyond the configured balance ratio, or the axis evaluator found too few significant states).
+                 Fix the model before judging axis content.
 
     Phase B — Pareto check, on Phase-A survivors:
       KEEPER     — Pareto-optimal on (axis_sep high, honesty low) and not a trap.
-      TRAP       — honesty rate exceeds the trap threshold; manual judgment
-                   required regardless of axis_separation.
-      DOMINATED  — neither Pareto-optimal nor a trap. Strictly worse than at
-                   least one keeper on both axis_sep and honesty.
+      TRAP       — honesty rate exceeds the trap threshold; manual judgment required regardless of axis_separation.
+      DOMINATED  — neither Pareto-optimal nor a trap. Strictly worse than at least one keeper on both axis_sep and honesty.
     """
     KEEPER = "keeper"
     TRAP = "trap"
@@ -36,8 +32,7 @@ def classify_pareto(measurements: list[tuple[float, float]], honesty_trap_rate: 
 
     Logic:
       1. ``TRAP`` if ``honesty > honesty_trap_rate`` — supersedes Pareto.
-      2. ``KEEPER`` if non-trap and Pareto-optimal among non-trap points
-         (no other non-trap point has BOTH higher axis_sep AND lower honesty).
+      2. ``KEEPER`` if non-trap and Pareto-optimal among non-trap points (no other non-trap point has BOTH higher axis_sep AND lower honesty).
       3. ``DOMINATED`` otherwise.
 
     Parameters

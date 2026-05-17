@@ -1,8 +1,7 @@
 """HmmFeatureScreener — research-time feature-subset selection for an axis HMM.
 
-Sibling to the ML ``FeatureScreener`` in ``..screener``. Where the ML screener
-asks "which features predict a known target," this one asks "which features
-produce a coherent latent state structure for *this semantic axis*."
+Sibling to the ML ``FeatureScreener`` in ``..screener``. Where the ML screener asks "which features predict a known target,"
+this one asks "which features produce a coherent latent state structure for *this semantic axis*."
 
 Workflow:
     >>> from okmich_quant_research.features.registry import FeatureRegistry
@@ -19,18 +18,14 @@ Workflow:
     >>> result.keepers    # Pareto-optimal non-trap subsets
 
 Implementation notes:
-    * Evaluator state labels are ``argmax(filtering gamma)`` (causal MAP), not
-      the offline Viterbi path. This keeps axis-quality scoring consistent with
-      what a live system would actually observe.
-    * Evaluator OHLC inputs are joined from ``self.raw_data`` on index, not read
-      from the ``feature_engineering`` output, so a "clean" feature function
-      that returns only engineered columns still works with axes that need
+    * Evaluator state labels are ``argmax(filtering gamma)`` (causal MAP), not the offline Viterbi path.
+      This keeps axis-quality scoring consistent with what a live system would actually observe.
+    * Evaluator OHLC inputs are joined from ``self.raw_data`` on index, not read from the ``feature_engineering`` output,
+      so a "clean" feature function that returns only engineered columns still works with axes that need
       ``high``/``low`` (e.g. price_structure).
-    * Pareto classification is preceded by a structural quality gate
-      (``min_significant_states``, ``max_balance_ratio``); subsets failing
-      either are marked ``FRAGILE`` and excluded from the frontier.
-    * Off-axis coherence warnings are computed per-subset, so a warning names
-      only the feature(s) actually contaminating that subset.
+    * Pareto classification is preceded by a structural quality gate (``min_significant_states``, ``max_balance_ratio``);
+      subsets failing either are marked ``FRAGILE`` and excluded from the frontier.
+    * Off-axis coherence warnings are computed per-subset, so a warning names only the feature(s) actually contaminating that subset.
 """
 from __future__ import annotations
 
@@ -76,10 +71,9 @@ class HmmFeatureScreener:
         OHLCV bars. Must contain at least a ``close`` column. Tail
         ``config.data_size`` rows are used.
     feature_engineering : Callable[[pd.DataFrame], pd.DataFrame]
-        Produces a DataFrame containing the candidate feature columns. Must be
-        deterministic; the screener applies it once per call to ``screen()``.
-        OHLC columns from ``raw_data`` are joined separately for evaluators, so
-        the feature function does not need to preserve them.
+        Produces a DataFrame containing the candidate feature columns. Must be deterministic; the screener applies it once
+            per call to ``screen()``.
+        OHLC columns from ``raw_data`` are joined separately for evaluators, so the feature function does not need to preserve them.
     registry : FeatureRegistry, optional
         Used to validate off-axis features. Defaults to ``FeatureRegistry()``.
     """
@@ -101,25 +95,20 @@ class HmmFeatureScreener:
         passthrough_cols = [c for c in _PASSTHROUGH_COLUMNS if c in self.raw_data.columns]
         self._passthrough = self.raw_data[passthrough_cols].copy()
 
-    # ------------------------------------------------------------------ screen
 
-    def screen(self, candidate_features: list[str],
-               strategy: ScreenStrategy = ScreenStrategy.ABLATION,
-               baseline: list[str] | None = None,
-               max_subset_size: int | None = None) -> HmmScreenerResult:
+    def screen(self, candidate_features: list[str], strategy: ScreenStrategy = ScreenStrategy.ABLATION,
+               baseline: list[str] | None = None, max_subset_size: int | None = None) -> HmmScreenerResult:
         """Run the screen.
 
         Parameters
         ----------
         candidate_features : list[str]
-            Features to screen. Must be column names produced by
-            ``feature_engineering``.
+            Features to screen. Must be column names produced by ``feature_engineering``.
         strategy : ScreenStrategy
             ``ABLATION`` (default): baseline + drop-one + add-one ablation.
             ``EXHAUSTIVE``: all non-empty subsets up to ``max_subset_size``.
         baseline : list[str], optional
-            Reference subset for ``ABLATION``. Defaults to all surviving
-            candidates if not provided.
+            Reference subset for ``ABLATION``. Defaults to all surviving candidates if not provided.
         max_subset_size : int, optional
             Cap for ``EXHAUSTIVE``. Defaults to ``len(candidate_features)``.
         """
@@ -296,8 +285,8 @@ class HmmFeatureScreener:
     def _validate_subset_coherence(self, subset: tuple[str, ...]) -> list[str]:
         """Per-subset off-axis check.
 
-        Iterates only over features actually in ``subset`` so the resulting
-        warnings name the contaminating feature, not the whole candidate pool.
+        Iterates only over features actually in ``subset`` so the resulting warnings name the contaminating feature,
+        not the whole candidate pool.
         Raises ``ValueError`` immediately if ``config.raise_on_off_axis`` is set.
         """
         warns: list[str] = []
@@ -321,8 +310,8 @@ class HmmFeatureScreener:
     def _state_balance_ratio(state_labels: np.ndarray, n_states: int) -> float:
         """Return ``max_state_pop / min_state_pop`` over ``n_states`` configured states.
 
-        Returns ``+inf`` if any configured state has zero population — that's the
-        smoking-gun for state collapse and the Phase-A gate treats it as FRAGILE.
+        Returns ``+inf`` if any configured state has zero population — that's the smoking-gun for state collapse and the
+        Phase-A gate treats it as FRAGILE.
         """
         counts = pd.Series(state_labels).value_counts()
         if len(counts) < n_states or counts.min() == 0:

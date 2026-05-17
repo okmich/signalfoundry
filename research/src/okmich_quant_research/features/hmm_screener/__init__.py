@@ -3,10 +3,9 @@ HMM Feature Screener
 ====================
 Research-time tool for selecting feature subsets for an axis-specific HMM.
 
-Sibling to ``okmich_quant_research.features.screener.FeatureScreener`` — same
-two-layer pattern (registry filters by domain knowledge; screener filters
-empirically), specialised for HMMs whose features *define* the latent state
-structure rather than predict a known target.
+Sibling to ``okmich_quant_research.features.screener.FeatureScreener`` — same two-layer pattern (registry filters by
+domain knowledge; screener filters empirically), specialised for HMMs whose features *define* the latent state structure
+rather than predict a known target.
 
 Quick start
 -----------
