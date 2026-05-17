@@ -93,11 +93,10 @@ def test_default_parameters(trend_data):
     assert len(result) == len(trend_data)
 
 
-def test_custom_name_parameter(linear_data):
-    """Test custom naming of the output series."""
-    custom_name = "custom_trend_label"
-    result = trend_persistence_labeling(linear_data["Close"], name=custom_name)
-    assert result.name == custom_name
+def test_output_name_is_trend_label(linear_data):
+    """Output Series is always named 'trend_label'; no `name=` parameter exists."""
+    result = trend_persistence_labeling(linear_data["Close"])
+    assert result.name == "trend_label"
 
 
 # Parameter Testing
@@ -142,13 +141,14 @@ def test_constant_price_data(constant_data):
 
 
 def test_data_with_nan_values(nan_data):
-    """Test handling of NaN values in input data."""
+    """NaN inputs propagate to NaN outputs (warmup + NaN-row regions)."""
     result = trend_persistence_labeling(nan_data["Close"])
 
     assert isinstance(result, pd.Series)
     assert len(result) == len(nan_data)
-    # Check that result is properly filled with 0.0 where NaN would occur
-    assert not result.isna().any()  # fillna(0.0) should eliminate all NaNs
+    # Warmup region is NaN; post-warmup labels are in {-1, 0, 1}.
+    non_nan = result.dropna()
+    assert set(non_nan.unique()).issubset({-1.0, 0.0, 1.0})
 
 
 def test_small_dataset(small_data):
@@ -170,13 +170,12 @@ def test_empty_dataframe(empty_data):
 
 
 def test_single_row(single_row_data):
-    """Test with single row DataFrame."""
+    """Single row -> NaN (insufficient data for vol computation)."""
     result = trend_persistence_labeling(single_row_data["Close"])
 
     assert isinstance(result, pd.Series)
     assert len(result) == 1
-    # Should be 0.0 as there's insufficient data for calculations
-    assert result.iloc[0] == 0.0
+    assert np.isnan(result.iloc[0])
 
 
 # Parameter Combinations
@@ -215,15 +214,16 @@ def test_drift_calculation():
 
 
 def test_volatility_calculation():
-    """Test volatility calculation doesn't cause division by zero."""
-    # Data with very small changes that could lead to near-zero volatility
+    """Test volatility calculation doesn't cause division by zero (post-warmup region)."""
     small_changes = pd.DataFrame(
-        {"Close": 100 + np.cumsum([0.001] * 50)}  # Very small increments
+        {"Close": 100 + np.cumsum([0.001] * 60)}
     )
 
     result = trend_persistence_labeling(small_changes["Close"])
     assert isinstance(result, pd.Series)
-    assert not result.isna().any()  # Should handle near-zero volatility
+    # Default window=20 with zscore_norm=True -> warmup ~2*window = 40 bars.
+    # Past that, labels must be finite (no div-by-zero blowup).
+    assert not result.iloc[45:].isna().any()
 
 
 # Data Type and Structure Tests
@@ -269,11 +269,12 @@ def test_performance_with_large_dataset():
 
 @pytest.mark.parametrize("scale", [1e-6, 1e-3, 1, 1e3, 1e6])
 def test_numerical_stability(scale):
-    """Test numerical stability with different scales."""
-    scaled_data = pd.DataFrame({"Close": np.linspace(100 * scale, 150 * scale, 50)})
+    """Test numerical stability with different scales (post-warmup region)."""
+    scaled_data = pd.DataFrame({"Close": np.linspace(100 * scale, 150 * scale, 60)})
     result = trend_persistence_labeling(scaled_data["Close"])
     assert isinstance(result, pd.Series)
-    assert not result.isna().any()
+    # Default window=20 + zscore_norm=True warmup ~ 2*window = 40 bars; post-warmup must be finite.
+    assert not result.iloc[45:].isna().any()
 
 
 # Integration Tests
@@ -337,9 +338,9 @@ def test_negative_prices():
 
 
 # Parameter Boundary Tests
-@pytest.mark.parametrize("window", [1, 2, 100, 200])
+@pytest.mark.parametrize("window", [2, 100, 200])
 def test_window_boundary_values(trend_data, window):
-    """Test window parameter at boundary values."""
+    """Test window parameter at boundary values (window must be >= 2)."""
     if window <= len(trend_data):
         result = trend_persistence_labeling(trend_data["Close"], window=window)
         assert len(result) == len(trend_data)
@@ -354,12 +355,11 @@ def test_smooth_boundary_values(trend_data, smooth):
 
 # Validation Tests
 def test_result_values_are_valid_labels():
-    """Test that all result values are valid trend."""
+    """All non-NaN result values must be in {-1, 0, 1}."""
     data = TestDataGeneration.create_trend_data(length=100)
     result = trend_persistence_labeling(data["Close"])
 
-    # After fillna, all values should be valid trend
-    unique_values = set(result.unique())
+    unique_values = set(result.dropna().unique())
     assert unique_values.issubset({-1.0, 0.0, 1.0})
 
 

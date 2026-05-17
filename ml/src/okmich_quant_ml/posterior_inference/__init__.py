@@ -23,6 +23,8 @@ notebook's pattern — ``O(window)`` memory, correct results) or (b) wait for a 
 batch.
 """
 
+from .adaptive_lag import AdaptiveLagInferer, AdaptiveLagResult, StabilityCriterion,\
+    compute_trajectories, lag_commitment_audit
 from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
     rolling_max_prob_std, step_kl, top_prob
 from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, EntropyGateInferer, MarginGateInferer,\
@@ -45,6 +47,11 @@ __all__ = [
     "EntropyGateInferer",
     "CompositeGateInferer",
     "StabilityGateInferer",
+    "AdaptiveLagInferer",
+    "AdaptiveLagResult",
+    "StabilityCriterion",
+    "compute_trajectories",
+    "lag_commitment_audit",
     "EmaPosteriorTransformer",
     "RollingMeanPosteriorTransformer",
     "TemperatureScalingTransformer",

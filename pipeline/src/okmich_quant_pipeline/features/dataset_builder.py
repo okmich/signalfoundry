@@ -36,9 +36,7 @@ from okmich_quant_features.path_structure import core_path_structure_features
 from okmich_quant_features.path_structure._zigzag_density import zigzag_density
 from okmich_quant_features.temporal import TemporalFeature
 from okmich_quant_features.timothymasters.utils.single_features_computer import compute_features
-from okmich_quant_features.trend import continuous_ma_trend_labeling
 from okmich_quant_features.trend.trend_persistence import trend_persistence_labeling
-from okmich_quant_features.trend.z_score_trend import zscore_trend_labeling
 from okmich_quant_features.volatility import core_volatility_features, rolling_volatility
 from okmich_quant_utils.symbol_metastore import SymbolMetastore
 
@@ -55,7 +53,7 @@ class DatasetBuilder:
       3. Compute candle + temporal features
       4. Compute Timothy Masters single-market features
       5. Compute metastore-tuned special features (frac_diff, zigzag_density,
-         zscore_trend, ctl_ma_trend, trend_persistence)
+         trend_persistence)
       6. Compute forward log-return label
       7. Drop warmup rows and lookahead tail
       8. Save to output_dir as parquet
@@ -293,31 +291,6 @@ class DatasetBuilder:
             zz_series, _ = zigzag_density(close, threshold=threshold, window=window, align=align)
             df["feat_zigzag_density"] = zz_series
             logger.debug(f"{symbol}: zigzag_density threshold={threshold}, window={window}")
-
-        # -- Z-score trend --
-        zt_params = self.metastore.get_property_value(
-            self.broker, self.timeframe, symbol, "zscore_trend_params"
-        )
-        if zt_params:
-            window = zt_params["window"]
-            z_threshold = zt_params.get("z_threshold", 1.0)
-            zscore_series, _ = zscore_trend_labeling(close, window=window, z_threshold=z_threshold)
-            df["feat_zscore_trend"] = zscore_series
-            logger.debug(f"{symbol}: zscore_trend window={window}")
-
-        # -- CTL MA trend --
-        ctl_params = self.metastore.get_property_value(
-            self.broker, self.timeframe, symbol, "ctl_ma_params"
-        )
-        if ctl_params:
-            omega = ctl_params["omega"]
-            trend_window = ctl_params.get("trend_window", self.default_window)
-            smooth_window = ctl_params.get("smooth_window", 3)
-            ctl_series = continuous_ma_trend_labeling(
-                close, omega=omega, trend_window=trend_window, smooth_window=smooth_window
-            )
-            df["feat_ctl_ma_trend"] = ctl_series
-            logger.debug(f"{symbol}: ctl_ma omega={omega}, trend_window={trend_window}")
 
         # -- Trend persistence --
         tp_params = self.metastore.get_property_value(
