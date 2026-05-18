@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .result import PairwiseSeparability, StateSummary
+from .config import PairwiseSeparability, StateSummary
 
 
 def build_state_summaries(x: NDArray, ordered_labels: NDArray, original_labels: NDArray, state_order: tuple[int, ...],

@@ -1,70 +1,47 @@
 """Univariate HMM threshold distiller."""
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 from numpy.typing import NDArray
 from sklearn.metrics import adjusted_rand_score
 
-from okmich_quant_ml.hmm import InferenceMode
 from okmich_quant_ml.posterior_inference import entropy, top_prob
 
-from .._config import build_hmm
-from .config import (
-    EmissionFamily,
-    ModelSelectionMetric,
-    StateOrdering,
-    ThresholdMethod,
-    UnivariateHmmThresholdConfig,
-)
-from .result import CandidateFit, ThresholdBoundary, UnivariateHmmThresholdResult
+from .config import StateOrdering, ThresholdBoundary, ThresholdMethod, UnivariateHmmThresholdConfig, \
+    UnivariateHmmThresholdResult
 from .separability import build_pairwise_separability, build_state_summaries
 
 
-FAMILY_TO_ALGO = {
-    EmissionFamily.LAMBDA: "hmm_lambda",
-    EmissionFamily.GAUSSIAN: "hmm_pmgnt",
-    EmissionFamily.STUDENT_T: "hmm_student",
-}
-
-# Non-mixture algos in FAMILY_TO_ALGO ignore mm_n_components, but build_hmm requires
-# the keyword. Use 1 to be honest about the single-component intent.
-_SINGLE_COMPONENT = 1
-
-
 class UnivariateHmmThresholdDistiller:
-    """Fit univariate HMM candidates and distill static raw-feature thresholds."""
+    """Distill static raw-feature thresholds from a pre-fitted univariate HMM.
+
+    The caller is responsible for model training, selection, and inference-mode choice
+    (``FILTERING`` vs ``SMOOTHING``). The distiller calls ``model.predict_proba(x)`` as-is
+    and never mutates the model.
+    """
 
     def __init__(self, config: UnivariateHmmThresholdConfig):
         self.config = config
 
-    def fit_distill(self, x: NDArray) -> UnivariateHmmThresholdResult:
-        """Fit the candidate grid on ``x`` and return distilled thresholds."""
+    def distill(self, model, x: NDArray) -> UnivariateHmmThresholdResult:
+        """Distill thresholds from a fitted ``model`` evaluated on ``x``."""
         x_1d = self._validate_x(x)
         X = x_1d.reshape(-1, 1)
-        fitted: list[tuple[object, CandidateFit, NDArray]] = []
-        candidates: list[CandidateFit] = []
-        for n_states in self.config.n_states_grid:
-            for family in self.config.emission_families:
-                for random_state in self.config.random_states:
-                    model, candidate, gamma_cand = self._fit_candidate(X, n_states, family, random_state)
-                    candidates.append(candidate)
-                    if model is not None:
-                        fitted.append((model, candidate, gamma_cand))
-        if not fitted:
-            errors = "; ".join(c.error or "unknown error" for c in candidates)
-            raise RuntimeError(f"all univariate HMM candidates failed: {errors}")
+        gamma = np.asarray(model.predict_proba(X))
+        if gamma.ndim != 2 or gamma.shape[0] != len(x_1d):
+            raise ValueError(
+                f"model.predict_proba(x) must return shape (T, n_states); got {gamma.shape} "
+                f"for T={len(x_1d)}"
+            )
+        n_states = int(gamma.shape[1])
+        if n_states < 2:
+            raise ValueError(f"model must have at least 2 states, got n_states={n_states}")
 
-        model, selected_candidate, gamma = self._select_candidate(fitted)
-        # gamma was computed in FILTERING mode inside _fit_candidate. Set mode defensively
-        # so any downstream re-use of the model produces consistent posteriors.
-        model.inference_mode = InferenceMode.FILTERING
         original_labels = np.argmax(gamma, axis=1).astype(int)
         top_probs = top_prob(gamma)
-        state_order = self._state_order(model, x_1d, original_labels, selected_candidate.n_states)
+        state_order = self._state_order(model, x_1d, original_labels, n_states)
         # Vectorised remapping: O(n_states + T) at C-speed instead of O(T) Python iterations.
-        lookup = np.empty(selected_candidate.n_states, dtype=int)
+        lookup = np.empty(n_states, dtype=int)
         for ordered_idx, original_state_id in enumerate(state_order):
             lookup[original_state_id] = ordered_idx
         ordered_labels = lookup[original_labels]
@@ -86,91 +63,12 @@ class UnivariateHmmThresholdDistiller:
             thresholds=thresholds,
             state_summaries=state_summaries,
             separability=separability,
-            selected_candidate=selected_candidate,
-            candidates=tuple(candidates),
             threshold_labels=threshold_labels,
             threshold_fidelity=fidelity,
             adjusted_rand_index=ari,
             non_monotonic_count=non_monotonic_count,
             posterior_metrics=self._posterior_metrics(gamma),
         )
-
-    def _fit_candidate(self, X: NDArray, n_states: int, family: EmissionFamily,
-                       random_state: int | None) -> tuple[object | None, CandidateFit, NDArray | None]:
-        algo = FAMILY_TO_ALGO[family]
-        try:
-            model = build_hmm(algo, n_states=n_states, mm_n_components=_SINGLE_COMPONENT,
-                              random_state=random_state)
-            model.fit(X)
-            model.inference_mode = InferenceMode.FILTERING
-            gamma = model.predict_proba(X)
-            labels = np.argmax(gamma, axis=1)
-            ll = float(model.log_likelihood(X))
-            aic, bic = model.get_aic_bic(X)
-            counts = np.bincount(labels, minlength=n_states)
-            populated = counts[counts > 0]
-            missing_states = int((counts == 0).sum())
-            min_state_fraction = float(counts.min() / len(labels))
-            # `populated` is filtered by `counts > 0`, so populated.min() >= 1 by construction —
-            # no need to guard the divisor against zero.
-            balance = float(populated.max() / populated.min()) if len(populated) else float("inf")
-            valid = missing_states == 0 and min_state_fraction >= self.config.min_state_fraction
-            candidate = CandidateFit(
-                n_states=n_states,
-                emission_family=family,
-                random_state=random_state,
-                log_likelihood=ll,
-                aic=float(aic),
-                bic=float(bic),
-                selected_metric=self.config.selection_metric,
-                selected_score=self._candidate_score(ll, float(aic), float(bic)),
-                mean_top_prob=float(top_prob(gamma).mean()),
-                state_balance_ratio=balance,
-                min_state_fraction=min_state_fraction,
-                missing_states=missing_states,
-                valid=valid,
-                error=None,
-            )
-            return model, candidate, gamma
-        except Exception as exc:
-            candidate = CandidateFit(
-                n_states=n_states,
-                emission_family=family,
-                random_state=random_state,
-                log_likelihood=float("nan"),
-                aic=float("nan"),
-                bic=float("nan"),
-                selected_metric=self.config.selection_metric,
-                selected_score=float("inf"),
-                mean_top_prob=float("nan"),
-                state_balance_ratio=float("nan"),
-                min_state_fraction=float("nan"),
-                missing_states=n_states,
-                valid=False,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return None, candidate, None
-
-    def _select_candidate(self, fitted: list[tuple[object, CandidateFit, NDArray]]
-                          ) -> tuple[object, CandidateFit, NDArray]:
-        valid = [item for item in fitted if item[1].valid]
-        if not valid:
-            warnings.warn(
-                "All HMM candidates produced invalid state structure (missing states or "
-                "min_state_fraction below threshold). Selecting best-scoring candidate from "
-                "the invalid pool — inspect `result.selected_candidate.valid` and "
-                "`result.candidate_frame` before trusting the output.",
-                UserWarning, stacklevel=2,
-            )
-        pool = valid if valid else fitted
-        return min(pool, key=lambda item: item[1].selected_score)
-
-    def _candidate_score(self, log_likelihood: float, aic: float, bic: float) -> float:
-        if self.config.selection_metric == ModelSelectionMetric.AIC:
-            return aic
-        if self.config.selection_metric == ModelSelectionMetric.BIC:
-            return bic
-        return -log_likelihood
 
     def _state_order(self, model, x: NDArray, labels: NDArray, n_states: int) -> tuple[int, ...]:
         scores = []
