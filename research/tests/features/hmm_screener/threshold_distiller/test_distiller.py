@@ -80,3 +80,36 @@ def test_univariate_distiller_rejects_multivariate_input() -> None:
     bad_x = np.zeros((100, 2))
     with pytest.raises(ValueError, match="1D array"):
         UnivariateHmmThresholdDistiller(config).distill(model, bad_x)
+
+
+def test_univariate_distiller_rejects_raw_logreturn_scale_input() -> None:
+    """Raw daily log-returns (spread ~0.05) must be rejected as unnormalized."""
+    x = _two_regime_feature()
+    model = _fit_two_state_gaussian(x)
+    config = UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION)
+    rng = np.random.default_rng(0)
+    raw_returns = rng.normal(0.0, 0.01, 520)
+    with pytest.raises(ValueError, match="appears unnormalized"):
+        UnivariateHmmThresholdDistiller(config).distill(model, raw_returns)
+
+
+def test_univariate_distiller_rejects_raw_price_scale_input() -> None:
+    """Raw price-like input (huge spread) must be rejected as unnormalized."""
+    x = _two_regime_feature()
+    model = _fit_two_state_gaussian(x)
+    config = UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION)
+    rng = np.random.default_rng(1)
+    raw_prices = rng.normal(50_000.0, 2_000.0, 520)
+    with pytest.raises(ValueError, match="appears unnormalized"):
+        UnivariateHmmThresholdDistiller(config).distill(model, raw_prices)
+
+
+def test_univariate_distiller_config_rejects_invalid_input_scale_settings() -> None:
+    with pytest.raises(ValueError, match="input_scale_quantiles"):
+        UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION, input_scale_quantiles=(0.5, 0.5))
+    with pytest.raises(ValueError, match="input_scale_min_spread"):
+        UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION, input_scale_min_spread=0.0)
+    with pytest.raises(ValueError, match="input_scale_max_spread"):
+        UnivariateHmmThresholdConfig(
+            axis_type=AxisType.DIRECTION, input_scale_min_spread=1.0, input_scale_max_spread=0.5
+        )

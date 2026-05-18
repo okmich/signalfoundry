@@ -51,6 +51,14 @@ class UnivariateHmmThresholdConfig:
     posterior_confidence_thresholds: tuple[float, ...] = (0.95, 0.99)
     emission_grid_size: int = 2048
     eps: float = 1e-12
+    # Input-scale contract: the distiller is only valid on stationary, scale-stable
+    # features. The caller must apply a StandardScaler / RobustScaler / rolling-z /
+    # rolling-rank or equivalent first. Enforced at fit time via a quantile-spread
+    # check on x: defaults reject raw log-returns (~0.05 spread) and raw prices/
+    # volumes (huge spread) while passing standard / robust / rank-scaled inputs.
+    input_scale_quantiles: tuple[float, float] = (0.01, 0.99)
+    input_scale_min_spread: float = 0.2
+    input_scale_max_spread: float = 50.0
 
     def __post_init__(self) -> None:
         if any((q < 0.0 or q > 1.0) for q in self.posterior_confidence_thresholds):
@@ -59,6 +67,18 @@ class UnivariateHmmThresholdConfig:
             raise ValueError(f"emission_grid_size must be >= 128, got {self.emission_grid_size}")
         if self.eps <= 0:
             raise ValueError(f"eps must be positive, got {self.eps}")
+        q_lo, q_hi = self.input_scale_quantiles
+        if not (0.0 <= q_lo < q_hi <= 1.0):
+            raise ValueError(
+                f"input_scale_quantiles must satisfy 0 <= lo < hi <= 1, got {self.input_scale_quantiles}"
+            )
+        if self.input_scale_min_spread <= 0:
+            raise ValueError(f"input_scale_min_spread must be positive, got {self.input_scale_min_spread}")
+        if self.input_scale_max_spread <= self.input_scale_min_spread:
+            raise ValueError(
+                f"input_scale_max_spread ({self.input_scale_max_spread}) must exceed "
+                f"input_scale_min_spread ({self.input_scale_min_spread})"
+            )
 
 
 @dataclass(frozen=True)

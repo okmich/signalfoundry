@@ -18,6 +18,13 @@ class UnivariateHmmThresholdDistiller:
     The caller is responsible for model training, selection, and inference-mode choice
     (``FILTERING`` vs ``SMOOTHING``). The distiller calls ``model.predict_proba(x)`` as-is
     and never mutates the model.
+
+    Input contract: ``x`` must be a stationary, scale-stable feature — i.e. the caller has
+    already applied a ``StandardScaler`` / ``RobustScaler`` / rolling-z / rolling-rank or
+    equivalent. Static thresholds on raw, unbounded features (log-returns, prices, volumes)
+    do not survive distribution drift across regime, asset, or timeframe. The contract is
+    enforced at fit time by a quantile-spread guard on ``x`` (see
+    ``UnivariateHmmThresholdConfig.input_scale_*``); inputs that look raw are rejected.
     """
 
     def __init__(self, config: UnivariateHmmThresholdConfig):
@@ -259,8 +266,7 @@ class UnivariateHmmThresholdDistiller:
             metrics[key] = float((tp > threshold).mean())
         return metrics
 
-    @staticmethod
-    def _validate_x(x: NDArray) -> NDArray:
+    def _validate_x(self, x: NDArray) -> NDArray:
         arr = np.asarray(x, dtype=np.float64)
         if arr.ndim == 2 and arr.shape[1] == 1:
             arr = arr[:, 0]
@@ -270,4 +276,13 @@ class UnivariateHmmThresholdDistiller:
             raise ValueError(f"x must contain at least 60 observations, got {len(arr)}")
         if not np.all(np.isfinite(arr)):
             raise ValueError("x contains NaN or Inf values")
+        q_lo_pct, q_hi_pct = self.config.input_scale_quantiles
+        q_lo, q_hi = np.quantile(arr, [q_lo_pct, q_hi_pct])
+        spread = float(q_hi - q_lo)
+        if not (self.config.input_scale_min_spread <= spread <= self.config.input_scale_max_spread):
+            raise ValueError(
+                f"x appears unnormalized: p{q_lo_pct:.2%}-p{q_hi_pct:.2%} spread={spread:.4g} "
+                f"outside [{self.config.input_scale_min_spread}, {self.config.input_scale_max_spread}]. "
+                f"Apply StandardScaler/RobustScaler/rolling-z/rolling-rank before passing to the distiller."
+            )
         return arr

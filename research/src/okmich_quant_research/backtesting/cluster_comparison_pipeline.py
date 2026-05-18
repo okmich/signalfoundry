@@ -347,9 +347,7 @@ class ClusteringComparisonPipeline:
         model = self.cluster_algorithms[model_key]
         probs = None
         try:
-            print(
-                f"\t => 🔍 Predicting with {model_key.upper()} model ....... ", end=" "
-            )
+            print(f"\t => 🔍 Predicting with {model_key.upper()} model ....... ", end=" ")
             if model_key == "gmm":
                 labels = model.predict(X)
                 probs = model.predict_proba(X)
