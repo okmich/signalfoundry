@@ -13,7 +13,7 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score
 from okmich_quant_labelling.utils.label_eval_util import label_path_structure_statistics
 from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM
 from okmich_quant_ml.hmm.pomegranate import DistType
-from okmich_quant_research.backtesting.hmm_clustering_comparison_backtesting_pipeline import (
+from okmich_quant_research.backtesting.cluster_comparison_pipeline import (
     HMM_ALGOS,
 )
 

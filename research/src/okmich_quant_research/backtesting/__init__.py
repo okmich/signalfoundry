@@ -1,5 +1,4 @@
-from .hmm_clustering_comparison_backtesting_pipeline import LabelAndClusterTestingAndBacktesterPipeline, \
-    LabelClusterPipelineConfig
+from .cluster_comparison_pipeline import ClusteringComparisonPipeline, ClusteringComparisonPipelineConfig
 from .hmm_wfa_optimizer_with_backtester import HMMWalkForwardAnalysisBacktestOptimizer, HMMWindowResult
 from .keras_models_wfa_optimizer import ModelWalkForwardAnalysisOptimizer, WindowResult
 from .keras_models_wfa_optimizer_with_backtester import ModelWalkForwardAnalysisBacktestOptimizer, WindowBacktestResult

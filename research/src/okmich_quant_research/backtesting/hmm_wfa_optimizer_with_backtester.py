@@ -13,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from skopt import gp_minimize
 from skopt.space import Real, Integer, Categorical
 
-from .hmm_clustering_comparison_backtesting_pipeline import HMM_ALGOS
+from .cluster_comparison_pipeline import HMM_ALGOS
 from .vbt_export import QuantframeExportMixin
 from .wfa_plot_utils import HMMVisualizationMixin
 from .wfa_utils import to_serializable, CheckpointingMixin, WindowGenerationMixin, MetricsTrackingMixin, \
@@ -120,7 +120,7 @@ class HMMWalkForwardAnalysisBacktestOptimizer(CheckpointingMixin, WindowGenerati
 
     ```python
     # Example 1: Grid search over multiple HMM variants and n_states
-    from okmich_quant_research.backtesting.hmm_clustering_comparison_backtesting_pipeline import HMM_ALGOS
+    from okmich_quant_research.backtesting.cluster_comparison_pipeline import HMM_ALGOS
 
     hmm_params = {
         'model_variants': ['hmm_learn', 'hmm_pmgnt', 'hmm_student'],

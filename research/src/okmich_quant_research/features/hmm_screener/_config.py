@@ -15,7 +15,7 @@ class ScreenStrategy(StrEnum):
     EXHAUSTIVE = "exhaustive"
 
 
-# Algo registry mirroring okmich_quant_research.backtesting.hmm_clustering_comparison_backtesting_pipeline.
+# Algo registry mirroring okmich_quant_research.backtesting.cluster_comparison_pipeline.
 # (algo_key -> (DistType, is_mixture)). Kept local to avoid coupling to that module's private internals.
 HMM_ALGO_REGISTRY: dict[str, tuple[DistType, bool]] = {
     "hmm_pmgnt":      (DistType.NORMAL,   False),

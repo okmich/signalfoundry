@@ -3,14 +3,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from okmich_quant_ml.hmm import InferenceMode
+from okmich_quant_ml.hmm import InferenceMode, PomegranateHMM
+from okmich_quant_ml.hmm.pomegranate import DistType
 
-from okmich_quant_research.features.hmm_screener import (
+from okmich_quant_research.features.hmm_screener.threshold_distiller import (
     AxisType,
     ThresholdMethod,
     UnivariateHmmThresholdConfig,
-    UnivariateHmmThresholdDistiller,
-    build_hmm,
+    UnivariateHmmThresholdDistiller
 )
 
 
@@ -22,7 +22,7 @@ def _two_regime_feature(seed: int = 11) -> np.ndarray:
 
 
 def _fit_two_state_gaussian(x: np.ndarray, random_state: int = 42):
-    model = build_hmm("hmm_pmgnt", n_states=2, mm_n_components=1, random_state=random_state)
+    model = PomegranateHMM(distribution_type=DistType.NORMAL, n_states=2, random_state=random_state)
     model.fit(x.reshape(-1, 1))
     model.inference_mode = InferenceMode.FILTERING
     return model

@@ -1,9 +1,8 @@
 import os
-from typing import List, Callable, Tuple
+from typing import List
 
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 from joblib import Parallel, delayed
 from sklearn.cluster import KMeans, MiniBatchKMeans, AgglomerativeClustering, Birch, MeanShift, DBSCAN, \
     HDBSCAN, SpectralClustering
@@ -11,9 +10,7 @@ from sklearn.cluster import KMeans, MiniBatchKMeans, AgglomerativeClustering, Bi
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
-from sklearn.preprocessing import StandardScaler
 
-from okmich_quant_labelling.utils.label_util import map_label_to_trend_direction
 from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM, InferenceMode
 from okmich_quant_ml.hmm.pomegranate import DistType
 from okmich_quant_features.utils import resample_ohlcv
@@ -85,31 +82,11 @@ def _train_single_model(name, model, X, sym, label_column_prefix):
         return name, None, None, None, None, str(e)
 
 
-def get_naive_signal_generation_fn(**params):
-    def naive_signal_generation_fn(data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        series = data[params.get("cluster_name", "cluster")]
-
-        long_entries = (series.shift(1) == 1) & (series.shift(2) != 1)
-        long_exits = (series.shift(1) != 1) & (series.shift(2) == 1)
-        short_entries = (series.shift(1) == -1) & (series.shift(2) != -1)
-        short_exits = (series.shift(1) != -1) & (series.shift(2) == -1)
-
-        # Replace NaNs with 0 for clean output
-        long_entries = long_entries.fillna(0).to_numpy()
-        long_exits = long_exits.fillna(0).to_numpy()
-        short_entries = short_entries.fillna(0).to_numpy()
-        short_exits = short_exits.fillna(0).to_numpy()
-
-        return long_entries, long_exits, short_entries, short_exits
-
-    return naive_signal_generation_fn
-
-
-class LabelClusterPipelineConfig:
+class ClusteringComparisonPipelineConfig:
     def __init__(self, input_dir=".", output_dir=".", should_dim_reduce=True, should_scale=True, should_resample=True,
                  should_save_output_df=True, should_fit_cluster=True, columns_to_scale=None,
-                 columns_scaling_exclude: List[str] = None, signal_column=None, timeframe: str = "15min", symbols: List[str] = None,
-                 label_column_prefix="lbl_", skip_backtesting: bool = False, mm_n_components: int = 2, data_size: int = -1,
+                 columns_scaling_exclude: List[str] = None, timeframe: str = "15min", symbols: List[str] = None,
+                 label_column_prefix="lbl_", mm_n_components: int = 2, data_size: int = -1,
                  training_set_pct: float = 0.75, append_excluded_col_in_result: bool = False, clustering_algos: List[str] = None,
                  offline_labelling_mode: bool = False, inference_mode: InferenceMode = None):
         self.should_dim_reduce = should_dim_reduce
@@ -124,11 +101,9 @@ class LabelClusterPipelineConfig:
             if columns_scaling_exclude
             else ["open", "high", "low", "close", "tick_volume"]
         )
-        self.skip_backtesting = skip_backtesting
         self.append_excluded_col_in_result = append_excluded_col_in_result
         self.data_size = data_size
         self.training_set_pct = training_set_pct
-        self.signal_column = signal_column if signal_column else []
         self.timeframe = timeframe
         self.symbols = symbols if symbols else []
         self.mm_n_components = mm_n_components
@@ -147,16 +122,14 @@ class LabelClusterPipelineConfig:
         return df
 
 
-class LabelAndClusterTestingAndBacktesterPipeline:
-    def __init__(self, pipeline_config: LabelClusterPipelineConfig = None, signal_generation_fn: Callable = None,
-                 default_cluster: int = 3, transformation_config: dict = None, scaler_type: str = 'standard', **kwargs):
+class ClusteringComparisonPipeline:
+    def __init__(self, pipeline_config: ClusteringComparisonPipelineConfig = None, default_cluster: int = 3,
+                 transformation_config: dict = None, scaler_type: str = 'standard', **kwargs):
         """
         Parameters
         ----------
-        pipeline_config : LabelClusterPipelineConfig
+        pipeline_config : ClusteringComparisonPipelineConfig
             Pipeline configuration
-        signal_generation_fn : Callable, optional
-            Custom signal generation function
         default_cluster : int, default 3
             Number of clusters/states
         transformation_config : dict, optional
@@ -165,7 +138,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
             Type of scaler: 'standard', 'robust', or 'minmax'
         """
         self.pipeline_config = pipeline_config
-        self.signal_generation_fn = signal_generation_fn
         self.source_files = (
             pipeline_config.symbols
             if pipeline_config.symbols
@@ -174,7 +146,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                 for i in os.listdir(self.pipeline_config.input_dir)
             ]
         )
-        self.stats_df = None
 
         # Build transformation pipeline (empty config = passthrough + scaler)
         self._transform_pipeline = build_pipeline_from_config(
@@ -183,7 +154,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
         )
 
         self.pca = None  # PCA handled separately for adaptive fitting
-        self.cluster_columns = None
         self.random_seed = 1
         self.algo_silhouette_scores = {}
         self.cluster_algorithms = {}
@@ -299,6 +269,8 @@ class LabelAndClusterTestingAndBacktesterPipeline:
             for c in (self.pipeline_config.columns_to_scale or df.columns)
             if c != "close"
         ]
+        # Operate on a copy so the caller's frame keeps raw feature values.
+        df = df.copy()
         df[columns_to_scale] = self._transform_pipeline.fit_transform(df[columns_to_scale])
         # Select features: scaled + binary flags
         feature_cols = columns_to_scale + [
@@ -407,60 +379,6 @@ class LabelAndClusterTestingAndBacktesterPipeline:
             print(f"\t❌ {model_key} failed on {sym}: {e}")
         return df, probs
 
-    def map_clusters_to_signal(self, df):
-        self.cluster_columns = [
-            i
-            for i in df.columns
-            if i.startswith(self.pipeline_config.label_column_prefix)
-        ]
-        returns_col = "returns_1"
-        if returns_col not in df.columns:
-            df[returns_col] = np.log(df["close"] / df["close"].shift(1))
-
-        for col in self.cluster_columns:
-            cluster_to_signal = map_label_to_trend_direction(
-                df, state_col=col, return_col=returns_col
-            )
-            df[col] = df[col].map(cluster_to_signal)
-        return df
-
-    def run_backtest(self, df):
-        self.stats_df = None
-        for col_name in self.cluster_columns:
-            signal_generator_fn = (
-                self.signal_generation_fn
-                or get_naive_signal_generation_fn(**{"cluster_name": col_name})
-            )
-            # Generate signals
-            long_entries, long_exits, short_entries, short_exits = signal_generator_fn(df)
-
-            # Constants
-            initial_capital = 10000  # USD
-            contract_size = 1
-            pip_value = 1.0  # e.g., 1 pip = 0.10 USD for 0.01 lot on
-            position_size = 0.1
-            # Use vectorbt's built-in conflict resolution
-            portfolio = vbt.Portfolio.from_signals(
-                init_cash=initial_capital,
-                fees=0.00,
-                size=position_size,
-                close=df["close"],
-                entries=long_entries,
-                exits=long_exits,
-                short_entries=short_entries,
-                short_exits=short_exits,
-                upon_dir_conflict=vbt.portfolio.enums.DirectionConflictMode.Opposite,
-                upon_opposite_entry="close",
-                freq=self.pipeline_config.timeframe,
-            )
-            stats = portfolio.stats()
-            stats = stats.to_frame()
-            stats.columns = [col_name]
-            if self.stats_df is None:
-                self.stats_df = stats
-            else:
-                self.stats_df = pd.concat([self.stats_df, stats], axis=1)
-
     def run(self):
         def do_feature_engineering(df):
             raw_features = self.feature_engineering(df)
@@ -516,13 +434,14 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                 # Fit models on training set
                 if self.pipeline_config.should_fit_cluster:
                     print(f"\t => Training models on training set...")
-                    _ = self.fit_and_predict_cluster(sym, train_features, df_features_train)
+                    df_features_train = self.fit_and_predict_cluster(sym, train_features, df_features_train)
 
                     # Now run inference on test set
                     print(f"\t => Running inference on test set...")
                     df_features_test = self.feature_engineering(df_test)
 
                     # Transform test features using fitted pipeline/PCA (don't fit again!)
+                    # Scale into a separate frame so df_features_test keeps raw values for output_df.
                     if self.pipeline_config.should_scale:
                         columns_to_scale = [
                             c
@@ -532,16 +451,17 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                             )
                             if c != "close"
                         ]
-                        df_features_test[columns_to_scale] = self._transform_pipeline.transform(
+                        test_features = df_features_test.copy()
+                        test_features[columns_to_scale] = self._transform_pipeline.transform(
                             df_features_test[columns_to_scale]
                         )
                         feature_cols = columns_to_scale + [
                             col
-                            for col in df_features_test.columns
+                            for col in test_features.columns
                             if col not in columns_to_scale
-                            and df_features_test[col].isin([-1, 0, 1]).all()
+                            and test_features[col].isin([-1, 0, 1]).all()
                         ]
-                        test_features = df_features_test[feature_cols].copy()
+                        test_features = test_features[feature_cols]
                     else:
                         test_features = df_features_test
 
@@ -565,17 +485,8 @@ class LabelAndClusterTestingAndBacktesterPipeline:
 
             # Save output (entire dataset)
             if self.pipeline_config.save_output_df:
+                os.makedirs(output_dir, exist_ok=True)
                 output_df.to_parquet(os.path.join(output_dir, f"{sym}.parquet"))
-
-            # Run backtesting on entire dataset
-            if not self.pipeline_config.skip_backtesting:
-                signal_mapped_df = self.map_clusters_to_signal(output_df)
-                self.run_backtest(signal_mapped_df)
-                # create the output dir if it does not exist
-                os.makedirs(self.pipeline_config.output_dir, exist_ok=True)
-                self.stats_df.to_excel(
-                    os.path.join(self.pipeline_config.output_dir, f"{sym}.xlsx")
-                )
 
         return output_df if len(self.source_files) == 1 else None
 
@@ -625,6 +536,7 @@ class LabelAndClusterTestingAndBacktesterPipeline:
             df_features_test = self.feature_engineering(df_test)
 
             # Transform test features using fitted pipeline/PCA (don't fit again!)
+            # Scale into a separate frame so df_features_test keeps raw values for output_df.
             if self.pipeline_config.should_scale:
                 if self._transform_pipeline is None:
                     raise ValueError(
@@ -633,14 +545,15 @@ class LabelAndClusterTestingAndBacktesterPipeline:
                 columns_to_scale = [
                     c for c in (self.pipeline_config.columns_to_scale or df_features_test.columns) if c != "close"
                 ]
-                df_features_test[columns_to_scale] = self._transform_pipeline.transform(
+                test_features = df_features_test.copy()
+                test_features[columns_to_scale] = self._transform_pipeline.transform(
                     df_features_test[columns_to_scale]
                 )
                 feature_cols = columns_to_scale + [
-                    col for col in df_features_test.columns if col not in columns_to_scale
-                    and df_features_test[col].isin([-1, 0, 1]).all()
+                    col for col in test_features.columns if col not in columns_to_scale
+                    and test_features[col].isin([-1, 0, 1]).all()
                 ]
-                test_features = df_features_test[feature_cols].copy()
+                test_features = test_features[feature_cols]
             else:
                 test_features = df_features_test
 
