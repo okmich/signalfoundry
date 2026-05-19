@@ -40,7 +40,11 @@ def _build_forward_log_returns(close: NDArray, state_labels: NDArray, horizon: i
 
 def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
                        horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
-    """Direction axis: forward log-return mean spread + count of conservatively-significant states."""
+    """Direction axis: forward log-return median spread + count of conservatively-significant states.
+
+    Median (not mean) keeps the score robust to the heavy right/left tails of intraday FX forward
+    returns — aligning the trend axis with the other axes, which already use medians.
+    """
     primary_horizon = horizons[0] if horizons else 12
     fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon)
     if len(fwd_df) < 30:
@@ -51,8 +55,8 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         method="conservative", return_diagnostics=True)
     n_significant = sum(1 for v in mapping.values() if v != 0)
 
-    valid = diag.dropna(subset=["mean"]) if "mean" in diag.columns else diag.iloc[0:0]
-    sep = float(valid["mean"].max() - valid["mean"].min()) if len(valid) >= 2 else 0.0
+    valid = diag.dropna(subset=["median"]) if "median" in diag.columns else diag.iloc[0:0]
+    sep = float(valid["median"].max() - valid["median"].min()) if len(valid) >= 2 else 0.0
     return AxisEvaluation(
         axis_separation=sep,
         secondary_robustness=float(n_significant),

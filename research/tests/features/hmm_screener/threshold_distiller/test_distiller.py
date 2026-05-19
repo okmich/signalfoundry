@@ -104,6 +104,40 @@ def test_univariate_distiller_rejects_raw_price_scale_input() -> None:
         UnivariateHmmThresholdDistiller(config).distill(model, raw_prices)
 
 
+def test_univariate_distiller_reports_transition_fidelity_for_well_separated_regimes() -> None:
+    """On well-separated regimes, rule and HMM should agree on transitions."""
+    x = _two_regime_feature()
+    model = _fit_two_state_gaussian(x)
+    config = UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION)
+    result = UnivariateHmmThresholdDistiller(config).distill(model, x)
+
+    assert result.transition_fidelity > 0.95
+    assert set(result.transition_metrics.keys()) == {
+        "hmm_switches", "rule_switches", "switch_rate_ratio",
+        "rule_false_switch_rate", "rule_missed_switch_rate",
+    }
+    # _two_regime_feature is one cohesive left block + one cohesive right block,
+    # so both HMM and rule should detect a single transition at the boundary.
+    assert result.transition_metrics["hmm_switches"] >= 1.0
+    assert result.transition_metrics["switch_rate_ratio"] == pytest.approx(1.0, abs=0.5)
+
+
+def test_univariate_distiller_detects_flicker_via_switch_rate_ratio() -> None:
+    """A noisy feature with overlapping regimes inflates switch_rate_ratio."""
+    rng = np.random.default_rng(42)
+    # Two regimes with substantial overlap — the rule will whipsaw at the boundary
+    # while the HMM smooths through via its transition prior.
+    left = rng.normal(-0.4, 0.6, 520)
+    right = rng.normal(0.4, 0.6, 520)
+    x = np.concatenate([left, right])
+    model = _fit_two_state_gaussian(x)
+    config = UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION)
+    result = UnivariateHmmThresholdDistiller(config).distill(model, x)
+
+    assert result.transition_metrics["switch_rate_ratio"] > 1.0
+    assert result.transition_metrics["rule_false_switch_rate"] > 0.0
+
+
 def test_univariate_distiller_config_rejects_invalid_input_scale_settings() -> None:
     with pytest.raises(ValueError, match="input_scale_quantiles"):
         UnivariateHmmThresholdConfig(axis_type=AxisType.DIRECTION, input_scale_quantiles=(0.5, 0.5))

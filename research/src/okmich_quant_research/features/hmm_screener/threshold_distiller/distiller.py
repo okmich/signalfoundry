@@ -59,6 +59,7 @@ class UnivariateHmmThresholdDistiller:
         ari = float(adjusted_rand_score(ordered_labels, threshold_labels))
         state_summaries = build_state_summaries(x_1d, ordered_labels, original_labels, state_order, top_probs)
         separability = build_pairwise_separability(x_1d, ordered_labels, threshold_values, eps=self.config.eps)
+        transition_fidelity, transition_metrics = self._transition_metrics(ordered_labels, threshold_labels)
 
         return UnivariateHmmThresholdResult(
             model=model,
@@ -75,6 +76,8 @@ class UnivariateHmmThresholdDistiller:
             adjusted_rand_index=ari,
             non_monotonic_count=non_monotonic_count,
             posterior_metrics=self._posterior_metrics(gamma),
+            transition_fidelity=transition_fidelity,
+            transition_metrics=transition_metrics,
         )
 
     def _state_order(self, model, x: NDArray, labels: NDArray, n_states: int) -> tuple[int, ...]:
@@ -265,6 +268,50 @@ class UnivariateHmmThresholdDistiller:
             key = f"frac_top_prob_gt_{str(threshold).replace('.', 'p')}"
             metrics[key] = float((tp > threshold).mean())
         return metrics
+
+    @staticmethod
+    def _transition_metrics(ordered_labels: NDArray, threshold_labels: NDArray) -> tuple[float, dict[str, float]]:
+        """Bar-pair agreement on regime switching: rule vs HMM.
+
+        ``threshold_fidelity`` measures bar-by-bar label agreement and can mask
+        flicker: a stateless threshold rule approximating a temporal HMM will
+        produce extra regime switches around the boundary even when most bars
+        get the right label. The metrics here decompose that:
+
+        - ``transition_fidelity`` is the fraction of bar-pairs where the rule and
+          HMM agree on *whether* a switch occurred (both switched or both didn't).
+        - ``switch_rate_ratio`` (rule_switches / hmm_switches) is the flicker
+          amplification factor. Anything notably above 1.0 means the rule is
+          firing extra transitions the HMM smoothed through.
+        - ``rule_false_switch_rate`` is the per-stable-pair flicker rate (FP).
+        - ``rule_missed_switch_rate`` is the per-HMM-switch lag rate (FN).
+        """
+        if len(ordered_labels) < 2 or len(threshold_labels) < 2:
+            return 1.0, {
+                "hmm_switches": 0.0, "rule_switches": 0.0, "switch_rate_ratio": 1.0,
+                "rule_false_switch_rate": 0.0, "rule_missed_switch_rate": 0.0,
+            }
+        hmm_switched = ordered_labels[1:] != ordered_labels[:-1]
+        rule_switched = threshold_labels[1:] != threshold_labels[:-1]
+        n_pairs = len(hmm_switched)
+        hmm_count = int(hmm_switched.sum())
+        rule_count = int(rule_switched.sum())
+        fidelity = float((hmm_switched == rule_switched).mean())
+        false_positives = int(((~hmm_switched) & rule_switched).sum())
+        false_negatives = int((hmm_switched & (~rule_switched)).sum())
+        stable_pairs = n_pairs - hmm_count
+        if hmm_count == 0:
+            ratio = float("inf") if rule_count > 0 else 1.0
+        else:
+            ratio = float(rule_count / hmm_count)
+        metrics = {
+            "hmm_switches": float(hmm_count),
+            "rule_switches": float(rule_count),
+            "switch_rate_ratio": ratio,
+            "rule_false_switch_rate": float(false_positives / stable_pairs) if stable_pairs > 0 else 0.0,
+            "rule_missed_switch_rate": float(false_negatives / hmm_count) if hmm_count > 0 else 0.0,
+        }
+        return fidelity, metrics
 
     def _validate_x(self, x: NDArray) -> NDArray:
         arr = np.asarray(x, dtype=np.float64)

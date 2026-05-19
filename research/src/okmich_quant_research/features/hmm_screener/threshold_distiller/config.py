@@ -140,6 +140,14 @@ class UnivariateHmmThresholdResult:
     # whose feature-value ranges overlap, not cleanly threshold-separable.
     non_monotonic_count: int = 0
     posterior_metrics: dict[str, float] = field(default_factory=dict)
+    # Bar-pair agreement on whether a regime switch occurred (rule vs HMM).
+    # Parallel to ``threshold_fidelity``, but for transitions rather than labels.
+    # Catches the flicker failure mode where bar-by-bar agreement is high but
+    # the rule switches regimes far more often than the HMM (a stateless rule
+    # approximating a temporal model). See ``transition_metrics`` for the
+    # supporting counts and rates that decompose this scalar.
+    transition_fidelity: float = 0.0
+    transition_metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def threshold_values(self) -> tuple[float, ...]:
