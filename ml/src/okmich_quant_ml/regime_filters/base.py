@@ -57,24 +57,20 @@ class BasePostProcessor(ABC):
         ...
 
     @abstractmethod
-    def process(
-        self,
-        states: Union[np.ndarray, pd.Series],
-        posteriors: Optional[Union[np.ndarray, pd.DataFrame]] = None,
-        returns: Optional[Union[np.ndarray, pd.Series]] = None,
-    ) -> Union[np.ndarray, pd.Series]:
+    def process(self, states: Union[np.ndarray, pd.Series],
+                returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         """
         Process state sequence (offline batch mode).
 
-        Use for backtesting, research, and bulk processing.
+        Use for backtesting, research, and bulk processing. regime_filters operates on hard
+        labels only; for posterior-aware operations see
+        ``okmich_quant_ml.posterior_inference``.
 
         Parameters
         ----------
         states : np.ndarray or pd.Series, shape (T,)
             Input state sequence of length T
             If pd.Series, datetime index is preserved
-        posteriors : np.ndarray or pd.DataFrame, shape (T, K), optional
-            Posterior probabilities for K states at each timestep
         returns : np.ndarray or pd.Series, shape (T,), optional
             Asset returns for regime-aware processing (trading-specific)
 
@@ -86,13 +82,8 @@ class BasePostProcessor(ABC):
         ...
 
     @abstractmethod
-    def process_online(
-        self,
-        state: int,
-        posterior: Optional[np.ndarray] = None,
-        return_value: Optional[float] = None,
-        timestamp: Optional[pd.Timestamp] = None,
-    ) -> int:
+    def process_online(self, state: int, return_value: Optional[float] = None,
+                       timestamp: Optional[pd.Timestamp] = None) -> int:
         """
         Process single state observation (online streaming mode - LOW LATENCY).
 
@@ -103,8 +94,6 @@ class BasePostProcessor(ABC):
         ----------
         state : int
             Current state observation
-        posterior : np.ndarray, shape (K,), optional
-            Posterior probabilities for current observation
         return_value : float, optional
             Current asset return (trading-specific)
         timestamp : pd.Timestamp, optional

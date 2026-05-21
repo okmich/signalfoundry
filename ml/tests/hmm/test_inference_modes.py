@@ -175,13 +175,56 @@ def test_pomegranate_save_load_preserves_mode(fitted_pomegranate_hmm, sample_dat
 
 def test_forecast_independent_pomegranate(fitted_pomegranate_hmm):
     """Test forecast() independence for PomegranateHMM."""
+    posterior = np.zeros(fitted_pomegranate_hmm.n_states)
+    posterior[0] = 1.0
+
     fitted_pomegranate_hmm.inference_mode = InferenceMode.FILTERING
-    forecast1 = fitted_pomegranate_hmm.forecast(current_regime=0, n_steps=3)
+    forecast1 = fitted_pomegranate_hmm.forecast(posterior, n_steps=3)
 
     fitted_pomegranate_hmm.inference_mode = InferenceMode.SMOOTHING
-    forecast2 = fitted_pomegranate_hmm.forecast(current_regime=0, n_steps=3)
+    forecast2 = fitted_pomegranate_hmm.forecast(posterior, n_steps=3)
 
     np.testing.assert_array_almost_equal(forecast1, forecast2)
+
+
+def test_forecast_legacy_current_regime_keyword_matches_one_hot_posterior(fitted_pomegranate_hmm):
+    """forecast(current_regime=k) should equal forecast(one_hot(k)) for backward compat."""
+    n_states = fitted_pomegranate_hmm.n_states
+    posterior = np.zeros(n_states)
+    posterior[1] = 1.0
+
+    expected = fitted_pomegranate_hmm.forecast(posterior, n_steps=4)
+    with pytest.warns(DeprecationWarning, match="current_regime"):
+        legacy = fitted_pomegranate_hmm.forecast(current_regime=1, n_steps=4)
+
+    np.testing.assert_array_almost_equal(expected, legacy)
+
+
+def test_forecast_legacy_positional_integer_emits_deprecation(fitted_pomegranate_hmm):
+    """forecast(2) — legacy positional int — should route to current_regime path with a warning."""
+    with pytest.warns(DeprecationWarning, match="hard label"):
+        result = fitted_pomegranate_hmm.forecast(0, n_steps=2)
+
+    assert result.shape == (fitted_pomegranate_hmm.n_states,)
+    assert np.isclose(result.sum(), 1.0, atol=1e-6)
+
+
+def test_forecast_rejects_both_posterior_and_current_regime(fitted_pomegranate_hmm):
+    posterior = np.zeros(fitted_pomegranate_hmm.n_states)
+    posterior[0] = 1.0
+
+    with pytest.raises(TypeError, match="either `posterior` or `current_regime`"):
+        fitted_pomegranate_hmm.forecast(posterior=posterior, current_regime=0)
+
+
+def test_forecast_rejects_neither_posterior_nor_current_regime(fitted_pomegranate_hmm):
+    with pytest.raises(TypeError, match="requires either"):
+        fitted_pomegranate_hmm.forecast()
+
+
+def test_forecast_rejects_out_of_range_current_regime(fitted_pomegranate_hmm):
+    with pytest.warns(DeprecationWarning), pytest.raises(ValueError, match="current_regime must be in"):
+        fitted_pomegranate_hmm.forecast(current_regime=99)
 
 
 # ============================================================================

@@ -323,3 +323,167 @@ class MaturationAlignTransformer:
         if effective_lag < T:
             out[effective_lag:] = p[: T - effective_lag]
         return out
+
+
+@njit(cache=True)
+def _kalman_posterior_smooth(probs: np.ndarray, process_noise: float, measurement_noise: float,
+                             adaptation_rate: float, error_window: int, eps: float) -> np.ndarray:
+    """Bayesian recursive smoother on the simplex.
+
+    Per-bar dynamics:
+
+    1. **Diffuse** the prior belief toward uniform by ``process_noise``:
+       ``b ← (1 - process_noise) * b + process_noise * uniform``.
+    2. **Update** with the observation via a Bayesian step in log space:
+       ``log b ← log b + measurement_weight * log p_t``, then softmax.
+       ``measurement_weight = 1 / (measurement_noise + eps)``.
+
+    The update is computed in log space + softmax (rather than ``p_t ^ measurement_weight``
+    in linear space) so that small ``measurement_noise`` — equivalently large ``measurement_weight``
+    — does not underflow the likelihood to zero. The mathematically equivalent linear-space form is
+    safe for moderate weights but collapses to uniform when ``measurement_weight ≳ 30`` for typical
+    posteriors; the log-space form has no such regime.
+
+    Adaptation (when ``adaptation_rate > 0``): a moving prediction error — the fraction of recent bars
+    where ``argmax(diffused_belief) != argmax(p_t)`` — drives ``measurement_noise`` via an EMA toward
+    the observed error. Higher error ⇒ higher measurement noise ⇒ less weight on each observation.
+    """
+    T, K = probs.shape
+    out = np.empty_like(probs)
+    belief = np.full(K, 1.0 / K, dtype=np.float64)
+    log_belief = np.empty(K, dtype=np.float64)
+    recent_errors = np.zeros(error_window, dtype=np.float64)
+    error_idx = 0
+
+    for t in range(T):
+        # Diffuse: mix toward uniform.
+        for k in range(K):
+            belief[k] = (1.0 - process_noise) * belief[k] + process_noise * (1.0 / K)
+        total = 0.0
+        for k in range(K):
+            total += belief[k]
+        if total > 0.0:
+            for k in range(K):
+                belief[k] /= total
+
+        # Prediction error (binary) using diffused belief vs current observation argmax.
+        pred_arg = 0
+        pred_max = belief[0]
+        obs_arg = 0
+        obs_max = probs[t, 0]
+        for k in range(1, K):
+            if belief[k] > pred_max:
+                pred_max = belief[k]
+                pred_arg = k
+            if probs[t, k] > obs_max:
+                obs_max = probs[t, k]
+                obs_arg = k
+        pred_error = 0.0 if pred_arg == obs_arg else 1.0
+
+        # Update: Bayesian step in log space + softmax.
+        # log b_new = log b_diffused + measurement_weight * log p_t  (up to a constant).
+        # Computing in log space avoids underflow when measurement_weight is large
+        # (small measurement_noise tempers the likelihood aggressively).
+        measurement_weight = 1.0 / (measurement_noise + eps)
+        for k in range(K):
+            b = belief[k] if belief[k] >= eps else eps
+            p = probs[t, k] if probs[t, k] >= eps else eps
+            log_belief[k] = np.log(b) + measurement_weight * np.log(p)
+
+        # Numerically stable softmax: subtract max before exp.
+        log_max = log_belief[0]
+        for k in range(1, K):
+            if log_belief[k] > log_max:
+                log_max = log_belief[k]
+        total = 0.0
+        for k in range(K):
+            belief[k] = np.exp(log_belief[k] - log_max)
+            total += belief[k]
+        if total > 0.0:
+            for k in range(K):
+                belief[k] /= total
+        else:
+            for k in range(K):
+                belief[k] = 1.0 / K
+
+        # Floor + renormalise so downstream log-based math is safe.
+        total = 0.0
+        for k in range(K):
+            if belief[k] < eps:
+                belief[k] = eps
+            total += belief[k]
+        for k in range(K):
+            out[t, k] = belief[k] / total
+            belief[k] = out[t, k]
+
+        # Record error and adapt measurement noise.
+        recent_errors[error_idx % error_window] = pred_error
+        error_idx += 1
+        if adaptation_rate > 0.0 and error_idx > error_window:
+            mean_error = 0.0
+            for j in range(error_window):
+                mean_error += recent_errors[j]
+            mean_error /= error_window
+            target = mean_error
+            if target < 0.01:
+                target = 0.01
+            elif target > 1.0:
+                target = 1.0
+            measurement_noise = (1.0 - adaptation_rate) * measurement_noise + adaptation_rate * target
+    return out
+
+
+class KalmanPosteriorTransformer:
+    """Bayesian recursive smoother on the simplex — the posterior-space analogue of Kalman filtering.
+
+    The numba kernel ``_kalman_posterior_smooth`` runs per-bar diffuse + Bayesian update; outputs are
+    re-clipped and renormalised so every row remains a valid simplex. This is the **transformer**
+    redesign of the regime_filters ``AdaptiveKalmanStyleSmoother`` — input and output are both
+    ``(T, K)`` posteriors, so it composes with argmax, gates, calibrators, and drift monitoring just
+    like ``EmaPosteriorTransformer``.
+
+    Hyperparameters:
+
+    * ``process_noise ∈ [0, 1]`` — how aggressively belief diffuses back toward uniform each bar.
+      0 = no diffusion (belief never forgets), 1 = full reset to uniform per bar (smoothing disabled).
+    * ``measurement_noise ∈ (0, ∞)`` — Bayesian-update "trust" knob. The likelihood is tempered to
+      ``posterior ^ (1 / measurement_noise)``. Small values (≪ 1) sharpen the update (trust the bar);
+      large values (> 1) flatten the update (distrust the bar).
+    * ``adaptation_rate ∈ [0, 1)`` — when > 0, ``measurement_noise`` adapts via EMA toward the recent
+      prediction error (fraction of bars where the diffused belief's argmax disagreed with the
+      observation's argmax). ``0`` disables adaptation.
+
+    Compared to ``EmaPosteriorTransformer`` (additive smoothing in probability space), this performs
+    *Bayesian* smoothing: the update is multiplicative on log-probabilities, so a single decisive
+    observation can shift belief faster than an EMA at the same nominal "smoothing rate."
+
+    The "process noise = mix-toward-uniform" is a Kalman-style heuristic rather than strict
+    linear-Gaussian dynamics — the simplex is neither linear nor Gaussian. A theoretically cleaner
+    alternative is to run Kalman on the additive log-ratio transform and softmax back; that's a
+    separate operator. This one matches the regime_filters implementation it replaces.
+    """
+
+    def __init__(self, process_noise: float = 0.1, measurement_noise: float = 0.2,
+                 adaptation_rate: float = 0.0, error_window: int = 10, eps: float = 1e-12) -> None:
+        self.process_noise = float(process_noise)
+        self.measurement_noise = float(measurement_noise)
+        self.adaptation_rate = float(adaptation_rate)
+        self.error_window = int(error_window)
+        self.eps = float(eps)
+        if not 0.0 <= self.process_noise <= 1.0:
+            raise ValueError(f"process_noise must be in [0, 1], got {self.process_noise}")
+        if self.measurement_noise <= 0.0:
+            raise ValueError(f"measurement_noise must be > 0, got {self.measurement_noise}")
+        if not 0.0 <= self.adaptation_rate < 1.0:
+            raise ValueError(f"adaptation_rate must be in [0, 1), got {self.adaptation_rate}")
+        if self.error_window < 1:
+            raise ValueError(f"error_window must be >= 1, got {self.error_window}")
+        if self.eps <= 0.0:
+            raise ValueError(f"eps must be > 0, got {self.eps}")
+
+    def transform(self, probs: NDArray) -> NDArray:
+        p = _validate_posterior_matrix(probs, "KalmanPosteriorTransformer", eps=self.eps, normalize=True)
+        if p.shape[0] == 0:
+            return p
+        return _kalman_posterior_smooth(p, self.process_noise, self.measurement_noise,
+                                        self.adaptation_rate, self.error_window, self.eps)

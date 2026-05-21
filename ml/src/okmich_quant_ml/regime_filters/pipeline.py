@@ -12,8 +12,8 @@ class ProcessorPipeline:
     """
     Chain multiple processors in sequence.
 
-    This class allows you to apply multiple post-processing filters in
-    succession, with the output of each processor feeding into the next.
+    This class allows you to apply multiple post-processing filters in succession, with the output of each processor
+    feeding into the next.
 
     Parameters
     ----------
@@ -56,20 +56,18 @@ class ProcessorPipeline:
         self.processors = processors
 
     def process(self, states: Union[np.ndarray, pd.Series],
-                posteriors: Optional[Union[np.ndarray, pd.DataFrame]] = None,
                 returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         current_states = states
         for processor in self.processors:
-            current_states = processor.process(current_states, posteriors=posteriors, returns=returns)
+            current_states = processor.process(current_states, returns=returns)
         return current_states
 
-    def process_online(self, state: int, posterior: Optional[np.ndarray] = None, return_value: Optional[float] = None,
+    def process_online(self, state: int, return_value: Optional[float] = None,
                        timestamp: Optional[pd.Timestamp] = None) -> int:
         current_state = state
 
         for processor in self.processors:
-            current_state = processor.process_online(current_state, posterior=posterior, return_value=return_value,
-                                                     timestamp=timestamp)
+            current_state = processor.process_online(current_state, return_value=return_value, timestamp=timestamp)
         return current_state
 
     def reset(self) -> ProcessorPipeline:

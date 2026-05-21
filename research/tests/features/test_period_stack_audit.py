@@ -288,6 +288,32 @@ def test_fit_on_train_transform_on_oos_does_not_refit_coefficients() -> None:
     assert audit._gamma == gamma
 
 
+def test_fitted_coefficients_returns_none_before_fit() -> None:
+    series = _wide_signal_series(2000)
+    audit = PeriodStackAudit(series, _norm_ema_like, (20, 60, 240), verbose=False)
+    assert audit.fitted_coefficients is None
+
+
+def test_fitted_coefficients_returns_dict_after_build_variants() -> None:
+    series = _wide_signal_series(2000)
+    audit = PeriodStackAudit(series, _norm_ema_like, (20, 60, 240), verbose=False)
+    audit.build_variants()
+    coefs = audit.fitted_coefficients
+    assert coefs is not None
+    assert set(coefs.keys()) == {"beta_short", "beta_long", "gamma"}
+    assert all(isinstance(v, float) for v in coefs.values())
+
+
+def test_fitted_coefficients_match_fit_orthogonalisation() -> None:
+    series = _wide_signal_series(2000)
+    audit = PeriodStackAudit(series, _norm_ema_like, (20, 60, 240), verbose=False)
+    audit.fit_orthogonalisation(series.iloc[:1500])
+    coefs = audit.fitted_coefficients
+    assert coefs["beta_short"] == audit._beta_short
+    assert coefs["beta_long"] == audit._beta_long
+    assert coefs["gamma"] == audit._gamma
+
+
 def test_fit_orthogonalisation_returns_self_for_chaining() -> None:
     series = _wide_signal_series(2000)
     audit = PeriodStackAudit(series, _norm_ema_like, (20, 60, 240),

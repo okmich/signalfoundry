@@ -25,17 +25,19 @@ batch.
 
 from .adaptive_lag import AdaptiveLagInferer, AdaptiveLagResult, StabilityCriterion,\
     compute_trajectories, lag_commitment_audit
+from .diagnostics import CalibrationRecommendation, CalibrationReport, DynamicsReport, SmoothingRecommendation,\
+    posterior_calibration_report, recommend_calibration, recommend_smoothing, summarize_posterior_dynamics
 from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
     rolling_max_prob_std, step_kl, top_prob
-from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, EntropyGateInferer, MarginGateInferer,\
-    StabilityGateInferer
+from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, ConfidenceHysteresisInferer,\
+    ConfidenceWeightedModeInferer, EntropyGateInferer, MarginGateInferer, StabilityGateInferer, ViterbiInferer
 from .monitoring import PosteriorHealthBaselines, PosteriorHealthReport, entropy_staleness,\
     fit_posterior_health_baselines, flip_rate_drift, score_posterior_health, state_occupancy_drift
 
 from .pipeline import PosteriorPipeline
 from .protocols import PosteriorInferer, PosteriorTransformer
-from .transformers import EmaPosteriorTransformer, MaturationAlignTransformer, PlattScalingTransformer, \
-    RollingMeanPosteriorTransformer, TemperatureScalingTransformer
+from .transformers import EmaPosteriorTransformer, KalmanPosteriorTransformer, MaturationAlignTransformer, \
+    PlattScalingTransformer, RollingMeanPosteriorTransformer, TemperatureScalingTransformer
 
 __all__ = [
     "PosteriorTransformer",
@@ -47,6 +49,9 @@ __all__ = [
     "EntropyGateInferer",
     "CompositeGateInferer",
     "StabilityGateInferer",
+    "ViterbiInferer",
+    "ConfidenceWeightedModeInferer",
+    "ConfidenceHysteresisInferer",
     "AdaptiveLagInferer",
     "AdaptiveLagResult",
     "StabilityCriterion",
@@ -54,6 +59,7 @@ __all__ = [
     "lag_commitment_audit",
     "EmaPosteriorTransformer",
     "RollingMeanPosteriorTransformer",
+    "KalmanPosteriorTransformer",
     "TemperatureScalingTransformer",
     "PlattScalingTransformer",
     "MaturationAlignTransformer",
@@ -73,4 +79,12 @@ __all__ = [
     "flip_rate_drift",
     "fit_posterior_health_baselines",
     "score_posterior_health",
+    "DynamicsReport",
+    "CalibrationReport",
+    "SmoothingRecommendation",
+    "CalibrationRecommendation",
+    "summarize_posterior_dynamics",
+    "posterior_calibration_report",
+    "recommend_smoothing",
+    "recommend_calibration",
 ]

@@ -214,7 +214,6 @@ class TransitionRateLimiter(BasePostProcessor):
             raise NotImplementedError("non-overlapping windows not yet implemented")
 
     def process(self, states: Union[np.ndarray, pd.Series],
-                posteriors: Optional[Union[np.ndarray, pd.DataFrame]] = None,
                 returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         if isinstance(states, pd.Series):
             states_arr = states.values
@@ -237,7 +236,7 @@ class TransitionRateLimiter(BasePostProcessor):
         else:
             return smoothed_arr
 
-    def process_online(self, state: int, posterior: Optional[np.ndarray] = None, return_value: Optional[float] = None,
+    def process_online(self, state: int, return_value: Optional[float] = None,
                        timestamp: Optional[pd.Timestamp] = None) -> int:
         # Initialize state on first call
         if self._online_state is None:

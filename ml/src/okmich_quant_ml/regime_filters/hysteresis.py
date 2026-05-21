@@ -78,74 +78,6 @@ def _hysteresis_count_based_core(states: np.ndarray, entry_threshold: int, exit_
     return smoothed
 
 
-@njit(cache=True)
-def _hysteresis_confidence_based_core(states: np.ndarray, posteriors: np.ndarray,
-                                      entry_threshold: float, exit_threshold: float) -> np.ndarray:
-    """
-    Apply confidence-based hysteresis to state sequence.
-
-    Parameters
-    ----------
-    states : np.ndarray, shape (T,)
-        Input state sequence
-    posteriors : np.ndarray, shape (T, K)
-        Posterior probabilities for K states
-    entry_threshold : float
-        Cumulative confidence required to enter regime
-    exit_threshold : float
-        Cumulative confidence loss required to exit regime
-
-    Returns
-    -------
-    np.ndarray, shape (T,)
-        Filtered state sequence
-    """
-    n = len(states)
-    if n == 0:
-        return states.copy()
-
-    smoothed = np.zeros(n, dtype=states.dtype)
-    current_regime = states[0]
-    entry_confidence = posteriors[0, states[0]]
-    exit_confidence = 0.0
-
-    smoothed[0] = current_regime
-
-    for i in range(1, n):
-        regime_prob = posteriors[i, current_regime]
-
-        if states[i] == current_regime:
-            # Same regime - reset exit confidence
-            exit_confidence = 0.0
-            smoothed[i] = current_regime
-        else:
-            # Different regime
-            # Accumulate exit confidence (1 - current_regime_prob)
-            exit_confidence += 1.0 - regime_prob
-
-            if exit_confidence >= exit_threshold:
-                # Consider entering new regime
-                # Accumulate entry confidence for new regime
-                new_regime = states[i]
-                entry_conf = 0.0
-
-                for j in range(i, -1, -1):
-                    if states[j] == new_regime:
-                        entry_conf += posteriors[j, new_regime]
-                        if entry_conf >= entry_threshold:
-                            # Enter new regime
-                            current_regime = new_regime
-                            exit_confidence = 0.0
-                            entry_confidence = entry_conf
-                            break
-                    else:
-                        break
-
-            smoothed[i] = current_regime
-
-    return smoothed
-
-
 # =============================================================================
 # HysteresisProcessor
 # =============================================================================
@@ -153,22 +85,25 @@ def _hysteresis_confidence_based_core(states: np.ndarray, posteriors: np.ndarray
 
 class HysteresisProcessor(BasePostProcessor):
     """
-    Create 'sticky' regimes with different entry/exit thresholds.
+    Create 'sticky' regimes with different entry/exit thresholds (count-based).
 
     This processor models asymmetric market behavior (e.g., "stairs up,
     elevator down") by requiring different levels of evidence to enter
-    vs. exit a regime.
+    vs. exit a regime. Operates purely on label sequences — counts
+    consecutive observations for entry / exit gating.
+
+    For posterior-aware hysteresis (cumulative-confidence entry/exit thresholds gated on per-bar
+    posterior probability), use
+    ``okmich_quant_ml.posterior_inference.ConfidenceHysteresisInferer``.
 
     Parameters
     ----------
     config : dict
         Configuration with keys:
-        - entry_threshold : int or float, default=10
-            Periods or confidence required to enter regime
-        - exit_threshold : int or float, default=3
-            Periods or confidence required to exit regime
-        - use_confidence : bool, default=False
-            If True, use posteriors; if False, use counts
+        - entry_threshold : int, default=10
+            Consecutive observations required to enter regime
+        - exit_threshold : int, default=3
+            Consecutive violations required to exit regime
         - per_state_params : dict, optional
             Regime-specific thresholds mapping state -> {'entry': x, 'exit': y}
 
@@ -201,37 +136,46 @@ class HysteresisProcessor(BasePostProcessor):
         # Set defaults
         config.setdefault("entry_threshold", 10)
         config.setdefault("exit_threshold", 3)
-        config.setdefault("use_confidence", False)
         config.setdefault("per_state_params", None)
 
         super().__init__(config)
 
     def validate_config(self) -> None:
         """Validate configuration parameters."""
-        if not isinstance(self.config["use_confidence"], bool):
-            raise ValueError("use_confidence must be a boolean")
-
-        # Validate thresholds
         entry = self.config["entry_threshold"]
         exit_val = self.config["exit_threshold"]
 
-        if self.config["use_confidence"]:
-            if not isinstance(entry, (int, float)) or entry <= 0:
-                raise ValueError("entry_threshold must be positive number")
-            if not isinstance(exit_val, (int, float)) or exit_val <= 0:
-                raise ValueError("exit_threshold must be positive number")
-        else:
-            if not isinstance(entry, int) or entry < 1:
-                raise ValueError("entry_threshold must be positive integer")
-            if not isinstance(exit_val, int) or exit_val < 1:
-                raise ValueError("exit_threshold must be positive integer")
+        if not isinstance(entry, int) or entry < 1:
+            raise ValueError("entry_threshold must be positive integer")
+        if not isinstance(exit_val, int) or exit_val < 1:
+            raise ValueError("exit_threshold must be positive integer")
 
-        # Validate per_state_params if provided
-        if self.config["per_state_params"] is not None:
-            if not isinstance(self.config["per_state_params"], dict):
+        # Validate per_state_params strictly so misconfigurations fail at construction time
+        # rather than producing undefined behavior at process() time.
+        per_state = self.config["per_state_params"]
+        if per_state is not None:
+            if not isinstance(per_state, dict):
                 raise ValueError("per_state_params must be a dict")
+            for state_key, state_cfg in per_state.items():
+                if not isinstance(state_cfg, dict):
+                    raise ValueError(f"per_state_params[{state_key!r}] must be a dict with 'entry' and 'exit' keys.")
+                missing = {"entry", "exit"} - set(state_cfg.keys())
+                if missing:
+                    raise ValueError(
+                        f"per_state_params[{state_key!r}] is missing required keys: {sorted(missing)}."
+                    )
+                state_entry = state_cfg["entry"]
+                state_exit = state_cfg["exit"]
+                if not isinstance(state_entry, int) or state_entry < 1:
+                    raise ValueError(
+                        f"per_state_params[{state_key!r}]['entry'] must be a positive integer, got {state_entry!r}."
+                    )
+                if not isinstance(state_exit, int) or state_exit < 1:
+                    raise ValueError(
+                        f"per_state_params[{state_key!r}]['exit'] must be a positive integer, got {state_exit!r}."
+                    )
 
-    def _get_thresholds_for_state(self, state: int) -> tuple[Union[int, float], Union[int, float]]:
+    def _get_thresholds_for_state(self, state: int) -> tuple[int, int]:
         """Get entry/exit thresholds for a specific state."""
         if self.config["per_state_params"] is not None:
             state_params = self.config["per_state_params"].get(state)
@@ -279,46 +223,8 @@ class HysteresisProcessor(BasePostProcessor):
 
         return smoothed
 
-    def _confidence_based_per_state(self, states_arr: np.ndarray, posteriors_arr: np.ndarray) -> np.ndarray:
-        """Confidence-based hysteresis with per-state entry/exit thresholds."""
-        n = len(states_arr)
-        if n == 0:
-            return states_arr.copy()
-
-        smoothed = np.zeros(n, dtype=states_arr.dtype)
-        current_regime = states_arr[0]
-        exit_confidence = 0.0
-        smoothed[0] = current_regime
-
-        for i in range(1, n):
-            regime_prob = posteriors_arr[i, current_regime]
-
-            if states_arr[i] == current_regime:
-                exit_confidence = 0.0
-                smoothed[i] = current_regime
-            else:
-                _, exit_thresh = self._get_thresholds_for_state(current_regime)
-                exit_confidence += 1.0 - regime_prob
-
-                if exit_confidence >= exit_thresh:
-                    new_regime = states_arr[i]
-                    entry_thresh, _ = self._get_thresholds_for_state(new_regime)
-                    entry_conf = 0.0
-                    for j in range(i, -1, -1):
-                        if states_arr[j] == new_regime:
-                            entry_conf += posteriors_arr[j, new_regime]
-                            if entry_conf >= entry_thresh:
-                                current_regime = new_regime
-                                exit_confidence = 0.0
-                                break
-                        else:
-                            break
-
-                smoothed[i] = current_regime
-
-        return smoothed
-
-    def process(self, states: Union[np.ndarray, pd.Series], posteriors: Optional[Union[np.ndarray, pd.DataFrame]] = None, returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
+    def process(self, states: Union[np.ndarray, pd.Series],
+                returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         # Extract array and index
         if isinstance(states, pd.Series):
             states_arr = states.values
@@ -329,26 +235,12 @@ class HysteresisProcessor(BasePostProcessor):
 
         has_per_state = self.config["per_state_params"] is not None
 
-        # Check if using confidence mode
-        if self.config["use_confidence"]:
-            if posteriors is None:
-                raise ValueError("posteriors required when use_confidence=True")
-
-            if isinstance(posteriors, pd.DataFrame):
-                posteriors_arr = posteriors.values
-            else:
-                posteriors_arr = posteriors
-
-            if has_per_state:
-                smoothed_arr = self._confidence_based_per_state(states_arr, posteriors_arr)
-            else:
-                smoothed_arr = _hysteresis_confidence_based_core(states_arr, posteriors_arr, self.config["entry_threshold"], self.config["exit_threshold"])
+        if has_per_state:
+            smoothed_arr = self._count_based_per_state(states_arr)
         else:
-            # Count-based mode
-            if has_per_state:
-                smoothed_arr = self._count_based_per_state(states_arr)
-            else:
-                smoothed_arr = _hysteresis_count_based_core(states_arr, self.config["entry_threshold"], self.config["exit_threshold"])
+            smoothed_arr = _hysteresis_count_based_core(
+                states_arr, self.config["entry_threshold"], self.config["exit_threshold"],
+            )
 
         # Return in same format as input
         if index is not None:
@@ -356,7 +248,7 @@ class HysteresisProcessor(BasePostProcessor):
         else:
             return smoothed_arr
 
-    def process_online(self, state: int, posterior: Optional[np.ndarray] = None, return_value: Optional[float] = None,
+    def process_online(self, state: int, return_value: Optional[float] = None,
                        timestamp: Optional[pd.Timestamp] = None) -> int:
         # Initialize state on first call
         if self._online_state is None:
@@ -364,10 +256,7 @@ class HysteresisProcessor(BasePostProcessor):
                 "current_regime": state,
                 "entry_count": 1,
                 "exit_count": 0,
-                "entry_confidence": posterior[state] if posterior is not None else 1.0,
-                "exit_confidence": 0.0,
                 "recent_states": [],
-                "recent_posteriors": [],
             }
             return state
 
@@ -375,78 +264,35 @@ class HysteresisProcessor(BasePostProcessor):
         entry_thresh, _ = self._get_thresholds_for_state(state)
         _, exit_thresh = self._get_thresholds_for_state(current_regime)
 
-        if self.config["use_confidence"]:
-            if posterior is None:
-                raise ValueError("posterior required when use_confidence=True")
-
-            regime_prob = posterior[current_regime]
-
-            if state == current_regime:
-                self._online_state["exit_confidence"] = 0.0
-                return current_regime
-            else:
-                # Accumulate exit confidence
-                self._online_state["exit_confidence"] += 1.0 - regime_prob
-
-                if self._online_state["exit_confidence"] >= exit_thresh:
-                    # Check entry confidence for new regime
-                    # Need to track recent observations
-                    self._online_state["recent_states"].append(state)
-                    self._online_state["recent_posteriors"].append(posterior)
-
-                    # Calculate entry confidence
-                    entry_conf = sum(
-                        post[state]
-                        for s, post in zip(
-                            self._online_state["recent_states"],
-                            self._online_state["recent_posteriors"],
-                        )
-                        if s == state
-                    )
-
-                    if entry_conf >= entry_thresh:
-                        # Enter new regime
-                        self._online_state["current_regime"] = state
-                        self._online_state["exit_confidence"] = 0.0
-                        self._online_state["entry_confidence"] = entry_conf
-                        self._online_state["recent_states"] = []
-                        self._online_state["recent_posteriors"] = []
-                        return state
-
-                return current_regime
+        if state == current_regime:
+            self._online_state["exit_count"] = 0
+            return current_regime
         else:
-            # Count-based mode
-            if state == current_regime:
-                self._online_state["exit_count"] = 0
-                return current_regime
-            else:
-                self._online_state["exit_count"] += 1
+            self._online_state["exit_count"] += 1
 
-                if self._online_state["exit_count"] >= exit_thresh:
-                    # Track recent states for entry check
-                    self._online_state["recent_states"].append(state)
+            if self._online_state["exit_count"] >= exit_thresh:
+                # Track recent states for entry check
+                self._online_state["recent_states"].append(state)
 
-                    # Keep only recent window
-                    max_lookback = int(entry_thresh * 2)
-                    if len(self._online_state["recent_states"]) > max_lookback:
-                        self._online_state["recent_states"] = self._online_state[
-                            "recent_states"
-                        ][-max_lookback:]
+                # Keep only recent window
+                max_lookback = int(entry_thresh * 2)
+                if len(self._online_state["recent_states"]) > max_lookback:
+                    self._online_state["recent_states"] = self._online_state["recent_states"][-max_lookback:]
 
-                    # Count consecutive observations of new state
-                    entry_count = 0
-                    for s in reversed(self._online_state["recent_states"]):
-                        if s == state:
-                            entry_count += 1
-                        else:
-                            break
+                # Count consecutive observations of new state
+                entry_count = 0
+                for s in reversed(self._online_state["recent_states"]):
+                    if s == state:
+                        entry_count += 1
+                    else:
+                        break
 
-                    if entry_count >= entry_thresh:
-                        # Enter new regime
-                        self._online_state["current_regime"] = state
-                        self._online_state["exit_count"] = 0
-                        self._online_state["entry_count"] = entry_count
-                        self._online_state["recent_states"] = []
-                        return state
+                if entry_count >= entry_thresh:
+                    # Enter new regime
+                    self._online_state["current_regime"] = state
+                    self._online_state["exit_count"] = 0
+                    self._online_state["entry_count"] = entry_count
+                    self._online_state["recent_states"] = []
+                    return state
 
-                return current_regime
+            return current_regime

@@ -282,48 +282,86 @@ class BasePomegranateHMM(ABC):
 
         return edges
 
-    def forecast(self, current_regime: int, n_steps: int = 1) -> np.ndarray:
+    def forecast(self, posterior: Optional[np.ndarray] = None, n_steps: int = 1,
+                 current_regime: Optional[int] = None) -> np.ndarray:
         """
-        Forecast future regime probabilities using transition matrix.
+        Forecast future regime probabilities by propagating belief through the transition matrix:
+        ``belief @ P**n_steps``.
 
         Parameters
         ----------
-        current_regime : int
-            Current regime label (0 to n_states-1)
+        posterior : np.ndarray, shape (n_states,), optional
+            Current belief over regimes — e.g. the last row of
+            ``predict_proba(X)`` (filtered or smoothed). Must be non-negative
+            and sum to 1.
         n_steps : int, default=1
-            Number of steps ahead to forecast
+            Number of steps ahead to forecast.
+        current_regime : int, optional
+            **Legacy.** Hard-label entry point retained for backward compatibility. Internally
+            converted to a one-hot ``posterior``. Emits a ``DeprecationWarning``; prefer passing a
+            posterior array. Cannot be combined with ``posterior``.
 
         Returns
         -------
         np.ndarray
-            Array of regime probabilities n_steps ahead, shape (n_states,)
+            Array of regime probabilities n_steps ahead, shape (n_states,).
 
         Examples
         --------
         >>> model = PomegranateHMM(distribution_type=DistType.NORMAL, n_states=3)
         >>> model.fit(data)
-        >>> # If currently in regime 1, what's probability distribution in 5 steps?
-        >>> probs = model.forecast(current_regime=1, n_steps=5)
+        >>> belief_t = model.predict_proba(data)[-1]       # filtered/smoothed
+        >>> probs = model.forecast(belief_t, n_steps=5)
         >>> print(probs)  # [0.2, 0.5, 0.3] - probabilities for regimes 0, 1, 2
         """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
 
-        if not (0 <= current_regime < self.n_states):
-            raise ValueError(f"current_regime must be between 0 and {self.n_states-1}")
+        # Backward-compat. Two legacy entry points routed to a single one-hot build path,
+        # each emitting exactly one deprecation warning so callers see a clear migration path
+        # without duplicate noise.
+        legacy_label: Optional[int] = None
+        if isinstance(posterior, (int, np.integer)) and current_regime is None:
+            import warnings
+            warnings.warn(
+                "Passing a hard label as the first positional argument to forecast() is "
+                "deprecated; pass `posterior` as a (n_states,) array or use the explicit "
+                "`current_regime=` keyword.",
+                DeprecationWarning, stacklevel=2,
+            )
+            legacy_label = int(posterior)
+            posterior = None
+        elif current_regime is not None:
+            if posterior is not None:
+                raise TypeError("forecast() accepts either `posterior` or `current_regime`, not both.")
+            import warnings
+            warnings.warn(
+                "forecast(current_regime=...) is deprecated; build a one-hot posterior and pass it "
+                "as `posterior=` instead. Hard-label entry will be removed in a future release.",
+                DeprecationWarning, stacklevel=2,
+            )
+            if not isinstance(current_regime, (int, np.integer)):
+                raise TypeError(f"current_regime must be an integer, got {type(current_regime).__name__}.")
+            legacy_label = int(current_regime)
+
+        if legacy_label is not None:
+            if not 0 <= legacy_label < self.n_states:
+                raise ValueError(f"current_regime must be in [0, {self.n_states - 1}], got {legacy_label}.")
+            future_probs = np.zeros(self.n_states, dtype=np.float64)
+            future_probs[legacy_label] = 1.0
+        elif posterior is not None:
+            future_probs = np.asarray(posterior, dtype=np.float64).reshape(-1)
+            if future_probs.shape != (self.n_states,):
+                raise ValueError(f"posterior must have shape ({self.n_states},), got {future_probs.shape}")
+            if np.any(future_probs < 0) or not np.isclose(future_probs.sum(), 1.0, atol=1e-6):
+                raise ValueError("posterior must be non-negative and sum to 1")
+        else:
+            raise TypeError("forecast() requires either `posterior` or `current_regime`.")
 
         if n_steps < 1:
             raise ValueError("n_steps must be at least 1")
 
-        # Start with one-hot encoding of current regime
-        current_state = np.zeros(self.n_states)
-        current_state[current_regime] = 1.0
-
-        # Get transition matrix
         trans_mat = self.transition_prob()
-
-        # Matrix multiply by transition matrix n_steps times
-        future_probs = current_state
         for _ in range(n_steps):
             future_probs = future_probs @ trans_mat
 

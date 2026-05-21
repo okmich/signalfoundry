@@ -2,9 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_ml.regime_filters import AdaptiveKalmanStyleSmoother, ConditionalRandomFieldRefiner, \
-    HysteresisProcessor, MarkovJumpProcessRegularizer, MedianFilter, MinimumDurationFilter, ModeFilterWithConfidence, \
-    ProcessorPipeline, TransitionRateLimiter
+from okmich_quant_ml.regime_filters import HysteresisProcessor, MarkovJumpProcessRegularizer, MedianFilter, \
+    MinimumDurationFilter, ProcessorPipeline, TransitionRateLimiter
 
 from okmich_quant_ml.regime_filters.utils import build_asymmetric_cost_matrix, build_symmetric_cost_matrix, \
     calculate_label_stability, calculate_regime_sharpe, calculate_transition_costs, calculate_transition_rate
@@ -177,7 +176,7 @@ class TestHysteresisProcessor:
         """Test count-based hysteresis behavior."""
         states = np.array([0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0])
         processor = HysteresisProcessor(
-            {"entry_threshold": 3, "exit_threshold": 2, "use_confidence": False}
+            {"entry_threshold": 3, "exit_threshold": 2}
         )
         smoothed = processor.process(states)
 
@@ -193,7 +192,6 @@ class TestHysteresisProcessor:
             {
                 "entry_threshold": 5,  # Hard to enter
                 "exit_threshold": 2,  # Easy to exit
-                "use_confidence": False,
             }
         )
         smoothed = processor.process(states)
@@ -201,24 +199,10 @@ class TestHysteresisProcessor:
         # Should be sticky when entering but quick to exit
         assert isinstance(smoothed, np.ndarray)
 
-    def test_confidence_based_hysteresis(self):
-        """Test confidence-based hysteresis with posteriors."""
-        states = np.array([0, 0, 1, 1, 1])
-        posteriors = np.array(
-            [[0.9, 0.1], [0.85, 0.15], [0.6, 0.4], [0.3, 0.7], [0.2, 0.8]]
-        )
-
-        processor = HysteresisProcessor(
-            {"entry_threshold": 1.5, "exit_threshold": 1.0, "use_confidence": True}
-        )
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        assert isinstance(smoothed, np.ndarray)
-
     def test_online_processing(self):
         """Test online processing mode."""
         processor = HysteresisProcessor(
-            {"entry_threshold": 3, "exit_threshold": 2, "use_confidence": False}
+            {"entry_threshold": 3, "exit_threshold": 2}
         )
         processor.reset()
 
@@ -242,7 +226,34 @@ class TestHysteresisProcessor:
     def test_config_validation(self):
         """Test configuration validation."""
         with pytest.raises(ValueError):
-            HysteresisProcessor({"entry_threshold": -1, "use_confidence": False})
+            HysteresisProcessor({"entry_threshold": -1})
+
+    def test_per_state_params_rejects_non_dict_entry(self):
+        """per_state_params values must themselves be dicts with 'entry' and 'exit' keys."""
+        with pytest.raises(ValueError, match="must be a dict"):
+            HysteresisProcessor({"per_state_params": {0: 5}})
+
+    def test_per_state_params_rejects_missing_keys(self):
+        """Each per-state config must have both 'entry' and 'exit'."""
+        with pytest.raises(ValueError, match="missing required keys"):
+            HysteresisProcessor({"per_state_params": {0: {"entry": 5}}})
+
+    def test_per_state_params_rejects_non_integer_entry(self):
+        """entry must be a positive integer."""
+        with pytest.raises(ValueError, match=r"\['entry'\] must be a positive integer"):
+            HysteresisProcessor({"per_state_params": {0: {"entry": 1.5, "exit": 2}}})
+
+    def test_per_state_params_rejects_non_positive_exit(self):
+        """exit must be >= 1."""
+        with pytest.raises(ValueError, match=r"\['exit'\] must be a positive integer"):
+            HysteresisProcessor({"per_state_params": {0: {"entry": 3, "exit": 0}}})
+
+    def test_per_state_params_accepts_valid_config(self):
+        """A well-formed per_state_params block should construct without error."""
+        processor = HysteresisProcessor(
+            {"per_state_params": {0: {"entry": 5, "exit": 2}, 1: {"entry": 3, "exit": 4}}}
+        )
+        assert processor.config["per_state_params"][0]["entry"] == 5
 
 
 class TestProcessorPipeline:
@@ -446,7 +457,7 @@ class TestIntegration:
             [
                 MinimumDurationFilter({"min_duration": 5}),
                 HysteresisProcessor(
-                    {"entry_threshold": 3, "exit_threshold": 2, "use_confidence": False}
+                    {"entry_threshold": 3, "exit_threshold": 2}
                 ),
                 MedianFilter({"window_size": 5}),
             ]
@@ -491,177 +502,6 @@ class TestIntegration:
 
         # Results should match
         np.testing.assert_array_equal(offline_result, online_result)
-
-
-class TestModeFilterWithConfidence:
-    """Tests for ModeFilterWithConfidence (Phase 2)."""
-
-    def test_basic_confidence_filtering(self):
-        """Test confidence-weighted filtering."""
-        states = np.array([0, 0, 1, 1, 0, 0, 0])
-        # Create posteriors where state 0 has higher confidence
-        posteriors = np.array(
-            [
-                [0.9, 0.1],
-                [0.85, 0.15],
-                [0.4, 0.6],  # Low confidence for state 1
-                [0.45, 0.55],  # Low confidence for state 1
-                [0.9, 0.1],
-                [0.9, 0.1],
-                [0.9, 0.1],
-            ]
-        )
-
-        processor = ModeFilterWithConfidence(
-            {"window_size": 5, "confidence_weight": 2.0, "min_score_threshold": 0.5}
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        assert isinstance(smoothed, np.ndarray)
-
-    def test_requires_posteriors(self):
-        """Test that processor requires posteriors."""
-        states = np.array([0, 1, 0, 1])
-        processor = ModeFilterWithConfidence({"window_size": 3})
-
-        with pytest.raises(ValueError, match="requires posteriors"):
-            processor.process(states)
-
-    def test_confidence_weight_zero(self):
-        """Test that confidence_weight=0 ignores posteriors."""
-        states = np.array([0, 0, 1, 0, 0])
-        # High confidence for wrong state
-        posteriors = np.array(
-            [
-                [0.5, 0.5],
-                [0.5, 0.5],
-                [0.9, 0.1],  # High confidence but only 1 occurrence
-                [0.5, 0.5],
-                [0.5, 0.5],
-            ]
-        )
-
-        processor = ModeFilterWithConfidence(
-            {"window_size": 5, "confidence_weight": 0.0}  # Ignore confidence
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        # Should be mostly state 0 (more frequent)
-        assert np.sum(smoothed == 0) >= 4
-
-    def test_high_confidence_weight(self):
-        """Test that high confidence_weight emphasizes confidence."""
-        states = np.array([0, 0, 1, 1, 1])
-        # State 1 has fewer occurrences but very high confidence
-        posteriors = np.array(
-            [
-                [0.6, 0.4],
-                [0.6, 0.4],
-                [0.1, 0.9],  # Very high confidence for state 1
-                [0.1, 0.9],
-                [0.1, 0.9],
-            ]
-        )
-
-        processor = ModeFilterWithConfidence(
-            {"window_size": 5, "confidence_weight": 3.0}  # Heavily weight confidence
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        # Should favor state 1 due to high confidence
-        assert isinstance(smoothed, np.ndarray)
-
-    def test_pandas_support(self):
-        """Test pandas Series/DataFrame support."""
-        dates = pd.date_range("2020-01-01", periods=10, freq="D")
-        states = pd.Series([0, 0, 1, 1, 0, 0, 1, 1, 1, 0], index=dates)
-        posteriors = pd.DataFrame(np.random.dirichlet([2, 2], 10), index=dates)
-
-        processor = ModeFilterWithConfidence({"window_size": 5})
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        assert isinstance(smoothed, pd.Series)
-        assert all(smoothed.index == states.index)
-
-    def test_online_processing(self):
-        """Test online processing mode."""
-        processor = ModeFilterWithConfidence(
-            {"window_size": 3, "confidence_weight": 1.0}
-        )
-        processor.reset()
-
-        states = [0, 0, 1, 1, 0]
-        posteriors_list = [
-            np.array([0.8, 0.2]),
-            np.array([0.9, 0.1]),
-            np.array([0.3, 0.7]),
-            np.array([0.2, 0.8]),
-            np.array([0.85, 0.15]),
-        ]
-
-        results = []
-        for state, posterior in zip(states, posteriors_list):
-            result = processor.process_online(state, posterior=posterior)
-            results.append(result)
-
-        assert len(results) == len(states)
-
-    def test_config_validation(self):
-        """Test configuration validation."""
-        with pytest.warns(DeprecationWarning):
-            with pytest.raises(ValueError, match="window_size must be odd"):
-                ModeFilterWithConfidence({"window_size": 4, "causal": False})
-
-        with pytest.raises(ValueError, match="confidence_weight must be a number"):
-            ModeFilterWithConfidence({"confidence_weight": "high"})
-
-        with pytest.raises(ValueError, match="confidence_weight must be >= 0"):
-            ModeFilterWithConfidence({"confidence_weight": -1.0})
-
-    def test_min_score_threshold(self):
-        """Test minimum score threshold filtering."""
-        states = np.array([0, 1, 2, 0, 0])
-        posteriors = np.array(
-            [
-                [0.6, 0.3, 0.1],
-                [0.3, 0.6, 0.1],
-                [0.3, 0.1, 0.6],
-                [0.6, 0.3, 0.1],
-                [0.6, 0.3, 0.1],
-            ]
-        )
-
-        processor = ModeFilterWithConfidence(
-            {
-                "window_size": 3,
-                "confidence_weight": 1.0,
-                "min_score_threshold": 1.5,  # High threshold
-            }
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        assert isinstance(smoothed, np.ndarray)
-
-    def test_causal_default(self):
-        """Verify causal=True is the default."""
-        processor = ModeFilterWithConfidence({"window_size": 7})
-        assert processor.config["causal"] is True
-
-    def test_deprecation_warning(self):
-        """Verify deprecation warning when causal=False."""
-        with pytest.warns(DeprecationWarning, match="causal=False.*look-ahead bias"):
-            processor = ModeFilterWithConfidence({"window_size": 7, "causal": False})
-        assert processor.config["causal"] is False
-
-    def test_online_mode_requires_causal(self):
-        """Online mode should raise error if causal=False."""
-        with pytest.warns(DeprecationWarning):
-            processor = ModeFilterWithConfidence({"window_size": 7, "causal": False})
-        processor.reset()
-
-        posterior = np.array([0.8, 0.2])
-        with pytest.raises(ValueError, match="process_online.*requires causal=True"):
-            processor.process_online(state=1, posterior=posterior)
 
 
 class TestTransitionRateLimiter:
@@ -807,100 +647,6 @@ class TestTransitionRateLimiter:
             window = smoothed[i - 20 : i + 1]
             window_transitions = np.sum(window[1:] != window[:-1])
             assert window_transitions <= 5
-
-
-class TestPhase2Integration:
-    """Integration tests for Phase 2 processors."""
-
-    def test_confidence_and_rate_limit_pipeline(self):
-        """Test combining confidence filter with rate limiter."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1, 2], 50)
-        posteriors = np.random.dirichlet([2, 2, 2], 50)
-
-        pipeline = ProcessorPipeline(
-            [
-                ModeFilterWithConfidence({"window_size": 5, "confidence_weight": 1.5}),
-                TransitionRateLimiter(
-                    {"max_transitions_per_window": 3, "window_size": 20}
-                ),
-            ]
-        )
-
-        smoothed = pipeline.process(states, posteriors=posteriors)
-
-        # Should be smoother than original
-        original_transitions = np.sum(states[1:] != states[:-1])
-        smoothed_transitions = np.sum(smoothed[1:] != smoothed[:-1])
-
-        assert smoothed_transitions < original_transitions
-
-    def test_full_phase_2_pipeline(self):
-        """Test all Phase 2 processors in a pipeline."""
-        np.random.seed(42)
-        true_regimes = np.repeat([0, 1, 2, 0], 25)
-        noisy_regimes = true_regimes.copy()
-
-        # Add noise
-        noise_idx = np.random.choice(100, 30, replace=False)
-        noisy_regimes[noise_idx] = np.random.choice([0, 1, 2], 30)
-
-        # Generate posteriors correlated with states
-        posteriors = np.zeros((100, 3))
-        for i in range(100):
-            probs = np.array([0.2, 0.2, 0.2])
-            probs[noisy_regimes[i]] = 0.6
-            posteriors[i] = probs
-
-        pipeline = ProcessorPipeline(
-            [
-                MinimumDurationFilter({"min_duration": 3}),
-                ModeFilterWithConfidence({"window_size": 5, "confidence_weight": 2.0}),
-                TransitionRateLimiter(
-                    {"max_transitions_per_window": 4, "window_size": 25}
-                ),
-            ]
-        )
-
-        smoothed = pipeline.process(noisy_regimes, posteriors=posteriors)
-
-        # Calculate metrics
-        original_stability = calculate_label_stability(noisy_regimes)
-        smoothed_stability = calculate_label_stability(smoothed)
-
-        # Should be more stable
-        assert (
-            smoothed_stability["mean_duration"] >= original_stability["mean_duration"]
-        )
-        assert (
-            smoothed_stability["transition_rate"]
-            <= original_stability["transition_rate"]
-        )
-
-    def test_online_offline_consistency_phase2(self):
-        """Test online/offline consistency for Phase 2 processors."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1], 20)
-        posteriors = np.random.dirichlet([3, 3], 20)
-
-        # Test ModeFilterWithConfidence
-        processor = ModeFilterWithConfidence(
-            {"window_size": 5, "confidence_weight": 1.0}
-        )
-
-        offline_result = processor.process(states, posteriors=posteriors)
-
-        processor.reset()
-        online_results = []
-        for i in range(len(states)):
-            result = processor.process_online(states[i], posterior=posteriors[i])
-            online_results.append(result)
-        online_result = np.array(online_results)
-
-        # Allow small differences due to circular buffer edge effects
-        # Most elements should match
-        match_rate = np.mean(offline_result == online_result)
-        assert match_rate >= 0.85, f"Match rate {match_rate:.2%} is too low"
 
 
 class TestMarkovJumpProcessRegularizer:
@@ -1058,221 +804,6 @@ class TestMarkovJumpProcessRegularizer:
             )
 
 
-class TestAdaptiveKalmanStyleSmoother:
-    """Tests for AdaptiveKalmanStyleSmoother (Phase 3)."""
-
-    def test_basic_smoothing(self):
-        """Test basic Kalman-style smoothing."""
-        np.random.seed(42)
-        states = np.array([0, 0, 1, 1, 0, 0, 1, 1, 1])
-        posteriors = np.random.dirichlet([3, 3], 9)
-
-        processor = AdaptiveKalmanStyleSmoother(
-            {"num_states": 2, "process_noise": 0.1, "measurement_noise": 0.2}
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        assert isinstance(smoothed, np.ndarray)
-
-    def test_requires_posteriors(self):
-        """Test that processor requires posteriors."""
-        states = np.array([0, 1, 0, 1])
-        processor = AdaptiveKalmanStyleSmoother({"num_states": 2})
-
-        with pytest.raises(ValueError, match="requires posteriors"):
-            processor.process(states)
-
-    def test_adaptation(self):
-        """Test noise parameter adaptation."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1, 2], 50)
-        posteriors = np.random.dirichlet([2, 2, 2], 50)
-
-        processor = AdaptiveKalmanStyleSmoother(
-            {
-                "num_states": 3,
-                "process_noise": 0.1,
-                "measurement_noise": 0.2,
-                "adaptation_rate": 0.1,
-            }
-        )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        # Check that adaptation occurred
-        adapted_params = processor.get_adapted_parameters()
-        assert adapted_params is not None
-        assert "process_noise" in adapted_params
-        assert "measurement_noise" in adapted_params
-
-    def test_online_processing(self):
-        """Test online processing mode."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1], 10)
-        posteriors = np.random.dirichlet([3, 3], 10)
-
-        processor = AdaptiveKalmanStyleSmoother(
-            {"num_states": 2, "process_noise": 0.1, "measurement_noise": 0.2}
-        )
-        processor.reset()
-
-        results = []
-        for i in range(len(states)):
-            result = processor.process_online(states[i], posterior=posteriors[i])
-            results.append(result)
-
-        assert len(results) == len(states)
-
-        # Check adaptation in online mode
-        adapted_params = processor.get_adapted_parameters()
-        assert adapted_params is not None
-
-    def test_pandas_support(self):
-        """Test pandas Series support."""
-        np.random.seed(42)
-        dates = pd.date_range("2020-01-01", periods=15, freq="D")
-        states = pd.Series(np.random.choice([0, 1], 15), index=dates)
-        posteriors = pd.DataFrame(np.random.dirichlet([3, 3], 15), index=dates)
-
-        processor = AdaptiveKalmanStyleSmoother({"num_states": 2})
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        assert isinstance(smoothed, pd.Series)
-        assert all(smoothed.index == states.index)
-
-    def test_config_validation(self):
-        """Test configuration validation."""
-        with pytest.raises(ValueError, match="num_states is required"):
-            AdaptiveKalmanStyleSmoother({})
-
-        with pytest.raises(ValueError, match="num_states must be >= 2"):
-            AdaptiveKalmanStyleSmoother({"num_states": 1})
-
-        with pytest.raises(ValueError, match="must be between 0 and 1"):
-            AdaptiveKalmanStyleSmoother({"num_states": 2, "process_noise": 1.5})
-
-
-class TestConditionalRandomFieldRefiner:
-    """Tests for ConditionalRandomFieldRefiner (Phase 3)."""
-
-    def test_basic_viterbi(self):
-        """Test basic Viterbi inference."""
-        np.random.seed(42)
-        states = np.array([0, 0, 1, 1, 0, 0])
-        posteriors = np.random.dirichlet([3, 3], 6)
-
-        # Should warn about non-causal nature
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({"observation_weight": 1.0})
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        assert isinstance(smoothed, np.ndarray)
-        assert len(smoothed) == len(states)
-
-    def test_requires_posteriors(self):
-        """Test that processor requires posteriors."""
-        states = np.array([0, 1, 0, 1])
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({})
-
-        with pytest.raises(ValueError, match="requires posteriors"):
-            processor.process(states)
-
-    def test_custom_transition_weights(self):
-        """Test with custom transition weights."""
-        np.random.seed(42)
-        states = np.array([0, 0, 1, 1, 0, 0])
-        posteriors = np.random.dirichlet([3, 3], 6)
-
-        # Prefer staying in same state
-        transition_weights = np.array(
-            [[0, 5], [5, 0]]  # From 0: stay=0, to_1=5  # From 1: to_0=5, stay=0
-        )
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner(
-                {"transition_weights": transition_weights}
-            )
-
-        smoothed = processor.process(states, posteriors=posteriors)
-        # Should have fewer transitions due to high transition costs
-        transitions = np.sum(smoothed[1:] != smoothed[:-1])
-        assert transitions <= np.sum(states[1:] != states[:-1])
-
-    def test_smooth_transitions_parameter(self):
-        """Test smooth_transitions parameter."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1], 20)
-        posteriors = np.random.dirichlet([3, 3], 20)
-
-        # High smoothness penalty
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({"smooth_transitions": 10.0})
-
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        # Should have fewer transitions
-        original_transitions = np.sum(states[1:] != states[:-1])
-        smoothed_transitions = np.sum(smoothed[1:] != smoothed[:-1])
-        assert smoothed_transitions <= original_transitions
-
-    def test_learn_transition_weights(self):
-        """Test learning transition weights from data."""
-        np.random.seed(42)
-        # Create patterns
-        states = np.array([0, 0, 1, 1, 0, 0, 1, 1])
-        ground_truth = np.array([0, 0, 0, 1, 1, 1, 1, 1])
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({})
-        learned_weights = processor.learn_transition_weights(states, ground_truth)
-
-        assert learned_weights.shape == (2, 2)
-        # Diagonal should be lower (staying is more common)
-        assert learned_weights[0, 0] < learned_weights[0, 1]
-
-    def test_online_processing(self):
-        """Test online processing with sliding window."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1], 15)
-        posteriors = np.random.dirichlet([3, 3], 15)
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({})
-        processor.reset()
-
-        results = []
-        for i in range(len(states)):
-            result = processor.process_online(states[i], posterior=posteriors[i])
-            results.append(result)
-
-        assert len(results) == len(states)
-
-    def test_pandas_support(self):
-        """Test pandas Series support."""
-        np.random.seed(42)
-        dates = pd.date_range("2020-01-01", periods=10, freq="D")
-        states = pd.Series(np.random.choice([0, 1, 2], 10), index=dates)
-        posteriors = pd.DataFrame(np.random.dirichlet([2, 2, 2], 10), index=dates)
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            processor = ConditionalRandomFieldRefiner({})
-        smoothed = processor.process(states, posteriors=posteriors)
-
-        assert isinstance(smoothed, pd.Series)
-        assert all(smoothed.index == states.index)
-
-    def test_config_validation(self):
-        """Test configuration validation."""
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            with pytest.raises(ValueError, match="observation_weight must be positive"):
-                ConditionalRandomFieldRefiner({"observation_weight": 0})
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            with pytest.raises(ValueError, match="Only 'viterbi' inference"):
-                ConditionalRandomFieldRefiner({"inference_method": "forward_backward"})
-
-
 class TestPhase3Integration:
     """Integration tests for Phase 3 processors."""
 
@@ -1305,64 +836,6 @@ class TestPhase3Integration:
         original_transitions = np.sum(states[1:] != states[:-1])
         smoothed_transitions = np.sum(smoothed[1:] != smoothed[:-1])
         assert smoothed_transitions < original_transitions
-
-    def test_kalman_and_crf_pipeline(self):
-        """Test Kalman smoother followed by CRF."""
-        np.random.seed(42)
-        states = np.random.choice([0, 1, 2], 50)
-        posteriors = np.random.dirichlet([2, 2, 2], 50)
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            pipeline = ProcessorPipeline(
-                [
-                    AdaptiveKalmanStyleSmoother({"num_states": 3}),
-                    ConditionalRandomFieldRefiner({"smooth_transitions": 2.0}),
-                ]
-            )
-
-        smoothed = pipeline.process(states, posteriors=posteriors)
-
-        assert len(smoothed) == len(states)
-        # Should produce valid states
-        assert all((smoothed >= 0) & (smoothed < 3))
-
-    def test_full_phase_3_pipeline(self):
-        """Test all Phase 3 processors together."""
-        np.random.seed(42)
-        true_regimes = np.repeat([0, 1, 2, 0], [100, 50, 70, 80])
-        noisy_regimes = true_regimes.copy()
-        noise_idx = np.random.choice(len(noisy_regimes), 50, replace=False)
-        noisy_regimes[noise_idx] = np.random.choice([0, 1, 2], 50)
-
-        # Generate posteriors
-        posteriors = np.zeros((len(noisy_regimes), 3))
-        for i in range(len(noisy_regimes)):
-            probs = np.array([0.1, 0.1, 0.1])
-            probs[noisy_regimes[i]] = 0.7
-            posteriors[i] = probs
-
-        with pytest.warns(UserWarning, match="NOT suitable for live trading"):
-            pipeline = ProcessorPipeline(
-                [
-                    MarkovJumpProcessRegularizer(
-                        {"estimate_from_data": True, "min_samples": 5}
-                    ),
-                    AdaptiveKalmanStyleSmoother({"num_states": 3}),
-                    ConditionalRandomFieldRefiner({"smooth_transitions": 1.0}),
-                ]
-            )
-
-        smoothed = pipeline.process(noisy_regimes, posteriors=posteriors)
-
-        # Calculate stability
-        original_stability = calculate_label_stability(noisy_regimes)
-        smoothed_stability = calculate_label_stability(smoothed)
-
-        # Should be more stable
-        assert (
-            smoothed_stability["mean_duration"] >= original_stability["mean_duration"]
-        )
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

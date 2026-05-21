@@ -162,6 +162,27 @@ class PeriodStackAudit:
         self._beta_long: Optional[float] = None
         self._gamma: Optional[float] = None
 
+    # ------------------------------------------------------------------
+    # Public read-only accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def fitted_coefficients(self) -> Optional[Dict[str, float]]:
+        """Return the fitted OLS β and Gram-Schmidt γ coefficients, or ``None`` if not yet fit.
+
+        Populated by either :meth:`build_variants` (full-series fit, exploratory) or
+        :meth:`fit_orthogonalisation` (separate-window fit). Use this rather than the
+        ``_beta_short`` / ``_beta_long`` / ``_gamma`` attributes, which are internal
+        and may be renamed.
+        """
+        if self._beta_short is None:
+            return None
+        return {
+            "beta_short": self._beta_short,
+            "beta_long": self._beta_long,
+            "gamma": self._gamma,
+        }
+
     # ========================================================================
     # 1. VARIANT CONSTRUCTION
     # ========================================================================

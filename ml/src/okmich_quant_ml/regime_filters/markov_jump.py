@@ -384,7 +384,7 @@ class MarkovJumpProcessRegularizer(BasePostProcessor):
                 "scale": scale,
             }
 
-    def process(self, states: Union[np.ndarray, pd.Series], posteriors: Optional[Union[np.ndarray, pd.DataFrame]] = None,
+    def process(self, states: Union[np.ndarray, pd.Series],
                 returns: Optional[Union[np.ndarray, pd.Series]] = None) -> Union[np.ndarray, pd.Series]:
         """
         Process state sequence (offline batch mode).
@@ -431,7 +431,7 @@ class MarkovJumpProcessRegularizer(BasePostProcessor):
         else:
             return smoothed_arr
 
-    def process_online(self, state: int, posterior: Optional[np.ndarray] = None, return_value: Optional[float] = None,
+    def process_online(self, state: int, return_value: Optional[float] = None,
                        timestamp: Optional[pd.Timestamp] = None) -> int:
         # Initialize state on first call
         if self._online_state is None:
