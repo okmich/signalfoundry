@@ -372,8 +372,7 @@ class VolumePhase(StrEnum):
 
 
 def tick_volume_phase_zscore(
-    volume: pd.Series, min_periods: int = 20, phase: str | VolumePhase = VolumePhase.WEEKLY
-) -> pd.Series:
+    volume: pd.Series, min_periods: int = 20, phase: str | VolumePhase = VolumePhase.WEEKLY) -> pd.Series:
     """
     Z-score of tick volume against an expanding phase baseline.
 
@@ -383,6 +382,44 @@ def tick_volume_phase_zscore(
     - phase='daily': minute-of-day bucket (1,440 buckets).
 
     Fully causal: only uses data up to and including the current bar.
+
+    ⚠ DEPLOYMENT CAVEATS — high cost, often low payoff
+    --------------------------------------------------
+    Before adding this to a production feature set, weigh the following:
+
+    1. Warmup is severe. To get `min_periods=20` you need ≥ 20 same-bucket
+       observations. On 5-min bars:
+         - daily (1,440 buckets):  ~20 trading days minimum, ~30+ before
+           coverage is reliable across all buckets.
+         - weekly (10,080 buckets): ~20 weeks minimum, ~6 months for
+           reliable coverage. Anything shorter returns mostly NaN.
+
+    2. Expanding window is NOT regime-aware. All prior same-bucket bars
+       contribute equally forever, so the baseline drifts toward stale
+       regimes (listings, halvings, market-structure shifts). Useful life
+       of the statistic is bounded by how stationary the asset's
+       volume-by-time-of-day pattern is.
+
+    3. Bucket sparsity stays small. Weekly buckets accumulate only ~52
+       obs/year — a thin sample for an unbounded z. A handful of outliers
+       can shift the mean visibly for months.
+
+    4. Payoff is weak for 24/7 markets. Crypto, perp futures, and global
+       FX have softer calendar seasonality than equities open/close or
+       energy delivery windows. The signal-to-warmup ratio is often poor.
+
+    Deployable alternatives to consider:
+      - Rolling-window per-bucket z (e.g. last 60 same-bucket obs) for
+        regime awareness and bounded state.
+      - EWMA per bucket — graceful cold-start, O(num_buckets) memory.
+      - Coarser bucketing (hour-of-day = 24 buckets gives 420× the obs
+        per bucket vs minute-of-week).
+      - Plain `abnormal_volume` (rolling z over a fixed window) if you
+        don't actually need seasonality.
+
+    Best fit for: equities with sharp session structure, FX session
+    overlaps, gas/power/agricultural markets with strong delivery-window
+    seasonality. Poor fit for crypto on < 6-month backtests.
 
     Parameters
     ----------
@@ -437,7 +474,15 @@ def tick_volume_phase_zscore(
 
 
 def tick_volume_how_zscore(volume: pd.Series, min_periods: int = 20) -> pd.Series:
-    """Backward-compatible wrapper for weekly phase bucketing."""
+    """
+    Backward-compatible wrapper for weekly phase bucketing.
+
+    ⚠ Inherits all deployment caveats from `tick_volume_phase_zscore`.
+    The weekly variant is the most expensive of the two: 10,080 buckets,
+    ~6 months warmup for reliable coverage, weakest signal on 24/7 markets.
+    Prefer the daily variant — or a non-seasonal alternative like
+    `abnormal_volume` — unless you have a specific weekly-seasonality hypothesis.
+    """
     z = tick_volume_phase_zscore(volume=volume, min_periods=min_periods, phase=VolumePhase.WEEKLY)
     return pd.Series(z.values, index=volume.index, name="tick_vol_how_zscore")
 
@@ -520,15 +565,71 @@ def ad(df: pd.DataFrame, method: str = "williams", vol_col: str = "tick_volume",
     ad_zscore = ((ad_line - roll.mean()) / roll.std()).clip(-5, 5)
     ad_zscore = ad_zscore.rename(f"AD_{method.lower()}_zscore")
 
-    # Compute rolling percentile rank
-    ad_pct_rank = (
-        ad_line.rolling(window, min_periods=window)
-        .apply(lambda x: x.rank(pct=True).iloc[-1], raw=False)
-        .clip(0, 1.0)
-    )
+    # Compute rolling percentile rank (vectorized — Rolling.rank(pct=True)
+    # returns the rank of the current bar within the trailing window, which
+    # is what we want and is ~100× faster than .apply(lambda x: x.rank(...)))
+    ad_pct_rank = ad_line.rolling(window, min_periods=window).rank(pct=True).clip(0, 1.0)
     ad_pct_rank = ad_pct_rank.rename(f"AD_{method.lower()}_pct")
 
     return ad_line, ad_zscore, ad_pct_rank
+
+
+def chaikin_oscillator(df: pd.DataFrame, fast: int = 12, slow: int = 26, method: str = "williams",
+                       vol_col: str = "tick_volume") -> pd.Series:
+    """
+    Chaikin Oscillator (CHO) — MACD on the Accumulation/Distribution line.
+
+    Formula:
+        CHO = EMA_fast(AD_line) − EMA_slow(AD_line)
+
+    Built on top of the A/D line produced by `ad()`. Carries a sign (directional) and is empirically smoother than
+    Chaikin Money Flow or MFI on intraday bars because two EMAs damp the per-bar money-flow-multiplier noise that CMF/MFI
+    inherit directly.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns ['open', 'high', 'low', 'close', vol_col].
+    fast : int, default=12
+        Fast EMA span. Textbook Chaikin uses 3 on daily bars; the 12/26 default
+        here is the MACD analog, better suited to intraday (5m / 15m / 1h) bars
+        where the 3-period EMA is too jittery.
+    slow : int, default=26
+        Slow EMA span. Must be > fast.
+    method : {'williams', 'mt'}, default='williams'
+        Which A/D-line variant to build CHO on. Williams uses (2C-H-L)/(H-L);
+        MT uses (C-O)/(H-L).
+    vol_col : str, default='tick_volume'
+        Volume column in `df`.
+
+    Returns
+    -------
+    pd.Series
+        Chaikin Oscillator. Positive = fast EMA above slow → accumulation
+        accelerating. Negative = distribution accelerating. Zero crossings
+        flag flow regime changes.
+
+    Interpretation Guide
+    --------------------
+    • CHO > 0 and rising  → accumulation gaining momentum
+    • CHO > 0 and falling → accumulation losing momentum (early warning)
+    • CHO < 0 and falling → distribution gaining momentum
+    • Zero crossing        → flow regime change
+    • Divergence vs price  → potential reversal
+
+    Raises
+    ------
+    ValueError
+        If `fast >= slow` or either span is < 1.
+    """
+    if fast < 1 or slow < 1:
+        raise ValueError(f"fast and slow must be >= 1, got fast={fast}, slow={slow}")
+    if fast >= slow:
+        raise ValueError(f"fast must be < slow, got fast={fast}, slow={slow}")
+
+    ad_line, _, _ = ad(df, method=method, vol_col=vol_col)
+    cho = ad_line.ewm(span=fast, adjust=False).mean() - ad_line.ewm(span=slow, adjust=False).mean()
+    return cho.rename(f"CHO_{method.lower()}_{fast}_{slow}")
 
 
 def volume_weighted_rate_of_change(close: pd.Series, volume: pd.Series, period: int = 14) -> pd.Series:

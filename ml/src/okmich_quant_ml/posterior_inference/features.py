@@ -9,19 +9,15 @@ def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-1
                                normalize: bool = False, negativity_tol: float = 1e-9) -> NDArray:
     """Validate a posterior matrix and optionally normalize rows onto the simplex.
 
-    With ``normalize=False`` (default), the returned array is the input cast to
-    ``float`` with no value-side mutation — use this for pure validation and for
-    rearrangement transformers that must not silently alter probabilities.
+    With ``normalize=False`` (default), the returned array is the input cast to ``float`` with no value-side mutation —
+    use this for pure validation and for rearrangement transformers that must not silently alter probabilities.
 
-    With ``normalize=True``, values are clipped to ``eps`` and each row is
-    rescaled to sum to 1. Use this for calibration / smoothing transformers that
-    need log-safe input.
+    With ``normalize=True``, values are clipped to ``eps`` and each row is rescaled to sum to 1. Use this for calibration /
+    smoothing transformers that need log-safe input.
 
-    Values more negative than ``-negativity_tol`` are always rejected as
-    upstream-model corruption regardless of ``normalize``. The default
-    ``negativity_tol=1e-9`` accepts floating-point drift (cumsum / smoothing
-    noise typically in the ``1e-15 — 1e-12`` range) while flagging actual
-    negative probability mass.
+    Values more negative than ``-negativity_tol`` are always rejected as upstream-model corruption regardless of ``normalize``.
+    The default ``negativity_tol=1e-9`` accepts floating-point drift
+    (cumsum / smoothing noise typically in the ``1e-15 — 1e-12`` range) while flagging actual negative probability mass.
     """
     p = np.asarray(probs, dtype=float)
     if p.ndim != 2 or p.shape[1] < 2:
@@ -57,9 +53,8 @@ def _validate_window(window: int, func_name: str) -> None:
 def margin(probs: NDArray) -> NDArray:
     """Top-minus-second probability margin per row, shape ``(T,)``.
 
-    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
-    the validation gate consistent with the rest of the package's public
-    surface.
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at the validation gate consistent with the rest
+    of the package's public surface.
     """
     p = _validate_posterior_matrix(probs, "margin")
     partitioned = np.partition(p, -2, axis=1)
@@ -69,9 +64,8 @@ def margin(probs: NDArray) -> NDArray:
 def top_prob(probs: NDArray) -> NDArray:
     """Top-class probability per row, shape ``(T,)``.
 
-    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
-    the validation gate consistent with the rest of the package's public
-    surface.
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at the validation gate consistent with the rest
+    of the package's public surface.
     """
     p = _validate_posterior_matrix(probs, "top_prob")
     return np.max(p, axis=1)
@@ -80,9 +74,8 @@ def top_prob(probs: NDArray) -> NDArray:
 def entropy(probs: NDArray) -> NDArray:
     """Shannon entropy in nats per row, shape ``(T,)``.
 
-    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at
-    the validation gate consistent with the rest of the package's public
-    surface.
+    Expects a posterior matrix ``(T, K)`` with ``K >= 2``; rejects NaN/Inf at the validation gate consistent with the rest
+    of the package's public surface.
     """
     p = _validate_posterior_matrix(probs, "entropy")
     return -xlogy(p, p).sum(axis=1)

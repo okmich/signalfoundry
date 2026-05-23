@@ -33,9 +33,8 @@ from .features import _validate_posterior_matrix, _validate_window, dwell_length
 def _autocorr_lag1(x: NDArray) -> float:
     """Pearson autocorrelation at lag 1 of a 1-D series. Returns 0 for degenerate inputs.
 
-    The full series can have non-zero variance while one of the lagged slices
-    (``arr[:-1]`` or ``arr[1:]``) is constant — e.g. ``[0, 1, 1]`` — which
-    makes ``np.corrcoef`` return NaN. Check both slices independently.
+    The full series can have non-zero variance while one of the lagged slices (``arr[:-1]`` or ``arr[1:]``) is constant —
+    e.g. ``[0, 1, 1]`` — which makes ``np.corrcoef`` return NaN. Check both slices independently.
     """
     arr = np.asarray(x, dtype=float)
     if arr.size < 3:
@@ -64,14 +63,11 @@ def _validate_transmat(transmat: NDArray, n_states: int, name: str = "transmat")
 def _stationary_distribution(transmat: NDArray) -> NDArray:
     """Stationary distribution ``π`` solving ``π A = π``, ``Σπ = 1``.
 
-    Computed from the left eigenvector of ``A`` (= right eigenvector of ``A.T``)
-    associated with the eigenvalue 1. Requires an irreducible chain — eigenvalue
-    1 must have algebraic multiplicity exactly 1; otherwise the stationary
-    distribution is non-unique and the eigenvector chosen by ``np.linalg.eig``
-    is implementation-dependent, making the downstream expected-dynamics
-    fields arbitrary. Reducible chains raise with guidance to pass an
-    ergodic transmat or compute the comparison manually with an explicit
-    state-occupancy prior.
+    Computed from the left eigenvector of ``A`` (= right eigenvector of ``A.T``) associated with the eigenvalue 1.
+    Requires an irreducible chain — eigenvalue 1 must have algebraic multiplicity exactly 1; otherwise the stationary
+    distribution is non-unique and the eigenvector chosen by ``np.linalg.eig`` is implementation-dependent, making the
+    downstream expected-dynamics fields arbitrary. Reducible chains raise with guidance to pass an ergodic transmat or
+    compute the comparison manually with an explicit state-occupancy prior.
     """
     eigvals, eigvecs = np.linalg.eig(transmat.T)
     eig_one_tol = 1e-6

@@ -21,6 +21,7 @@ from ._volume import (
     tick_volume_phase_zscore,
     tick_volume_how_zscore,
     ad,
+    chaikin_oscillator,
 )
 from ._mfi import market_facilitation_index, mfi_features
 

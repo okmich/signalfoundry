@@ -15,7 +15,7 @@ Quick start
     ... )
     >>> reg = FeatureRegistry()
     >>> candidates = reg.candidates_for("regime", min_relevance="HIGH").names()
-    >>> config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=4)
+    >>> config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=3)
     >>> screener = HmmFeatureScreener(config, raw_data, feature_engineering_fn)
     >>> result = screener.screen(candidates, strategy=ScreenStrategy.ABLATION)
     >>> result.results_       # ranked DataFrame
