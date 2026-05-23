@@ -50,12 +50,10 @@ def core_trend_features(df: pd.DataFrame,
     bb_window: int = 24, bb_deviation_up: float = 2.0, bb_deviation_down: float = 2.0,
     continuous_omega: float = 0.15,
     persistence_window: int = 20, persistence_smooth: int = 5, persistence_zscore_norm: bool = True,
-    zscore_window: int = 30, zscore_deriv_window: int = 5,
-    close_col: str = "close") -> pd.DataFrame:
+    zscore_window: int = 30, zscore_deriv_window: int = 5, close_col: str = "close") -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     close_price = df[close_col]
-
     bb_upper, bb_middle, bb_lower, bb_percent_b, bb_width = bollinger_band(close_price, window=bb_window,
                                                                            deviation_up=bb_deviation_up,
                                                                            deviation_down=bb_deviation_down)
