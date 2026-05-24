@@ -136,9 +136,8 @@ def idc_parse(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.DataFra
     """
     Parse a price series into per-bar IDC event signals for ITA Algorithm 1.
 
-    Unlike parse_dc_events() which returns one row per completed trend, this function
-    returns one row per bar with the event signals needed for Algorithm 1: new_high and
-    new_low events, DC confirmations, running ph/pl extremes, and RDC.
+    Unlike parse_dc_events() which returns one row per completed trend, this function returns one row per bar with the
+    event signals needed for Algorithm 1: new_high and new_low events, DC confirmations, running ph/pl extremes, and RDC.
 
     Parameters
     ----------

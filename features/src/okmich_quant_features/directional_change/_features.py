@@ -101,8 +101,8 @@ def log_r(trends: pd.DataFrame) -> pd.Series:
     """
     Compute log-transformed Time-Adjusted Return for each completed DC trend.
 
-    Applied before feeding R into the HMM to compress the right-skewed distribution
-    of R and satisfy the Gaussian emission assumption.
+    Applied before feeding R into the HMM to compress the right-skewed distribution of R and satisfy the
+    Gaussian emission assumption.
 
     Parameters
     ----------
@@ -199,9 +199,8 @@ def normalise_minmax(series: pd.Series, min_val: float = None, max_val: float = 
     """
     Min-max normalise a DC indicator series to [0, 1].
 
-    Designed for use with TMV and T. Call with min_val=None on the training set to
-    fit, then pass the returned min_val/max_val when normalising live/test data to
-    avoid look-ahead bias.
+    Designed for use with TMV and T. Call with min_val=None on the training set to fit, then pass the returned
+    min_val/max_val when normalising live/test data to avoid look-ahead bias.
 
     Parameters
     ----------

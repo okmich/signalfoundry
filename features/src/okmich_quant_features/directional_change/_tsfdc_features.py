@@ -86,9 +86,8 @@ def extract_tsfdc_features(trends_s: pd.DataFrame, trends_b: pd.DataFrame, sthet
     """
     Compute (TMV, T, OSV, COP) feature matrix for all STheta DC trends.
 
-    Features are computed at each STheta DCC confirmation point and represent
-    the completed DC event.  The first row will have OSV = NaN (no previous
-    DCC).  Rows before the first BTheta DCC event will have COP = NaN.
+    Features are computed at each STheta DCC confirmation point and represent the completed DC event.
+    The first row will have OSV = NaN (no previous DCC).  Rows before the first BTheta DCC event will have COP = NaN.
 
     Feature definitions (Bakhach et al. 2018, Section 3.1):
       TMV — Total Move Value = trends_s["tmv"] (pre-computed by parse_dc_events).
