@@ -15,12 +15,11 @@ from ._variance_ratio import variance_ratio
 from ._velocity_path import returns_sign_persistence, velocity_consistency, velocity_magnitude
 from ._zigzag_density import zigzag_density
 from ..trend.channels import bollinger_band
-from ..utils import logit_transformation
 
 
 def core_path_structure_features(df: pd.DataFrame,
     # Auto-correlation parameters
-    ac_window: int = 40, auto_corr_lags: List[int] = None, strict: bool = False,
+    ac_window: int = 36, auto_corr_lags: List[int] = None, strict: bool = False,
     # Hurst exponent parameters
     hurst_window: int = 24, hurst_min_window: int = 24, hurst_min_lags: int = 2, hurst_max_lags: Optional[int] = None,
     hurst_detrend: str = "none", hurst_return_confidence: bool = False, hurst_confidence_level: float = 0.95,
@@ -166,60 +165,3 @@ def core_path_structure_features(df: pd.DataFrame,
         result[f"bds_pvalue_{bds_window}"] = np.nan
 
     return result
-
-
-# Complete EDA workflow
-def append_path_structure_features(data: pd.DataFrame, window: int = 20, choppiness_window: int = 14,
-                                   ac_window: int = 40, auto_corr_lags: List[int] = None,
-                                   he_window: int = None, vr_window: int = None, ts_window: int = None,
-                                   zigzag_window: int = None, zigzag_threshold: float = 0.02,
-                                   high_col: str = "high", low_col: str = "low", close_col: str = "close"):
-    if auto_corr_lags is None:
-        auto_corr_lags = [1, 5, 10, 20]
-
-    # Resolve actual computation windows so column names match what was computed.
-    _he_w = he_window if he_window else window
-    _ts_w = ts_window if ts_window else window
-    _vr_w = vr_window if vr_window else window
-    _ch_w = choppiness_window if choppiness_window else window
-
-    # auto_corr — column names use ac_window (actual computation window), not window
-    for lag in auto_corr_lags:
-        data[f"auto_corr_{ac_window}_{lag}"] = auto_corr(
-            data[close_col], window=ac_window, lag=lag
-        )
-    if f"auto_corr_{ac_window}_1" in data.columns:
-        data[f"auto_corr_{ac_window}_1_logit"] = logit_transformation(
-            data[f"auto_corr_{ac_window}_1"]
-        )
-    if f"auto_corr_{ac_window}_5" in data.columns:
-        data[f"auto_corr_{ac_window}_5_logit"] = logit_transformation(
-            data[f"auto_corr_{ac_window}_5"]
-        )
-    # hurst exponent — column name reflects actual window used
-    data[f"hurst_{_he_w}"] = hurst_exponent(data[close_col], window=_he_w, min_window=_he_w)
-    # trend strength — column name reflects actual window used
-    data[f"trend_strength_{_ts_w}"] = trend_strength(data[close_col], _ts_w)
-    data[f"detrend_strength_{_ts_w}"] = detrended_trend_strength(data[close_col], window=_ts_w)
-    # variance_ratio — must be applied to log returns, not price levels
-    _vr_returns = np.log(data[close_col] / data[close_col].shift(1))
-    data[f"variance_ratio_{_vr_w}"] = variance_ratio(_vr_returns, _vr_w)
-    # zigzag_density
-    data[f"zigzag_density_{zigzag_window}"], _ = zigzag_density(
-        data[close_col], window=zigzag_window, threshold=zigzag_threshold
-    )
-    # bbw
-    _, _, _, _, data[f"bbw_{window}"] = bollinger_band(data[close_col], window=window)
-    data[f"bbw_{window}_logit"] = logit_transformation(data[f"bbw_{window}"])
-    # choppiness
-    data[f"choppiness_index_{_ch_w}"] = choppiness_index(
-        data[high_col], data[low_col], data[close_col], window=_ch_w,
-    )
-    # atr — column name reflects actual timeperiod used (choppiness_window)
-    data[f"atr_{_ch_w}"] = talib.ATR(
-        data[high_col], data[low_col], data[close_col], timeperiod=_ch_w,
-    )
-    # efficiency_ratio
-    data[f"efficiency_ratio_{window}"] = efficiency_ratio(data[close_col], window=window)
-    data[f"efficiency_ratio_{window}_logit"] = logit_transformation(data[f"efficiency_ratio_{window}"])
-    return data

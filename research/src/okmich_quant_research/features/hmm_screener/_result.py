@@ -16,10 +16,18 @@ class AxisEvaluation:
 
     Returned by each ``evaluate_*`` function in ``_evaluators.py`` and folded
     into the per-subset ``SubsetEvaluation`` below.
+
+    ``axis_separation`` is the **population-weighted standard deviation of
+    per-state medians** of the axis target — a small-population outlier state
+    contributes proportional to its mass, not its value. ``axis_separation_range``
+    is the legacy ``max(median) - min(median)`` across states, preserved for
+    back-comparison and for diagnosing when state-population skew is hiding
+    or inflating the separation signal.
     """
     axis_separation: float
     secondary_robustness: float
     secondary_label: str
+    axis_separation_range: float = 0.0
     raw_details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -34,6 +42,7 @@ class SubsetEvaluation:
     honesty: float
     state_balance_ratio: float
     pareto_status: ParetoStatus
+    axis_separation_range: float = 0.0
     warnings: tuple[str, ...] = ()
     raw_details: dict[str, Any] = field(default_factory=dict)
     elapsed_sec: float = 0.0

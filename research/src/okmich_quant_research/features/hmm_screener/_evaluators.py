@@ -38,6 +38,62 @@ def _build_forward_log_returns(close: NDArray, state_labels: NDArray, horizon: i
     return pd.DataFrame({"state": state_labels[:len(close)], "returns": fwd}).dropna()
 
 
+def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
+                               use_abs: bool = False) -> tuple[float, float]:
+    """Population-weighted SD of per-state medians + the legacy max-min range.
+
+    Robustness motivation: ``max(median) - min(median)`` is dominated by the two
+    most extreme states' medians, ignoring how much population mass they carry.
+    Two small-population outlier states can inflate the range while the bulk of
+    the data sits in central states with near-identical medians. The weighted SD
+    discounts a small-population state proportional to its weight, so a 5%-mass
+    outlier contributes 5% of its squared deviation.
+
+    Parameters
+    ----------
+    diag : pd.DataFrame
+        Per-state diagnostic frame from a ``label_util`` mapper. Must carry
+        ``count`` (per-state bar count) and ``median_col`` (per-state median
+        of the axis target). May optionally carry ``insufficient_data`` — rows
+        flagged True are dropped before the computation.
+    median_col : str
+        Name of the per-state median column to use as the separation target.
+    use_abs : bool, default False
+        If True, compute statistics on ``|median|`` rather than signed median.
+        Used by the momentum evaluator's non-directional branch.
+
+    Returns
+    -------
+    (weighted_sd, raw_range) : tuple[float, float]
+        weighted_sd : population-weighted standard deviation (biased, sum-of-
+                      weights normalisation) of per-state medians; the new
+                      ``axis_separation``.
+        raw_range   : ``max - min`` of per-state medians; preserved as
+                      ``axis_separation_range`` for back-comparison.
+        Both are 0.0 when fewer than 2 states have a valid median.
+    """
+    if "count" not in diag.columns or median_col not in diag.columns:
+        return 0.0, 0.0
+    valid = diag.dropna(subset=[median_col])
+    if "insufficient_data" in valid.columns:
+        valid = valid[~valid["insufficient_data"]]
+    if len(valid) < 2:
+        return 0.0, 0.0
+    medians = valid[median_col].astype(float).to_numpy()
+    if use_abs:
+        medians = np.abs(medians)
+    counts = valid["count"].astype(float).to_numpy()
+    total = float(counts.sum())
+    if total <= 0:
+        return 0.0, 0.0
+    weights = counts / total
+    weighted_mean = float((weights * medians).sum())
+    weighted_var = float((weights * (medians - weighted_mean) ** 2).sum())
+    weighted_sd = float(np.sqrt(max(weighted_var, 0.0)))
+    raw_range = float(medians.max() - medians.min())
+    return weighted_sd, raw_range
+
+
 def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
                        horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
     """Direction axis: forward log-return median spread + count of conservatively-significant states.
@@ -55,12 +111,12 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         method="conservative", return_diagnostics=True)
     n_significant = sum(1 for v in mapping.values() if v != 0)
 
-    valid = diag.dropna(subset=["median"]) if "median" in diag.columns else diag.iloc[0:0]
-    sep = float(valid["median"].max() - valid["median"].min()) if len(valid) >= 2 else 0.0
+    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median")
     return AxisEvaluation(
-        axis_separation=sep,
+        axis_separation=weighted_sd,
         secondary_robustness=float(n_significant),
         secondary_label="n_significant_states",
+        axis_separation_range=raw_range,
         raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()}},
     )
 
@@ -84,24 +140,14 @@ def evaluate_momentum(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Dat
         method="robust", is_directional=is_directional, return_diagnostics=True,
     )
 
-    if "insufficient_data" in diag.columns:
-        valid = diag[~diag["insufficient_data"]]
-    else:
-        valid = diag.dropna(subset=["median"]) if "median" in diag.columns else diag.iloc[0:0]
-
-    if len(valid) >= 2 and "median" in valid.columns:
-        if is_directional:
-            sep = float(valid["median"].max() - valid["median"].min())
-        else:
-            sep = float(valid["median"].abs().max() - valid["median"].abs().min())
-    else:
-        sep = 0.0
-
+    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median",
+                                                         use_abs=not is_directional)
     n_distinct = len(set(mapping.values()))
     return AxisEvaluation(
-        axis_separation=sep,
+        axis_separation=weighted_sd,
         secondary_robustness=float(n_distinct),
         secondary_label="n_distinct_scores",
+        axis_separation_range=raw_range,
         raw_details={"horizon": primary_horizon, "is_directional": is_directional,
                      "mapping": {int(k): int(v) for k, v in mapping.items()}},
     )
@@ -137,17 +183,13 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
         method="median", return_diagnostics=True,
     )
 
-    if "median_vol" in diag.columns:
-        valid = diag.dropna(subset=["median_vol"])
-    else:
-        valid = diag.iloc[0:0]
-
-    sep = float(valid["median_vol"].max() - valid["median_vol"].min()) if len(valid) >= 2 else 0.0
+    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
     n_distinct = len(set(mapping.values()))
     return AxisEvaluation(
-        axis_separation=sep,
+        axis_separation=weighted_sd,
         secondary_robustness=float(n_distinct),
         secondary_label="n_distinct_buckets",
+        axis_separation_range=raw_range,
         raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()}},
     )
 
@@ -166,17 +208,13 @@ def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: 
     mapping, diag = map_regime_to_path_structure_score(df, regime_col="regime", method="id_chop",
                                                        return_diagnostics=True)
 
-    if "median_chop" in diag.columns:
-        valid = diag.dropna(subset=["median_chop"])
-    else:
-        valid = diag.iloc[0:0]
-
-    sep = float(valid["median_chop"].max() - valid["median_chop"].min()) if len(valid) >= 2 else 0.0
+    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_chop")
     n_distinct = len(set(mapping.values()))
     return AxisEvaluation(
-        axis_separation=sep,
+        axis_separation=weighted_sd,
         secondary_robustness=float(n_distinct),
         secondary_label="n_distinct_scores",
+        axis_separation_range=raw_range,
         raw_details={"mapping": {int(k): int(v) for k, v in mapping.items()}},
     )
 
@@ -236,13 +274,13 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         method="median", return_diagnostics=True,
     )
 
-    valid = diag.dropna(subset=["median_vol"]) if "median_vol" in diag.columns else diag.iloc[0:0]
-    sep = float(valid["median_vol"].max() - valid["median_vol"].min()) if len(valid) >= 2 else 0.0
+    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
     n_distinct = len(set(mapping.values()))
     return AxisEvaluation(
-        axis_separation=sep,
+        axis_separation=weighted_sd,
         secondary_robustness=float(n_distinct),
         secondary_label="n_distinct_buckets",
+        axis_separation_range=raw_range,
         raw_details={"horizon": primary_horizon, "volume_col": vol_col,
                      "polarity": "ascending = bucket 0 LEAST liquid (lowest forward volume), "
                                  "bucket k MOST liquid",

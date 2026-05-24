@@ -1,46 +1,30 @@
 from typing import List, Optional
 
-import numpy as np
 import pandas as pd
 
 from ._atr import atr, ttr_ema_ratio, atr_ratio, atr_sma_ratio
-from ._volatility import (
-    volatility_ratio, parkinson_volatility, volatility_signature,
-    garman_klass_volatility, rolling_volatility, realized_volatility,
-    realized_volatility_for_windows, realized_volatility_with_bipower_jump_variations,
-    rogers_satchell_volatility, yang_zhang_volatility, volume_weighted_volatility,
-    realized_volatility_window_with_bipower_jump_variations,
-    volatility_of_volatility, vov_normalized, volatility_term_structure,
-    gap_risk_ratio, trend_quality_ratio, overnight_ratio, jump_detection,
-)
+from ._volatility import volatility_ratio, parkinson_volatility, volatility_signature, garman_klass_volatility, \
+    rolling_volatility, realized_volatility, realized_volatility_for_windows, \
+    realized_volatility_with_bipower_jump_variations, rogers_satchell_volatility, yang_zhang_volatility, \
+    volume_weighted_volatility, realized_volatility_window_with_bipower_jump_variations, volatility_of_volatility, \
+    vov_normalized, volatility_term_structure, gap_risk_ratio, trend_quality_ratio, overnight_ratio, jump_detection
+
 from .quantile_based_volatility import quantile_based_volatility_labeling, optimize_quantile_based_volatility_labels
 
 
-def core_volatility_features(
-        df: pd.DataFrame,
-        window: int = 20,
-        long_window: int = 40,
-        short_window: int = 5,
+def core_volatility_features(df: pd.DataFrame, window: int = 20, long_window: int = 40, short_window: int = 5,
         # VoV parameters
         vov_window: int = 20,
         # ATR parameters
-        atr_period: int = 14,
-        atr_short_period: int = 7,
-        atr_sma_period: int = 20,
+        atr_period: int = 14, atr_short_period: int = 7, atr_sma_period: int = 20,
         # Jump detection parameters
         jump_threshold: float = 3.0,
         # Realized volatility parameters (require DatetimeIndex)
-        freq_minutes: int = 5,
-        trading_hours_per_day: float = 24.0,
-        trading_days_per_year: int = 252,
-        rv_windows: Optional[List[int]] = None,
+        freq_minutes: int = 5, trading_hours_per_day: float = 24.0, trading_days_per_year: int = 252,
+                             rv_windows: Optional[List[int]] = None,
         # Column names
-        open_col: str = "open",
-        high_col: str = "high",
-        low_col: str = "low",
-        close_col: str = "close",
-        volume_col: Optional[str] = None,
-) -> pd.DataFrame:
+        open_col: str = "open", high_col: str = "high", low_col: str = "low", close_col: str = "close",
+        volume_col: str = "tick_volume") -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
 
     open_price = df[open_col]

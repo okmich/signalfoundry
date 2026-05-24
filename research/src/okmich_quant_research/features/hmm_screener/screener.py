@@ -236,6 +236,7 @@ class HmmFeatureScreener:
                 honesty=honesty,
                 state_balance_ratio=balance_ratio,
                 pareto_status=ParetoStatus.DOMINATED,  # placeholder; set in _classify
+                axis_separation_range=axis_eval.axis_separation_range,
                 warnings=tuple(per_subset_warnings),
                 raw_details=axis_eval.raw_details,
                 elapsed_sec=float(time.time() - t0),
@@ -252,6 +253,7 @@ class HmmFeatureScreener:
                 honesty=float("nan"),
                 state_balance_ratio=float("nan"),
                 pareto_status=ParetoStatus.DOMINATED,
+                axis_separation_range=float("nan"),
                 warnings=tuple(per_subset_warnings),
                 raw_details={"traceback": traceback.format_exc()},
                 elapsed_sec=float(time.time() - t0),
@@ -363,7 +365,9 @@ class HmmFeatureScreener:
             secondary_robustness=ev.secondary_robustness,
             secondary_label=ev.secondary_label,
             honesty=ev.honesty, state_balance_ratio=ev.state_balance_ratio,
-            pareto_status=status, warnings=ev.warnings, raw_details=ev.raw_details,
+            pareto_status=status,
+            axis_separation_range=ev.axis_separation_range,
+            warnings=ev.warnings, raw_details=ev.raw_details,
             elapsed_sec=ev.elapsed_sec, error=ev.error,
         )
 
@@ -376,6 +380,7 @@ class HmmFeatureScreener:
                 "features": ",".join(ev.features),
                 "n_features": ev.n_features,
                 "axis_separation": ev.axis_separation,
+                "axis_separation_range": ev.axis_separation_range,
                 "secondary_robustness": ev.secondary_robustness,
                 "secondary_label": ev.secondary_label,
                 "honesty": ev.honesty,

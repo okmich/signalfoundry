@@ -1,16 +1,14 @@
 """
-C+GP+TS — Feature extraction and αDC/βDC labelling for the trend reversal
-prediction framework.
+C+GP+TS — Feature extraction and αDC/βDC labelling for the trend reversal prediction framework.
 
 Provides two public functions built on top of parse_dc_events() output:
 
   label_alpha_beta_dc   — adds dc_length, os_length, has_os columns
   extract_dc_classification_features — extracts X1–X5 per trend
 
-Each row i in parse_dc_events() represents a completed EXT→EXT trend whose
-existence was confirmed by a closing DCC (dcc_pos[i]).  The "DC event" that
-opens the *next* trend spans from ext_end_pos[i] to dcc_pos[i].  The
-overshoot of the next trend spans from dcc_pos[i] to ext_end_pos[i+1].
+Each row i in parse_dc_events() represents a completed EXT→EXT trend whose existence was confirmed by a closing DCC (dcc_pos[i]).
+The "DC event" that opens the *next* trend spans from ext_end_pos[i] to dcc_pos[i].  The overshoot of the next trend spans
+from dcc_pos[i] to ext_end_pos[i+1].
 
 Consequently:
 
@@ -18,9 +16,8 @@ Consequently:
   os_length[i] = ext_end_pos[i+1] - dcc_pos[i]  (overshoot of the next trend)
   has_os[i]    = os_length[i] > 0
 
-Features X1–X5 are computed at the closing DCC of row i (all values are
-available at that point with no look-ahead) and used to classify whether the
-next trend will have an overshoot.
+Features X1–X5 are computed at the closing DCC of row i (all values are available at that point with no look-ahead) and used
+to classify whether the next trend will have an overshoot.
 
 Reference: Adegboye & Kampouridis (2020) — Tables 2, 3; Section 3.
 """

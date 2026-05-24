@@ -2,7 +2,6 @@
 Validation tests for path_structure feature builders.
 
 Covers:
-  - Feature column names match the actual computation window (fix #5)
   - strict=True in core_path_structure_features propagates errors (fix #6)
   - Mutable default argument isolation (fix #11)
 """
@@ -12,10 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_features.path_structure import (
-    append_path_structure_features,
-    core_path_structure_features,
-)
+from okmich_quant_features.path_structure import core_path_structure_features
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -27,63 +23,6 @@ def _make_ohlcv(n=200, seed=42):
     low = close * (1 - rng.uniform(0.001, 0.005, n))
     idx = pd.date_range("2024-01-01", periods=n, freq="1h")
     return pd.DataFrame({"high": high, "low": low, "close": close}, index=idx)
-
-
-# ─── Fix #5: column name ↔ actual window consistency ─────────────────────────
-
-class TestFeatureNamingConsistency:
-
-    def test_hurst_column_uses_he_window(self):
-        """When he_window differs from window, column must be hurst_{he_window}."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, he_window=30,
-                                                zigzag_window=20)
-        assert "hurst_30" in result.columns, \
-            "Column should be 'hurst_30' when he_window=30"
-        assert "hurst_20" not in result.columns, \
-            "Column 'hurst_20' (fallback window) must NOT appear when he_window=30"
-
-    def test_hurst_column_falls_back_to_window(self):
-        """When he_window is None, column must be hurst_{window}."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, he_window=None,
-                                                zigzag_window=20)
-        assert "hurst_20" in result.columns
-
-    def test_trend_strength_column_uses_ts_window(self):
-        """Column names for trend_strength and detrend_strength reflect ts_window."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, ts_window=15,
-                                                zigzag_window=20)
-        assert "trend_strength_15" in result.columns
-        assert "detrend_strength_15" in result.columns
-        assert "trend_strength_20" not in result.columns
-        assert "detrend_strength_20" not in result.columns
-
-    def test_variance_ratio_column_uses_vr_window(self):
-        """Column name for variance_ratio reflects vr_window."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, vr_window=25,
-                                                zigzag_window=20)
-        assert "variance_ratio_25" in result.columns
-        assert "variance_ratio_20" not in result.columns
-
-    def test_atr_column_uses_choppiness_window(self):
-        """ATR column must be keyed by choppiness_window (its actual timeperiod)."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, choppiness_window=10,
-                                                zigzag_window=20)
-        assert "atr_10" in result.columns
-        assert "choppiness_index_10" in result.columns
-
-    def test_all_windows_default_to_window(self):
-        """When all optional windows are None, all columns use the main window."""
-        df = _make_ohlcv()
-        result = append_path_structure_features(df.copy(), window=20, zigzag_window=20)
-        assert "hurst_20" in result.columns
-        assert "trend_strength_20" in result.columns
-        assert "detrend_strength_20" in result.columns
-        assert "variance_ratio_20" in result.columns
 
 
 # ─── Fix #6: strict mode and exception surfacing ──────────────────────────────
@@ -138,9 +77,8 @@ class TestMutableDefaultIsolation:
         would persist across calls.
         """
         df = _make_ohlcv()
-        result1 = append_path_structure_features(df.copy(), zigzag_window=20)
-        result2 = append_path_structure_features(df.copy(), zigzag_window=20)
-        # Both results should have the same auto_corr columns
+        result1 = core_path_structure_features(df)
+        result2 = core_path_structure_features(df)
         ac_cols_1 = [c for c in result1.columns if c.startswith("auto_corr_")]
         ac_cols_2 = [c for c in result2.columns if c.startswith("auto_corr_")]
         assert ac_cols_1 == ac_cols_2
