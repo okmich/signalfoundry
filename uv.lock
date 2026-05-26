@@ -2488,7 +2488,9 @@ name = "okmich-quant-pipeline"
 version = "0.1.0"
 source = { editable = "pipeline" }
 dependencies = [
+    { name = "joblib" },
     { name = "numpy" },
+    { name = "okmich-quant-core" },
     { name = "okmich-quant-features" },
     { name = "okmich-quant-ml" },
     { name = "okmich-quant-utils" },
@@ -2498,7 +2500,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "joblib", specifier = ">=1.3" },
     { name = "numpy", specifier = ">=2.3.5" },
+    { name = "okmich-quant-core", editable = "core" },
     { name = "okmich-quant-features", editable = "features" },
     { name = "okmich-quant-ml", editable = "ml" },
     { name = "okmich-quant-utils", editable = "utils" },

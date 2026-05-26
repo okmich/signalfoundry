@@ -1,6 +1,7 @@
 from .base_strategy import BaseStrategy
 from .filter import BaseFilter, FilterChain
 from .health import StrategyHealth
+from .logging import BaseInferenceLogger, InferenceLogRecord, JsonlInferenceLogger
 from .multi_trader import MultiTrader
 from .notification import BaseNotifier, Telegram, TelegramNotifier
 from .position_manager import BasePositionManager

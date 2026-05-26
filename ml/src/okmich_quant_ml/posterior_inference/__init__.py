@@ -31,8 +31,13 @@ from .features import dwell_length, entropy, margin, posterior_delta, rolling_en
     rolling_max_prob_std, step_kl, top_prob
 from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, ConfidenceHysteresisInferer,\
     ConfidenceWeightedModeInferer, EntropyGateInferer, MarginGateInferer, StabilityGateInferer, ViterbiInferer
-from .monitoring import PosteriorHealthBaselines, PosteriorHealthReport, entropy_staleness,\
-    fit_posterior_health_baselines, flip_rate_drift, score_posterior_health, state_occupancy_drift
+from .monitoring import FeatureHealthBaselines, FeatureHealthReport, LoglikDriftBaselines, LoglikDriftReport,\
+    PosteriorHealthBaselines, PosteriorHealthReport, RefitAuditReport, RefitMetricVerdict, audit_refit_metrics,\
+    entropy_staleness, feature_ks_drift, fit_feature_health_baselines, fit_loglik_drift_baselines,\
+    fit_posterior_health_baselines, flip_rate_drift, log_likelihood_drift, score_feature_health, score_loglik_health,\
+    score_posterior_health, state_occupancy_drift
+from .monitoring_io import InferenceLogFrame, MonitoringCycleReport,\
+    load_posterior_and_loglik_baselines_from_metadata, read_inference_log, run_streaming_gates
 
 from .pipeline import PosteriorPipeline
 from .protocols import PosteriorInferer, PosteriorTransformer
@@ -79,6 +84,24 @@ __all__ = [
     "flip_rate_drift",
     "fit_posterior_health_baselines",
     "score_posterior_health",
+    "FeatureHealthBaselines",
+    "FeatureHealthReport",
+    "feature_ks_drift",
+    "fit_feature_health_baselines",
+    "score_feature_health",
+    "LoglikDriftBaselines",
+    "LoglikDriftReport",
+    "log_likelihood_drift",
+    "fit_loglik_drift_baselines",
+    "score_loglik_health",
+    "RefitMetricVerdict",
+    "RefitAuditReport",
+    "audit_refit_metrics",
+    "InferenceLogFrame",
+    "MonitoringCycleReport",
+    "read_inference_log",
+    "run_streaming_gates",
+    "load_posterior_and_loglik_baselines_from_metadata",
     "DynamicsReport",
     "CalibrationReport",
     "SmoothingRecommendation",

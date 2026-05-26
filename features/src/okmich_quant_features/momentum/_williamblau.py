@@ -16,6 +16,42 @@ def _ema(values: np.ndarray, period: int):
     return np.asarray(out, dtype=float)
 
 
+def _validate_periods(**periods: int) -> None:
+    """
+    Raise ``ValueError`` if any keyword value is not a positive integer (>= 1).
+
+    Called at the top of every public function in this module to surface bad
+    period arguments with a clear message, rather than letting a `span=0`
+    propagate into a cryptic pandas/talib error downstream.
+    """
+    for name, val in periods.items():
+        if not isinstance(val, (int, np.integer)) or val < 1:
+            raise ValueError(f"{name} must be a positive integer (>= 1), got {name}={val!r}")
+
+
+def _validate_aligned(**series: pd.Series) -> None:
+    """
+    Raise ``ValueError`` if the input ``pd.Series`` arguments do not share the
+    same index.
+
+    Pandas otherwise silently aligns by index and produces NaN gaps where
+    indices don't overlap — a plausible-looking but corrupted result. This
+    check is called at the top of every multi-Series function (SMI / DTI /
+    DEI / TVI) so callers get a clear error instead of garbage.
+    """
+    items = list(series.items())
+    if len(items) < 2:
+        return
+    ref_name, ref = items[0]
+    ref_idx = ref.index
+    for name, s in items[1:]:
+        if not ref_idx.equals(s.index):
+            raise ValueError(
+                f"index mismatch: {ref_name!r} and {name!r} must share the same index "
+                f"(lengths {len(ref_idx)} vs {len(s.index)})"
+            )
+
+
 def triple_ema(series: pd.Series, p1: int = 1, p2: int = 1, p3: int = 1) -> pd.Series:
     if p1 == 1:
         e1 = series
@@ -64,6 +100,11 @@ Tuple[pd.Series, pd.Series, pd.Series], Tuple[np.ndarray, np.ndarray, np.ndarray
         If input was pd.Series returns tuple of series with columns ['tsi', 'tsi_signal', 'tsi_Diff']
         Otherwise returns tuple (tsi_array, signal_array, diff_array)
     """
+    # --- Validate periods (signal=0 is a backward-compatible "skip" sentinel) ---
+    _validate_periods(r=r, s=s)
+    if signal not in (None, 0):
+        _validate_periods(signal=signal)
+
     # --- Normalize input to numpy array, preserve index if pandas Series ---
     idx, x = ensure_numpy_types_for_series(series)
 
@@ -113,8 +154,7 @@ Tuple[pd.Series, pd.Series, pd.Series], Tuple[np.ndarray, np.ndarray, np.ndarray
             tmp = tmp.fillna(0)
             tsi = tmp["TSI"].to_numpy()
             if sig is not None:
-                tmp2 = pd.Series(sig).fillna(method="ffill").fillna(0)
-                sig = tmp2.to_numpy()
+                sig = pd.Series(sig).ffill().fillna(0).to_numpy()
 
     if idx is not None:
         tsi = pd.Series(index=idx, data=tsi, name="tsi")
@@ -125,7 +165,9 @@ Tuple[pd.Series, pd.Series, pd.Series], Tuple[np.ndarray, np.ndarray, np.ndarray
             tsi_diff = pd.Series(index=idx, data=tsi - tsi_signal, name="tsi_diff")
         return tsi, tsi_signal, tsi_diff
     else:
-        return tsi, sig, tsi - signal
+        if sig is None:
+            return tsi, None, None
+        return tsi, sig, tsi - sig
 
 
 def slope_divergence_tsi(series: pd.Series, r: int = 25, s: int = 13, signal: int = 7,
@@ -156,6 +198,9 @@ def slope_divergence_tsi(series: pd.Series, r: int = 25, s: int = 13, signal: in
     Tuple of pd.Series
         Columns: ["tsi", "tsi_signal", "tsi_diff", "tsi_slope", "bullish_div", "bearish_div"]
     """
+    _validate_periods(slope_period=slope_period)
+    # (r, s, signal validated downstream by true_strength_index)
+
     # get TSI
     tsi, tsi_signal, tsi_diff = true_strength_index(series, r=r, s=s, signal=signal, as_percent=True,
                                                     is_series_returns=is_series_returns)
@@ -209,6 +254,9 @@ def stochastic_momentum_index(high: pd.Series, low: pd.Series, close: pd.Series,
     Tuple of pd.Series
         Columns: ["smi", "smi_signal", "smi_diff]
     """
+    _validate_periods(k_period=k_period, r=r, s=s, signal=signal)
+    _validate_aligned(high=high, low=low, close=close)
+
     # midpoint of high-low range
     hl_mid = (high + low) / 2
 
@@ -266,6 +314,11 @@ def directional_trend_index(high: pd.Series, low: pd.Series, q: int = 2, r: int 
       dti_diff : pd.Series or None
         dti - dti_signal if signal provided else None.
     """
+    _validate_periods(q=q, r=r, s=s, u=u)
+    if signal is not None:
+        _validate_periods(signal=signal)
+    _validate_aligned(high=high, low=low)
+
     # --- HMU and LMD definitions per Blau ---
     # HMU(q) = High - High.shift(q-1) if positive else 0
     # LMD(q) = -(Low - Low.shift(q-1)) if negative else 0
@@ -395,6 +448,9 @@ def directional_efficiency_index(high: pd.Series, low: pd.Series, close: pd.Seri
     with Blau's original DTI.
     """
 
+    _validate_periods(r=r, s=s, signal=signal)
+    _validate_aligned(high=high, low=low, close=close)
+
     # --- Directional Movement ---
     dm = close.diff()
 
@@ -419,3 +475,76 @@ def directional_efficiency_index(high: pd.Series, low: pd.Series, close: pd.Seri
     dei_diff = dei - dei_signal
 
     return dei, dei_signal, dei_diff
+
+
+def tick_volume_indicator(open_: pd.Series, close: pd.Series, volume: pd.Series, period: int = 25,
+                          smoothing: int = 13, signal: int = 5,
+                          as_percent: bool = False) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    William Blau's Ergodic Tick Volume Indicator (TVI).
+
+    Volume-based momentum oscillator. Per-bar volume is split into up / down streams by the sign of the body (close - open),
+    then each stream is double-EMA smoothed and combined in an ergodic (bounded) ratio:
+
+        UpVol_t   = volume_t  if close_t >  open_t  else  0
+        DownVol_t = volume_t  if close_t <= open_t  else  0
+
+        dbl_up   = EMA(EMA(UpVol,   period), smoothing)
+        dbl_down = EMA(EMA(DownVol, period), smoothing)
+
+        TVI    = (dbl_up - dbl_down) / (dbl_up + dbl_down)      # bounded in [-1, +1]
+        signal = EMA(TVI, signal)
+
+    Output is bounded in [-1, +1] by construction (or [-100, +100] when ``as_percent=True``), making it scale-free across
+    assets and timeframes and composable with other unit-scale oscillators / tanh-bounded ML inputs.
+
+    Parameters
+    ----------
+    open_, close, volume : pd.Series
+        OHLC + volume series, aligned on the same index. On FX / CFD bars, `volume` is tick volume (tick count) and the
+        indicator measures directional activity, not capital flow; on equities / crypto it is true volume.
+    period : int, default 25
+        Inner EMA span on each (up / down) volume stream.
+    smoothing : int, default 13
+        Outer EMA span (the second smoothing pass that makes the indicator "ergodic" — TSI-style).
+    signal : int, default 5
+        EMA span applied to the TVI line to produce the signal line.
+    as_percent : bool, default False
+        If True, multiply by 100 to recover the classic [-100, +100] scale matching the MT5 indicator and Blau's published form
+        (useful for plotting / charting parity). Default False returns the unscaled ratio in [-1, +1], which is friendlier for
+        ML inputs and composes cleanly with other bounded oscillators in the feature set.
+
+    Returns
+    -------
+    (tvi, tvi_signal, tvi_diff) : Tuple[pd.Series, pd.Series, pd.Series]
+        - tvi        : raw indicator in [-1, +1]  (or [-100, +100] if as_percent)
+        - tvi_signal : EMA(tvi, signal)
+        - tvi_diff   : tvi - tvi_signal
+
+    Notes
+    -----
+    Doji tie-break: bars with close == open are bucketed into the *down* stream. This matches the original MT5 source convention
+    (`close <= open` → down).
+
+    References
+    ----------
+    William Blau, "Momentum, Direction, and Divergence" (1995).
+    """
+    _validate_periods(period=period, smoothing=smoothing, signal=signal)
+    _validate_aligned(open_=open_, close=close, volume=volume)
+
+    is_down = (close <= open_)
+    up_vol = volume.where(~is_down, 0.0)
+    down_vol = volume.where(is_down, 0.0)
+
+    ema_up = up_vol.ewm(span=period, adjust=False).mean()
+    ema_down = down_vol.ewm(span=period, adjust=False).mean()
+    dbl_up = ema_up.ewm(span=smoothing, adjust=False).mean()
+    dbl_down = ema_down.ewm(span=smoothing, adjust=False).mean()
+
+    denom = (dbl_up + dbl_down).replace(0, np.nan)
+    scale = 100.0 if as_percent else 1.0
+    tvi = (scale * (dbl_up - dbl_down) / denom).fillna(0.0).rename("tvi")
+    tvi_signal = tvi.ewm(span=signal, adjust=False).mean().rename("tvi_signal")
+    tvi_diff = (tvi - tvi_signal).rename("tvi_diff")
+    return tvi, tvi_signal, tvi_diff

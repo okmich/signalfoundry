@@ -12,7 +12,7 @@ from ._misc import rolling_high_proximity, high_proximity, session_high_low_pct,
     lagged_delta_returns, pr_skip, sustained_velocity, exponential_velocity
 
 from ._williamblau import true_strength_index, stochastic_momentum_index, slope_divergence_tsi, \
-    directional_trend_index, directional_efficiency_index
+    directional_trend_index, directional_efficiency_index, tick_volume_indicator
 
 from .david_varadi import aggregate_m, aggregate_m_components, dvo, dv2
 

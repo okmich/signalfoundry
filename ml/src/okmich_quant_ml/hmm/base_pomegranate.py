@@ -471,6 +471,72 @@ class BasePomegranateHMM(ABC):
 
         return log_pi, log_A, log_B
 
+    @staticmethod
+    def _forward_pass(log_pi: np.ndarray, log_A: np.ndarray, log_B: np.ndarray) -> np.ndarray:
+        """Standard HMM forward-algorithm log-alpha, shape ``(T, K)``.
+
+        Initialises ``log_alpha[0] = log_pi + log_B[0]`` and recurses
+        ``log_alpha[t] = logaddexp_reduce(log_alpha[t-1, :, None] + log_A, axis=0) + log_B[t]``.
+        Uses ``np.logaddexp.reduce`` on the inner ``(K, K)`` slice (faster than
+        scipy ``logsumexp`` per step and handles ``-inf`` transitions correctly).
+
+        Centralised so that any change to the forward-pass numerics propagates
+        consistently to ``predict_proba_fixed_lag``, ``predict_proba_fixed_lag_sweep``,
+        and ``compute_per_bar_predictive_loglik``.
+        """
+        T, K = log_B.shape
+        log_alpha = np.empty((T, K), dtype=np.float64)
+        log_alpha[0] = log_pi + log_B[0]
+        for t in range(1, T):
+            log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+        return log_alpha
+
+    def compute_per_bar_predictive_loglik(self, X: np.ndarray) -> np.ndarray:
+        """Per-bar predictive log-likelihood under the fitted model, shape ``(T,)``.
+
+        Returns ``log P(o_t | o_{1:t-1}, model)`` for each bar ``t`` via the
+        forward algorithm:
+
+          * ``loglik[0] = logsumexp(log_alpha[0])``                — ``log P(o_0)`` (special case)
+          * ``loglik[t] = logsumexp(log_alpha[t]) - logsumexp(log_alpha[t-1])`` for ``t >= 1``
+
+        The sum ``loglik.sum()`` equals the joint log-likelihood
+        ``log P(o_{1:T} | model)``. No sign assumption: continuous-density
+        emissions can produce positive log-density values.
+
+        Designed for live drift monitoring
+        (``okmich_quant_ml.posterior_inference.score_loglik_health``): the
+        matured bar's contribution can be emitted per inference cycle so the
+        monitor sees how well the model is generatively describing recent
+        observations.
+
+        Rejects NaN/Inf in ``X`` at the validation gate consistent with the
+        rest of the public surface.
+        """
+        if self._model is None:
+            raise RuntimeError(
+                "Model has not been fitted. Call fit() before compute_per_bar_predictive_loglik()."
+            )
+        X = np.asarray(X)
+        if X.size == 0:
+            raise ValueError("X must not be empty")
+        if not np.all(np.isfinite(X)):
+            raise ValueError(
+                "X contains NaN or Inf values. Clean input data before calling "
+                "compute_per_bar_predictive_loglik."
+            )
+        X = self._preprocess_input(X)
+
+        log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+        log_alpha = self._forward_pass(log_pi, log_A, log_B)
+
+        log_cumulative = logsumexp(log_alpha, axis=1)
+        T = log_alpha.shape[0]
+        loglik = np.empty(T, dtype=np.float64)
+        loglik[0] = log_cumulative[0]
+        loglik[1:] = np.diff(log_cumulative)
+        return loglik
+
     def predict_proba_fixed_lag(self, X: np.ndarray, lag: int) -> np.ndarray:
         """Fixed-lag posterior probabilities with streaming/open-end semantics. Shape (T, n_states).
 
@@ -521,18 +587,10 @@ class BasePomegranateHMM(ABC):
 
         Callers must pass preprocessed X (via _preprocess_input).
         """
-        from scipy.special import logsumexp
-
         log_pi, log_A, log_B = self._extract_hmm_parameters(X)
         T, K = log_B.shape
 
-        # --- Forward pass (single sequential pass over full sequence) ---
-        # np.logaddexp.reduce replaces scipy.logsumexp on the tiny (K,K) slice;
-        # it handles -inf transitions correctly and avoids per-step Python dispatch overhead.
-        log_alpha = np.empty((T, K), dtype=np.float64)
-        log_alpha[0] = log_pi + log_B[0]
-        for t in range(1, T):
-            log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+        log_alpha = self._forward_pass(log_pi, log_A, log_B)
 
         # --- Vectorized backward sweep via diagonal recurrence ---
         # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])
@@ -592,8 +650,6 @@ class BasePomegranateHMM(ABC):
         dict[int, np.ndarray]
             Mapping from lag to (T, K) posterior matrix.
         """
-        from scipy.special import logsumexp
-
         if self._model is None:
             raise RuntimeError("Model has not been fitted. Call fit() before predict_proba_fixed_lag_sweep().")
 
@@ -655,10 +711,7 @@ class BasePomegranateHMM(ABC):
             log_pi, log_A, log_B = self._extract_hmm_parameters(X)
             T, K = log_B.shape
 
-            log_alpha = np.empty((T, K), dtype=np.float64)
-            log_alpha[0] = log_pi + log_B[0]
-            for t in range(1, T):
-                log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+            log_alpha = self._forward_pass(log_pi, log_A, log_B)
 
             # Incremental vectorized backward sweep via diagonal recurrence.
             # Recurrence: log_beta[t, L] = backward_step(log_B[t+1], log_beta[t+1, L-1])

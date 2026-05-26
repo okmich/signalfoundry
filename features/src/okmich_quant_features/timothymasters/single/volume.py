@@ -12,8 +12,8 @@ Indicators
 25. money_flow            Intraday intensity divided by mean volume (Chaikin): COMP_VAR.CPP:1058–1123
 26. price_volume_fit      OLS slope of log(close) on log(volume+1), CDF-compressed: COMP_VAR.CPP:1196–1237
 27. vwma_ratio            Log ratio of VWAP to simple average price, sqrt-scaled: COMP_VAR.CPP:1244–1277
-28. normalized_obv        Signed-volume ratio normalised by total volume: COMP_VAR.CPP:1284–1333
-29. delta_obv             Difference of normalised OBV over a lag period: COMP_VAR.CPP:1284–1333
+28. normalized_obv        Signed-volume ratio normalized by total volume: COMP_VAR.CPP:1284–1333
+29. delta_obv             Difference of normalized OBV over a lag period: COMP_VAR.CPP:1284–1333
 30. normalized_pvi        Sum of log-returns on rising-volume bars, volatility-scaled: COMP_VAR.CPP:1340–1386
 31. normalized_nvi        Sum of log-returns on falling-volume bars, volatility-scaled: COMP_VAR.CPP:1340–1386
 32. volume_momentum       Log ratio of short to long average volume, cube-root-scaled: COMP_VAR.CPP:1393–1437

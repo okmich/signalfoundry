@@ -164,6 +164,20 @@ class HmmModelWrapper:
         inferred = self.posterior_pipeline.run(probs)
         return probs, inferred
 
+    def compute_per_bar_predictive_loglik(self, data: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """Per-bar predictive log-likelihood under the wrapped HMM, shape ``(T,)``.
+
+        Applies the persisted transform pipeline to ``data`` then delegates to
+        ``model.compute_per_bar_predictive_loglik``. The matured bar's value
+        (``[-(fixed_lag + 1)]`` for fixed-lag use, ``[-1]`` for filtering) is
+        the right scalar to emit to the live inference log for the loglik
+        drift monitor (``score_loglik_health``); the full series is returned
+        for flexibility.
+        """
+        _features = data if isinstance(data, np.ndarray) else data.values
+        transformed_features = self.transform_pipeline.transform(_features)
+        return self.model.compute_per_bar_predictive_loglik(transformed_features)
+
     def validate_fixed_lag_alignment(self, asof_timestamp: Any, label_timestamp: Any, bar_timedelta: Any) -> None:
         """Validate fixed-lag as-of alignment: label_timestamp must equal asof_timestamp - L * bar_timedelta."""
         if not self.use_fixed_lag_posterior:
