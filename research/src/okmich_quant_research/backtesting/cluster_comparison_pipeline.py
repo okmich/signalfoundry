@@ -57,6 +57,32 @@ HMM_ALGOS = [
 
 CLUSTERING_ALGOS = CLUSTERING_ALGOS_STANDARD + HMM_ALGOS
 
+def _safe_predict_proba(name, model, X):
+    """Return the ``(T, K)`` posterior matrix for a fitted model, or ``None`` when it has no posterior.
+
+    Soft assignments are only defined for ``gmm`` (mixture responsibilities) and HMMs run in a non-Viterbi inference
+    mode (Viterbi is a MAP path, not a marginal posterior). Hard clusterers (kmeans, agglomerative, dbscan) return
+    ``None``. A failure here degrades gracefully to ``None`` so it never costs the hard labels.
+    """
+    try:
+        if name == "gmm":
+            return model.predict_proba(X)
+        if name.startswith("hmm"):
+            if getattr(model, "inference_mode", None) == InferenceMode.VITERBI:
+                return None
+            return model.predict_proba(X.values)
+    except Exception:
+        return None
+    return None
+
+
+def _write_posterior_columns(df, prefix, name, probs):
+    """Write per-state posterior columns ``{prefix}{name}_s{k}`` aligned to ``df`` rows; no-op when ``probs`` is None."""
+    if probs is None:
+        return
+    for k in range(probs.shape[1]):
+        df[f"{prefix}{name}_s{k}"] = probs[:, k]
+
 
 def _train_single_model(name, model, X, sym, label_column_prefix):
     try:
@@ -70,6 +96,9 @@ def _train_single_model(name, model, X, sym, label_column_prefix):
             labels = model.fit(X).labels_.astype(np.int32)
             silhouette_features = X
 
+        # Posterior (soft) assignments, where the model/mode supports them — emitted alongside the hard labels.
+        probs = _safe_predict_proba(name, model, X)
+
         # Compute silhouette score (only if >1 cluster and no noise)
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         sil_score = None
@@ -77,16 +106,16 @@ def _train_single_model(name, model, X, sym, label_column_prefix):
             if silhouette_features is not None:
                 sil_score = silhouette_score(silhouette_features, labels)
 
-        return name, model, labels, sil_score, n_clusters, None  # Return fitted model!
+        return name, model, labels, probs, sil_score, n_clusters, None  # Return fitted model!
     except Exception as e:
-        return name, None, None, None, None, str(e)
+        return name, None, None, None, None, None, str(e)
 
 
 class ClusteringComparisonPipelineConfig:
     def __init__(self, input_dir=".", output_dir=".", should_dim_reduce=True, should_scale=True, should_resample=True,
                  should_save_output_df=True, should_fit_cluster=True, columns_to_scale=None,
                  columns_scaling_exclude: List[str] = None, timeframe: str = "15min", symbols: List[str] = None,
-                 label_column_prefix="lbl_", mm_n_components: int = 2, data_size: int = -1,
+                 label_column_prefix="lbl_", posterior_column_prefix="post_", mm_n_components: int = 2, data_size: int = -1,
                  training_set_pct: float = 0.75, append_excluded_col_in_result: bool = False, clustering_algos: List[str] = None,
                  offline_labelling_mode: bool = False, inference_mode: InferenceMode = None):
         self.should_dim_reduce = should_dim_reduce
@@ -95,6 +124,7 @@ class ClusteringComparisonPipelineConfig:
         self.should_fit_cluster = should_fit_cluster
         self.save_output_df = should_save_output_df
         self.label_column_prefix = label_column_prefix
+        self.posterior_column_prefix = posterior_column_prefix
         self.columns_to_scale = columns_to_scale if columns_to_scale else []
         self.columns_scaling_exclude = (
             columns_scaling_exclude
@@ -316,12 +346,13 @@ class ClusteringComparisonPipeline:
         # Process results and update dataframe
         successful_models = 0
         failed_models = []
-        for name, fitted_model, labels, sil_score, n_clusters, error in results:
+        for name, fitted_model, labels, probs, sil_score, n_clusters, error in results:
             if error is None and labels is not None:
                 # Store the fitted model back into cluster_algorithms
                 self.cluster_algorithms[name] = fitted_model
 
                 df[f"{self.pipeline_config.label_column_prefix}{name}"] = labels
+                _write_posterior_columns(df, self.pipeline_config.posterior_column_prefix, name, probs)
                 if sil_score is not None:
                     self.algo_silhouette_scores[name] = sil_score
                     print(
@@ -362,6 +393,7 @@ class ClusteringComparisonPipeline:
                 silhouette_features = X
 
             df[f"{self.pipeline_config.label_column_prefix}{model_key}"] = labels
+            _write_posterior_columns(df, self.pipeline_config.posterior_column_prefix, model_key, probs)
 
             # Compute silhouette score (only if >1 cluster and no noise)
             n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
