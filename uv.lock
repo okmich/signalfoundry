@@ -2302,7 +2302,7 @@ requires-dist = [
 
 [[package]]
 name = "okmich-quant-features"
-version = "2.4.0"
+version = "0.4.0"
 source = { editable = "features" }
 dependencies = [
     { name = "matplotlib" },
@@ -2365,7 +2365,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "okmich-quant-labelling"
-version = "2.2.0"
+version = "0.2.0"
 source = { editable = "labelling" }
 dependencies = [
     { name = "matplotlib" },
@@ -2450,7 +2450,7 @@ requires-dist = [
 
 [[package]]
 name = "okmich-quant-neural-net"
-version = "1.2.0"
+version = "0.7.0"
 source = { editable = "neural-net" }
 dependencies = [
     { name = "h5py" },
@@ -2514,7 +2514,7 @@ requires-dist = [
 
 [[package]]
 name = "okmich-quant-research"
-version = "3.7.0"
+version = "0.4.0"
 source = { editable = "research" }
 dependencies = [
     { name = "arch" },

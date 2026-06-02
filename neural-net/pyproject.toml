@@ -1,6 +1,6 @@
 [project]
 name = "okmich-quant-neural-net"
-version = "1.2.0"
+version = "0.7.0"
 description = "Deep learning models for price prediction"
 requires-python = ">=3.12"
 dependencies = [

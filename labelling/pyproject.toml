@@ -1,6 +1,6 @@
 [project]
 name = "okmich-quant-labelling"
-version = "2.2.0"
+version = "0.2.0"
 description = "Target variable creation and labeling strategies"
 requires-python = ">=3.12"
 dependencies = [

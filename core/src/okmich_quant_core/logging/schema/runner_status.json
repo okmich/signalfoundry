@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "okmich_quant_core/logging/schema/runner_status.json",
-  "title": "Runner status file (v1.0.0)",
-  "description": "Per-logical-system runner lifecycle status (LOGGING_CONTRACT runner-lifecycle channel). A single last-write-wins JSON at <log_base>/<strategy>/<symbol>/<timeframe>/status.json, written atomically at startup (state=running) and shutdown (state=stopped + proven broker_disconnected). The Supervisor reads it directly for clean-stop proof and restart detection; it is NOT a JSONL log record.",
+  "title": "Runner status file (v1.1.0)",
+  "description": "Runner-scoped lifecycle status (LOGGING_CONTRACT runner-lifecycle channel). ONE last-write-wins JSON per runner at <log_base>/<strategy>/status.json (<strategy>-multi for a multi-trader) — at the runner root, NOT mirrored per logical system; the runner's symbols are listed in logical_systems[]. Written atomically at startup (state=running) and shutdown (state=stopped + proven broker_disconnected). The Supervisor reads it directly for clean-stop proof and restart detection; it is NOT a JSONL log record.",
   "type": "object",
   "properties": {
     "log_schema_version": {"type": "string"},

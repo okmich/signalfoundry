@@ -21,7 +21,12 @@ from okmich_quant_core.logging.base import (
     load_schema,
     record_from_dict,
 )
-from okmich_quant_core.logging.identity import LogRootConfigError, LogicalSystemIdentity, RunnerIdentity
+from okmich_quant_core.logging.identity import (
+    IdentityTokenError,
+    LogRootConfigError,
+    LogicalSystemIdentity,
+    RunnerIdentity,
+)
 from okmich_quant_core.logging.jsonl import JsonlEventLogger
 from okmich_quant_core.logging.runner_status import RunnerStatus
 
@@ -50,7 +55,7 @@ def sys_factory(runner, logical) -> SystemRecordFactory:
 
 def _validate(record) -> dict:
     payload = record.to_dict()
-    jsonschema.validate(payload, load_schema(record.envelope.event))
+    jsonschema.validate(payload, load_schema(record.envelope.event), format_checker=jsonschema.FormatChecker())
     return payload
 
 
@@ -189,11 +194,11 @@ def test_retired_logging_names_raise_migration_error():
 
 def test_runner_status_writes_running_then_stopped(runner, logical, tmp_path):
     rs = RunnerStatus(runner, [logical], log_base=tmp_path, pid=4321, library_versions={"okmich-quant-core": "0.7.0"})
-    status_path = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "status.json"
+    status_path = tmp_path / "deriv_hmm_posterior" / "status.json"
 
     rs.mark_started()
     running = json.loads(status_path.read_text(encoding="utf-8"))
-    jsonschema.validate(running, load_schema("runner_status"))
+    jsonschema.validate(running, load_schema("runner_status"), format_checker=jsonschema.FormatChecker())
     assert running["state"] == "running"
     assert running["runner_id"] == runner.runner_id and running["pid"] == 4321
     assert running["broker_disconnected"] is None and running["started_at"]
@@ -201,7 +206,7 @@ def test_runner_status_writes_running_then_stopped(runner, logical, tmp_path):
 
     rs.mark_stopped(broker_disconnected=True, clean=True, reason="operator_stop")
     stopped = json.loads(status_path.read_text(encoding="utf-8"))
-    jsonschema.validate(stopped, load_schema("runner_status"))
+    jsonschema.validate(stopped, load_schema("runner_status"), format_checker=jsonschema.FormatChecker())
     assert stopped["state"] == "stopped"
     assert stopped["broker_disconnected"] is True and stopped["clean"] is True
     assert stopped["reason"] == "operator_stop" and stopped["stopped_at"]
@@ -209,14 +214,77 @@ def test_runner_status_writes_running_then_stopped(runner, logical, tmp_path):
     assert not list(status_path.parent.glob("*.tmp"))
 
 
-def test_runner_status_multi_system_writes_each_path(runner, tmp_path):
-    a = LogicalSystemIdentity(strategy="hmm", symbol="EURUSD", timeframe_minutes=5)
-    b = LogicalSystemIdentity(strategy="hmm", symbol="GBPUSD", timeframe_minutes=5)
+def test_runner_status_multi_system_writes_one_file_at_runner_root(runner, tmp_path):
+    # A multi-system runner writes ONE status.json at the runner root (the shared strategy), NOT one
+    # per logical system (LOGGING_CONTRACT §7.1). The symbols are enumerated inside logical_systems[].
+    a = LogicalSystemIdentity(strategy="hmm-multi", symbol="EURUSD", timeframe_minutes=5)
+    b = LogicalSystemIdentity(strategy="hmm-multi", symbol="GBPUSD", timeframe_minutes=5)
     rs = RunnerStatus(runner, [a, b], log_base=tmp_path)
     rs.mark_started()
-    for sym in ("EURUSD", "GBPUSD"):
-        p = tmp_path / "hmm" / sym / "5" / "status.json"
-        assert p.is_file() and json.loads(p.read_text(encoding="utf-8"))["state"] == "running"
+    root = tmp_path / "hmm-multi" / "status.json"
+    assert root.is_file()
+    payload = json.loads(root.read_text(encoding="utf-8"))
+    assert payload["state"] == "running"
+    assert {ls["symbol"] for ls in payload["logical_systems"]} == {"EURUSD", "GBPUSD"}
+    # NOT mirrored into the per-symbol paths
+    assert not (tmp_path / "hmm-multi" / "EURUSD" / "5" / "status.json").exists()
+    assert not (tmp_path / "hmm-multi" / "GBPUSD" / "5" / "status.json").exists()
+
+
+# --------------------------------------------------------------------------------------
+# JsonlEventLogger — close() must not race a still-alive writer's handle
+# --------------------------------------------------------------------------------------
+
+def test_close_does_not_race_handle_when_writer_still_alive(logical, runner, tmp_path, monkeypatch):
+    """If the bar-writer is still alive when close() finishes joining, close() MUST NOT close/reset the
+    handle: the live writer could dequeue a remaining record and reopen/write via _write_line_locked
+    AFTER close() returns (leaking a live writer + handle, reopening a file post-close). It abandons the
+    daemon writer + handle to OS cleanup instead of racing it."""
+    logger = JsonlEventLogger(logical, log_base=tmp_path, fsync=False)
+    binding = LogBinding(logical, logger)
+    binding.bind(runner)
+    logger.write(binding.system_factory().bar(asof_bar_ts="2026-06-01T11:55:00+00:00", outcome=BarOutcome.OK))
+    logger.drain()                              # handle now open + _current_date set
+    handle = logger._current_handle
+    assert handle is not None
+    # Force the "writer still alive after join" branch (the between-records race window) deterministically.
+    monkeypatch.setattr(logger._writer, "is_alive", lambda: True)
+    logger.close(drain_timeout=0.01)
+    assert logger._closed is True
+    assert logger._current_handle is handle     # left intact for the live writer — NOT closed/reset
+    handle.close()                              # test cleanup (the real writer already exited via the sentinel)
+
+
+# --------------------------------------------------------------------------------------
+# identity token validation + LogBinding re-bind guard (review hardening)
+# --------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", ["", "   ", ".", "..", "a<b", 'a"b', "a:b", "a|b", "a?b", "a*b"])
+def test_identity_rejects_unsafe_tokens(bad):
+    with pytest.raises(IdentityTokenError):
+        LogicalSystemIdentity(strategy=bad, symbol="EURUSD", timeframe_minutes=5)
+    with pytest.raises(IdentityTokenError):
+        LogicalSystemIdentity(strategy="hmm", symbol=bad, timeframe_minutes=5)
+
+
+def test_identity_allows_mid_dot_and_sanitises_separators():
+    # mid-token dots ('BTCUSDT.r') are valid; separators are sanitised by _path_safe (not rejected), and
+    # that sanitisation is traversal-safe ('../x' -> '.._x').
+    assert LogicalSystemIdentity(strategy="hmm_fixed_lag", symbol="BTCUSDT.r", timeframe_minutes=5).symbol == "BTCUSDT.r"
+    assert LogicalSystemIdentity(strategy="a/b", symbol="X\\Y", timeframe_minutes=5).path_parts()[:2] == ("a_b", "X_Y")
+
+
+def test_log_binding_rebind_idempotent_for_same_identity_else_raises(logical, runner, tmp_path):
+    logger = JsonlEventLogger(logical, log_base=tmp_path)
+    try:
+        binding = LogBinding(logical, logger)
+        binding.bind(runner)
+        binding.bind(runner)                        # same identity -> idempotent no-op
+        other = RunnerIdentity(runner_id="other-9", runner_start_token="zzz", broker="b", account_id="a")
+        with pytest.raises(RuntimeError):
+            binding.bind(other)                     # different identity -> reject (no silent re-home)
+    finally:
+        logger.close()
 
 
 # --------------------------------------------------------------------------------------

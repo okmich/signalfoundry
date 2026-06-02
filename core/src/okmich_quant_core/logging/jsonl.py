@@ -64,10 +64,11 @@ class JsonlEventLogger(BaseEventLogger):
     def __init__(self, logical: LogicalSystemIdentity, log_base: str | Path | None = None, *,
                  fsync: bool = True, bar_queue_maxsize: int = _DEFAULT_BAR_QUEUE_MAXSIZE):
         self._logical = logical
-        base = _resolve_log_base(log_base)
-        strategy, symbol, timeframe = logical.path_parts()
-        self._dir = base / strategy / symbol / timeframe / "inference"
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._base = _resolve_log_base(log_base)
+        self._dir = self._dir_for(logical)
+        # NB: the inference dir is created LAZILY on first write (see _write_line_locked), NOT here — so
+        # the runner phase can rebind_logical() to the runner-root (e.g. the -multi suffix) without
+        # leaving an orphan empty directory at the pre-rebind path.
         self._fsync = bool(fsync)
 
         self._lock = threading.Lock()
@@ -92,6 +93,25 @@ class JsonlEventLogger(BaseEventLogger):
     def logical(self) -> LogicalSystemIdentity:
         return self._logical
 
+    def _dir_for(self, logical: LogicalSystemIdentity) -> Path:
+        strategy, symbol, timeframe = logical.path_parts()
+        return self._base / strategy / symbol / timeframe / "inference"
+
+    def rebind_logical(self, logical: LogicalSystemIdentity) -> None:
+        """Re-point this sink at a (possibly suffixed) logical identity. Runner-phase only: MUST precede
+        the first write (the inference dir is created lazily there) so the file path reflects the
+        runner-root. Raises if a record has already been written."""
+        if self._current_date is not None:
+            raise RuntimeError(
+                f"JsonlEventLogger.rebind_logical: already writing under {self._dir} — rebind must precede "
+                f"the first record ({self._logical.logical_system_id})")
+        self._logical = logical
+        self._dir = self._dir_for(logical)
+        try:
+            self._writer.name = f"jsonl-writer:{logical.logical_system_id}"
+        except Exception:
+            pass
+
     def _path_for_date(self, date_str: str) -> Path:
         return self._dir / f"inference_{date_str}.jsonl"
 
@@ -108,6 +128,7 @@ class JsonlEventLogger(BaseEventLogger):
                     self._current_handle.close()
                 except Exception as exc:
                     _log.warning(f"JsonlEventLogger: error closing prior handle on date flip: {exc}")
+            self._dir.mkdir(parents=True, exist_ok=True)  # lazy: created on first write so rebind_logical can re-path first
             self._current_handle = open(self._path_for_date(today), "a", encoding="utf-8")
             self._current_date = today
         handle = self._current_handle
@@ -215,10 +236,15 @@ class JsonlEventLogger(BaseEventLogger):
                        f"for {self._logical.logical_system_id}")
         self._writer.join(timeout=5.0)
         if self._writer.is_alive():
+            # The writer is still alive and OWNS the handle: it can dequeue a remaining record and
+            # reopen/write via _write_line_locked AFTER we return. Closing/resetting the handle here would
+            # race that — reopening a file post-close and leaking a live writer + handle. So abandon the
+            # daemon writer + its handle to OS cleanup at process exit; do NOT touch the handle.
             _log.error(f"JsonlEventLogger.close: writer thread did not exit within 5s for "
-                       f"{self._logical.logical_system_id}")
-        # Acquire the handle lock with a timeout: a wedged writer may hold it mid-fsync, and shutdown
-        # must not block forever. If we can't get it, leave the handle for OS cleanup at process exit.
+                       f"{self._logical.logical_system_id}; abandoning it + its handle to OS cleanup (no race)")
+            return
+        # Writer has exited (sentinel processed) — no concurrent owner, so closing the handle is race-free.
+        # The lock is uncontended now; the timeout is belt-and-suspenders.
         if self._lock.acquire(timeout=5.0):
             try:
                 if self._current_handle is not None:

@@ -68,8 +68,10 @@ class _FakeSession:
         return self._proven
 
 
-def _status(tmp_path, strategy="s", symbol="EURUSD", timeframe="5") -> dict:
-    return json.loads((tmp_path / strategy / symbol / timeframe / "status.json").read_text(encoding="utf-8"))
+def _status(tmp_path, strategy="s") -> dict:
+    # Runner-scoped status: ONE file at the runner root <log_base>/<strategy>/status.json (a single
+    # Trader → no -multi suffix; LOGGING_CONTRACT §7.1).
+    return json.loads((tmp_path / strategy / "status.json").read_text(encoding="utf-8"))
 
 
 def test_startup_binds_strategies_and_writes_running_status(tmp_path):
@@ -152,3 +154,15 @@ def test_no_broker_session_degrades_but_still_writes_status(tmp_path):
     rl._shutdown("x")
     st = _status(tmp_path)
     assert st["state"] == "stopped" and st["broker_disconnected"] is False
+
+
+def test_runloop_config_rejects_bad_intervals():
+    """RunLoopConfig must reject intervals that break the `second % interval` scheduler (review hardening)."""
+    import pytest
+    from pydantic import ValidationError
+    for bad in (0, -5, 30.5):
+        with pytest.raises(ValidationError):
+            RunLoopConfig(chk_position_interval=bad)
+    with pytest.raises(ValidationError):
+        RunLoopConfig(sleep_interval=0)
+    assert RunLoopConfig(chk_position_interval=30.0).chk_position_interval == 30.0

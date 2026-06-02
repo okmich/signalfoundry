@@ -1,4 +1,4 @@
-"""LOGGING_CONTRACT v1.0.0 conformance harness (§12/§13).
+"""LOGGING_CONTRACT v1.1.0 conformance harness (§12/§13).
 
 The gate a developer's PR must pass: drive a real strategy through the framework — a successful bar,
 an error bar, a breaker trip + re-enable (dispatch), and a runner startup + shutdown — then validate
@@ -83,7 +83,7 @@ def _dt():
 
 def _assert_valid(record):
     """Every emitted record MUST validate against the shipped JSON Schema for its event (§13)."""
-    jsonschema.validate(record.to_dict(), load_schema(record.envelope.event))
+    jsonschema.validate(record.to_dict(), load_schema(record.envelope.event), format_checker=jsonschema.FormatChecker())
 
 
 def test_all_emitted_records_validate_against_schema(tmp_path):
@@ -91,10 +91,10 @@ def test_all_emitted_records_validate_against_schema(tmp_path):
                                    "extras": {"probs": [0.2, 0.8], "loglik": -2.0}}))
     rl = RunLoop(RunLoopConfig(), MultiTrader([s], max_consecutive_errors=2),
                  broker_session=_FakeSession(), runner_name="conf_sys", log_base=tmp_path)
-    status_path = tmp_path / "conf" / "EURUSD" / "5" / "status.json"
+    status_path = tmp_path / "conf-multi" / "status.json"
 
     rl._startup()                 # writes running status
-    jsonschema.validate(json.loads(status_path.read_text(encoding="utf-8")), load_schema("runner_status"))
+    jsonschema.validate(json.loads(status_path.read_text(encoding="utf-8")), load_schema("runner_status"), format_checker=jsonschema.FormatChecker())
     rl.trader.run(_dt())          # bar ok
     s.should_fail = True
     rl.trader.run(_dt())          # bar error (consecutive 1)
@@ -119,7 +119,7 @@ def test_all_emitted_records_validate_against_schema(tmp_path):
     assert bar_outcomes == set(BarOutcome)
     # The runner-lifecycle status file (stopped, proven disconnect) is schema-valid too.
     stopped = json.loads(status_path.read_text(encoding="utf-8"))
-    jsonschema.validate(stopped, load_schema("runner_status"))
+    jsonschema.validate(stopped, load_schema("runner_status"), format_checker=jsonschema.FormatChecker())
     assert stopped["state"] == "stopped" and stopped["broker_disconnected"] is True
 
 

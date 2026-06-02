@@ -18,10 +18,9 @@ _SEALED_NAMES = frozenset({"run", "_emit_bar_record", "bind_runner_identity"})
 def _extract_tier1(ctx) -> dict:
     """Pull the contract's known Tier 1 keys out of a ``get_signal_context()`` result.
 
-    Scalars are coerced (``direction``→int, ``confidence``/``bar_close``→float); ``label_bar_ts``
-    is passed through for the record factory to ISO-normalise. The free-form ``features``/
-    ``extras`` are serialise-tested here (§9) so a non-JSON value surfaces as a Tier 1 failure
-    rather than a write-time crash deep in the logger.
+    Scalars are coerced (``direction``→int, ``confidence``/``bar_close``→float); ``label_bar_ts`` is passed through for
+    the record factory to ISO-normalise. The free-form ``features``/ ``extras`` are serialise-tested here (§9) so a
+    non-JSON value surfaces as a Tier 1 failure rather than a write-time crash deep in the logger.
     """
     known: dict = {}
     if ctx.get("direction") is not None:
@@ -81,6 +80,12 @@ class BaseStrategy(ABC):
         # is fully known here, so a default logger is always constructible even when the developer
         # injects none. The runner identity is bound later, at startup (bind_runner_identity).
         tf_min = timeframe_minutes if timeframe_minutes is not None else self._coerce_timeframe_minutes(config.timeframe)
+        if not isinstance(tf_min, int) or tf_min <= 0:
+            raise ValueError(
+                f"timeframe_minutes must be a positive integer of minutes (got {tf_min!r} for "
+                f"{config.name!r}/{config.symbol!r}). A broker base class MUST pass an explicit minute count "
+                f"(MT5 number_of_minutes_in_timeframe, IB bar_size_to_minutes); a raw MT5 timeframe constant or "
+                f"a non-positive value is rejected so the envelope, path, and asof_bar_ts stay consistent.")
         logical = LogicalSystemIdentity(strategy=config.name, symbol=config.symbol, timeframe_minutes=tf_min)
         logger_impl = inference_logger if inference_logger is not None else JsonlEventLogger(logical, log_base=log_base)
         self._log_binding = LogBinding(logical, logger_impl, order_tag=getattr(config, "magic", None))
@@ -106,9 +111,13 @@ class BaseStrategy(ABC):
         return self._log_binding
 
     @final
-    def bind_runner_identity(self, runner: RunnerIdentity) -> None:
-        """Complete the inference-log envelope with the runner identity (called once at startup, §5)."""
-        self._log_binding.bind(runner)
+    def bind_runner_identity(self, runner: RunnerIdentity, *, runner_strategy: Optional[str] = None) -> None:
+        """Complete the inference-log envelope with the runner identity (called once at startup, §5).
+
+        ``runner_strategy`` is the runner-root strategy the runner applies once it knows the dispatch type
+        (e.g. ``<strategy>-multi`` for a MultiTrader); it re-points this strategy's logical identity and
+        inference path before the first bar (LOGGING_CONTRACT §7.1/§10)."""
+        self._log_binding.bind(runner, strategy_override=runner_strategy)
 
     def manage_positions(self, run_dt: datetime, flag: bool = False) -> int:
         """Run position management and return the number of open positions. Default: no-op.
@@ -129,15 +138,20 @@ class BaseStrategy(ABC):
         pass
 
     def _derive_asof_bar_ts(self, run_dt: datetime) -> datetime:
-        """Framework-owned bar-close timestamp (§5.3): the last COMPLETE bar boundary before ``run_dt``.
+        """Framework-owned **open/label timestamp of the last COMPLETE bar** before ``run_dt`` (§5.3).
+
+        This is the broker's bar-**label** (start-of-bar) timestamp, **not** the bar's close: brokers
+        label bars by open time, so the just-completed 11:55–12:00 candle (acted on at run_dt≈12:00) is
+        identified as ``11:55`` — that is the value emitted, and it's how the record names the bar this
+        cycle acted on. (The formula floors ``run_dt`` to the timeframe and steps back one bar.)
 
         Derived purely from ``run_dt`` + the timeframe (no data fetch), so a ``bar`` record — including
         ``outcome=error`` — is fully populated even if ``on_new_bar()`` raises before fetching anything.
         A timezone-naive ``run_dt`` (the polled MT5 path emits ``datetime.now()``) is interpreted as
-        **system-local** and converted to UTC. This is a monotonic per-bar **liveness** clock (ops keys
-        wedged-vs-live off its progression); it equals the broker's own bar-label timestamp only when the
-        runner host's local timezone matches the broker server timezone (risk F1). The accurate
-        signal-aligned label is the Tier 1 ``label_bar_ts`` the developer supplies, not this field.
+        **system-local** and converted to UTC. It is a monotonic per-bar **liveness** clock (ops keys
+        wedged-vs-live off its +1-bar-per-bar progression); it equals the broker's own bar-label timestamp
+        only when the runner host's local timezone matches the broker server timezone (risk F1). The
+        accurate signal-aligned label is the Tier 1 ``label_bar_ts`` the developer supplies, not this field.
         """
         dt = run_dt
         if getattr(dt, "tzinfo", None) is None:
@@ -256,25 +270,26 @@ class BaseStrategy(ABC):
         # and then re-raise so the dispatch layer's StrategyHealth/breaker bookkeeping is unaffected.
         self.latest_run_dt = run_dt
         asof_bar_ts = self._derive_asof_bar_ts(run_dt)
-        error: Optional[Exception] = None
         try:
             self.open_position_count = self.manage_positions(run_dt, True)
             self.on_new_bar()
-        except Exception as exc:
-            error = exc
-        self._emit_bar_record(asof_bar_ts=asof_bar_ts,
-                              outcome=BarOutcome.ERROR if error is not None else BarOutcome.OK)
-        self.previous_run_dt = run_dt
-        if error is not None:
-            raise error
+            outcome = BarOutcome.OK
+        except Exception:
+            outcome = BarOutcome.ERROR
+            raise  # bare re-raise preserves the original traceback exactly (live-failure diagnosis)
+        finally:
+            # The whole cycle is the heartbeat — emit the Tier 0 outcome on BOTH the ok and error paths.
+            # _emit_bar_record is self-guarding (never raises), so emitting inside finally cannot mask the
+            # in-flight exception; the bare ``raise`` above still propagates for StrategyHealth/breaker.
+            self._emit_bar_record(asof_bar_ts=asof_bar_ts, outcome=outcome)
+            self.previous_run_dt = run_dt
 
     def cleanup(self):
         """Teardown on shutdown: flush/close the inference logger and the notifier.
 
-        Called by ``MultiTrader.close()`` / ``Trader.close()``. Subclasses overriding this SHOULD call
-        ``super().cleanup()``. The inference logger is closed FIRST and independently of the notifier:
-        its close() drains the bounded bar queue (the ops-critical heartbeats), so a notifier failure
-        must never prevent that drain — each close is isolated.
+        Called by ``MultiTrader.close()`` / ``Trader.close()``. Subclasses overriding this SHOULD call ``super().cleanup()``.
+        The inference logger is closed FIRST and independently of the notifier: its close() drains the bounded bar queue
+        (the ops-critical heartbeats), so a notifier failure must never prevent that drain — each close is isolated.
         """
         try:
             self._log_binding.logger.close()

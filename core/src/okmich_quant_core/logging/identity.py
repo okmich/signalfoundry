@@ -17,6 +17,7 @@ can be constructed early (logical) and late (runner) without import cycles.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,32 @@ from pathlib import Path
 
 class LogRootConfigError(ValueError):
     """Raised when the inference-log root was not supplied by config or environment."""
+
+
+class IdentityTokenError(ValueError):
+    """Raised when a strategy/symbol identity token cannot be a safe single path component."""
+
+
+#: Characters invalid in a filesystem path component (Windows reserved set + control chars). Path
+#: separators are handled by _path_safe; ''/'.'/'..' are rejected explicitly in _validate_identity_token.
+_RESERVED_PATH_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def _validate_identity_token(kind: str, value: str) -> str:
+    """Reject an identity token that would escape or collapse the log tree as a path component.
+
+    Bars empty / '.' / '..' (which traverse out of or collapse the tree) and reserved filesystem
+    characters. A clean failure at identity-construction time beats a silently re-homed log tree —
+    e.g. a strategy named '..' resolving to ``<log_base>/../...``. Mid-token dots ('BTCUSDT.r') are fine.
+    """
+    s = str(value).strip()
+    if not s or s in (".", ".."):
+        raise IdentityTokenError(f"{kind} identity token {value!r} is empty or a path-traversal component ('.'/'..')")
+    if _RESERVED_PATH_CHARS.search(s):
+        raise IdentityTokenError(f"{kind} identity token {value!r} contains a reserved filesystem character")
+    # NB: path separators ('/' '\\') are intentionally NOT rejected — _path_safe maps them to '_', which is
+    # traversal-safe ('../x' -> '.._x'); only the bare '.'/'..'/'' components above can actually escape.
+    return s
 
 
 def _resolve_log_base(log_base: str | Path | None = None) -> Path:
@@ -72,6 +99,12 @@ class LogicalSystemIdentity:
     symbol: str
     timeframe_minutes: int
 
+    def __post_init__(self):
+        # Fail fast: a malformed strategy/symbol must not flow into inference/status paths (where it could
+        # escape or collapse the log tree). timeframe_minutes is an int (str-ified to digits) — safe.
+        _validate_identity_token("strategy", self.strategy)
+        _validate_identity_token("symbol", self.symbol)
+
     @property
     def logical_system_id(self) -> str:
         return f"{self.strategy}/{self.symbol}/{self.timeframe_minutes}"
@@ -79,6 +112,22 @@ class LogicalSystemIdentity:
     def path_parts(self) -> tuple[str, str, str]:
         """The three path components below ``<log_base>`` (before ``inference/``)."""
         return _path_safe(self.strategy), _path_safe(self.symbol), str(self.timeframe_minutes)
+
+    def with_strategy(self, strategy: str) -> "LogicalSystemIdentity":
+        """A copy under a different strategy code — used at the runner phase to apply the runner-root
+        (e.g. the statutory ``-multi`` suffix) that is only known once the dispatch type is."""
+        return LogicalSystemIdentity(strategy=strategy, symbol=self.symbol, timeframe_minutes=self.timeframe_minutes)
+
+
+def runner_strategy_root(strategy: str, *, multi: bool) -> str:
+    """The runner-root strategy folder: the plain strategy code, with a statutory ``-multi`` suffix for a
+    multi-trader (one process, N symbols, one broker session). The hyphen marks the runner-type tag,
+    visually distinct from the snake_case strategy code, and keeps a single-trader and a multi-trader of
+    the same strategy from colliding in the log tree (LOGGING_CONTRACT §7.1/§10). Idempotent: applying it
+    to an already-suffixed code is a no-op (so a re-bind never produces ``-multi-multi``)."""
+    if not multi or strategy.endswith("-multi"):
+        return strategy
+    return f"{strategy}-multi"
 
 
 @dataclass(frozen=True)

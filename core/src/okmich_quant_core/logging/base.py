@@ -26,7 +26,7 @@ import pandas as pd
 from .identity import LogicalSystemIdentity, RunnerIdentity
 
 
-LOG_SCHEMA_VERSION = "1.0.0"
+LOG_SCHEMA_VERSION = "1.1.0"  # tracks LOGGING_CONTRACT.md; v1.1.0 moved runner lifecycle to status.json
 
 _SCHEMA_DIR = Path(__file__).resolve().parent / "schema"
 
@@ -53,12 +53,16 @@ class UnknownSchemaMajorError(ValueError):
 def _iso_utc(ts: Any) -> str | None:
     """Coerce a timestamp-like value to an ISO-8601 string with explicit UTC offset.
 
-    ``None`` passes through. Naive timestamps are *assumed UTC* (the framework derives
-    ``asof_bar_ts`` in UTC; this is a guard, not a localiser).
+    ``None`` — and ``pd.NaT`` / NaN-like — pass through as ``None``, NEVER the literal string
+    ``"NaT"`` (not a valid date-time; the status/record schemas don't enforce the ``format``, so a
+    ``"NaT"`` would otherwise slip into a log field). Naive timestamps are *assumed UTC* (the
+    framework derives ``asof_bar_ts`` in UTC; this is a guard, not a localiser).
     """
     if ts is None:
         return None
     t = pd.Timestamp(ts)
+    if pd.isna(t):
+        return None
     t = t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
     return t.isoformat()
 
@@ -315,7 +319,25 @@ class LogBinding:
     def runner(self) -> RunnerIdentity | None:
         return self._runner
 
-    def bind(self, runner: RunnerIdentity) -> None:
+    def bind(self, runner: RunnerIdentity, *, strategy_override: str | None = None) -> None:
+        # The runner phase may supply a runner-root strategy (e.g. the statutory ``-multi`` suffix for a
+        # multi-trader) — known only once the dispatch type is. Re-point the logical identity (so records'
+        # strategy / logical_system_id reflect it) AND the logger's file path, before the factory is built.
+        target_strategy = strategy_override if strategy_override is not None else self.logical.strategy
+        if self._runner is not None:
+            # Bind is once-at-startup (§5). A repeat with the SAME identity is a harmless idempotent no-op;
+            # a repeat with a DIFFERENT runner/strategy would silently re-home already-emitted records, so
+            # reject it rather than swap identity mid-stream.
+            if self._runner == runner and self.logical.strategy == target_strategy:
+                return
+            raise RuntimeError(
+                f"LogBinding.bind: already bound ({self._runner.runner_id} / {self.logical.logical_system_id}); "
+                f"refusing to re-bind to a different identity ({runner.runner_id} / {target_strategy}).")
+        if strategy_override is not None and strategy_override != self.logical.strategy:
+            self.logical = self.logical.with_strategy(strategy_override)
+            rebind = getattr(self.logger, "rebind_logical", None)
+            if callable(rebind):
+                rebind(self.logical)
         self._runner = runner
         # Build the per-system factory once at bind (identity is fixed thereafter) so the per-bar
         # emission path allocates no factory.

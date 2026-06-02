@@ -306,6 +306,7 @@ class TestMultiTraderNotifierIntegration:
         cfg = Mock()
         cfg.name = name
         cfg.symbol = "EURUSD"
+        cfg.timeframe = 5
         cfg.magic = 1
         notifier = Mock(spec=BaseNotifier)
         s = S(cfg, Mock(), notifier=notifier)

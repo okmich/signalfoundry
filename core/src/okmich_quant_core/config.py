@@ -143,6 +143,20 @@ class RunLoopConfig(BaseModel):
     sleep_interval: float = 0.5
     chk_position_interval: float = 30
 
+    @field_validator("sleep_interval")
+    def _valid_sleep_interval(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"sleep_interval must be > 0 seconds (got {v!r}); 0 busy-loops the runner.")
+        return v
+
+    @field_validator("chk_position_interval")
+    def _valid_chk_position_interval(cls, v: float) -> float:
+        # Used as ``now.second % chk_position_interval`` against a 0..59 clock (run_loop): 0 raises every
+        # iteration; fractional / negative values schedule surprisingly. Require positive whole seconds.
+        if v <= 0 or v != int(v):
+            raise ValueError(f"chk_position_interval must be a positive whole number of seconds (got {v!r}).")
+        return v
+
 
 class FilterConfig(BaseModel):
     type: str

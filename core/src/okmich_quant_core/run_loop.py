@@ -10,6 +10,7 @@ from typing import Optional, Union
 from .broker_session import BrokerSession
 from .config import RunLoopConfig
 from .logging import RunnerIdentity, RunnerStatus
+from .logging.identity import runner_strategy_root
 from .multi_trader import MultiTrader
 from .trader import Trader
 
@@ -62,7 +63,6 @@ class RunLoop:
         """Build the runner identity, bind every strategy, and write the running status file."""
         if self._started:
             return
-        self._started = True
         if self._broker_session is not None:
             broker, account, session_id = (self._broker_session.broker, self._broker_session.account_id,
                                            self._broker_session.broker_session_id)
@@ -74,13 +74,21 @@ class RunLoop:
             self._runner_identity = RunnerIdentity.generate(name=self._runner_name, broker=broker,
                                                             account_id=account, broker_session_id=session_id)
 
+        # The runner-root strategy is the plain code for a single Trader, or ``<strategy>-multi`` for a
+        # MultiTrader (statutory, framework-derived — the developer never authors the suffix). Applied at
+        # bind so inference paths, record identity, AND the single status file all reflect it (§7.1/§10).
+        multi = isinstance(self.trader, MultiTrader)
         for strategy in self.trader.strategies:
-            strategy.bind_runner_identity(self._runner_identity)
+            runner_strategy = runner_strategy_root(strategy.log_binding.logical.strategy, multi=multi)
+            strategy.bind_runner_identity(self._runner_identity, runner_strategy=runner_strategy)
 
         self._runner_status = RunnerStatus(
             self._runner_identity, [s.log_binding.logical for s in self.trader.strategies],
             log_base=self._log_base, library_versions=_library_versions())
         self._runner_status.mark_started()
+        # Mark completed ONLY after the running status is durably written: a partial startup (a raise before
+        # this point) leaves _started False, so the failure is not masked as "already started".
+        self._started = True
 
     def _shutdown(self, reason: str) -> None:
         """Drain + close strategies, disconnect (proven), then mark the status file stopped (§7.4).
