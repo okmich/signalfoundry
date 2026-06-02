@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "okmich_quant_core/logging/schema/bar.json",
+  "title": "LOGGING_CONTRACT bar record (v1.0.0)",
+  "description": "Per-bar heartbeat (LOGGING_CONTRACT §7.2). Tier 0 (asof_bar_ts + outcome) is the mandatory framework-guaranteed floor; Tier 1 fields are best-effort developer content, present as explicit null when unavailable.",
+  "type": "object",
+  "properties": {
+    "log_schema_version": {"type": "string"},
+    "event": {"const": "bar"},
+    "wall_clock_utc": {"type": "string", "format": "date-time"},
+    "runner_id": {"type": "string"},
+    "runner_start_token": {"type": "string"},
+    "logical_system_id": {"type": "string"},
+    "strategy": {"type": "string"},
+    "symbol": {"type": "string"},
+    "timeframe": {"type": "integer"},
+    "broker": {"type": "string"},
+    "account_id": {"type": "string"},
+    "broker_session_id": {"type": ["string", "null"]},
+    "order_tag": {"type": ["string", "integer", "null"]},
+    "asof_bar_ts": {"type": "string", "format": "date-time"},
+    "outcome": {"enum": ["ok", "error", "skipped_disabled"]},
+    "bar_close": {"type": ["number", "null"]},
+    "label_bar_ts": {"type": ["string", "null"], "format": "date-time"},
+    "direction": {"type": ["integer", "null"]},
+    "confidence": {"type": ["number", "null"]},
+    "features": {"type": "object"},
+    "extras": {"type": "object"},
+    "tier1_error": {"type": "string"}
+  },
+  "required": [
+    "log_schema_version", "event", "wall_clock_utc", "runner_id", "runner_start_token",
+    "logical_system_id", "strategy", "symbol", "timeframe", "broker", "account_id",
+    "asof_bar_ts", "outcome"
+  ],
+  "additionalProperties": true
+}

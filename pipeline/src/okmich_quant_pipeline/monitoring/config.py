@@ -25,10 +25,19 @@ class MonitorConfig:
       ``generate_all_001.py`` layout.
     - ``variant_with_lag`` — subfolder name (e.g. ``hmm_lambda_L3``);
       same across all symbols in this config.
-    - ``inference_log_base_dir`` — where the trader writes
-      ``inference_<strategy>_<YYYYMMDD>.jsonl`` (one strategy per symbol).
-    - ``strategy_name_template`` — format string with ``{symbol}`` placeholder
-      used to derive the per-symbol strategy name for log-file globbing.
+    - ``inference_log_base_dir`` — the ops log root (``OKMICH_QUANT_LOG_BASE``) under which the
+      trader writes ``<strategy>/<symbol>/<timeframe>/inference/inference_<YYYYMMDD>.jsonl``
+      (LOGGING_CONTRACT §10 / OPS §7).
+    - ``strategy_name_template`` — format string with ``{symbol}`` placeholder used to derive the
+      per-symbol strategy name (the ``<strategy>`` path segment) for log-file globbing.
+    - ``timeframe`` — optional int minutes selecting the ``<timeframe>`` path segment. A logical
+      system is ``strategy/symbol/timeframe`` and baselines are cadence-specific, so when a
+      strategy/symbol has logs under more than one timeframe this MUST be set; if left ``None`` the
+      reader auto-detects a single timeframe and refuses to silently mix cadences.
+    - ``max_log_age_minutes`` — optional freshness bound. When set, the cycle FAILS (raises) if the
+      most recent gate-eligible bar is older than this many minutes, so a stalled/broken live stream
+      cannot be scored as healthy and silently reset the alert counters. Set it to comfortably exceed
+      ``timeframe`` + the signal's label lag + a grace margin. ``None`` disables the check.
     - ``raw_data_dir`` — root of the OHLCV parquet lake; expects
       ``<raw_data_dir>/<symbol>.parquet``.
     - ``output_dir`` — where the monitor writes per-symbol cycle reports
@@ -58,6 +67,8 @@ class MonitorConfig:
     feature_engineering_callable: str
     tail_n: int
     violation_counter_threshold: int
+    timeframe: int | None = None
+    max_log_age_minutes: int | None = None
     max_entropy_abs_z: float = 3.0
     max_occupancy_drift_l1: float = 0.2
     max_flip_rate_drift_abs: float = 0.1
@@ -121,6 +132,9 @@ class MonitorConfig:
             feature_engineering_callable=str(payload["feature_engineering_callable"]),
             tail_n=int(payload["tail_n"]),
             violation_counter_threshold=int(payload["violation_counter_threshold"]),
+            timeframe=(int(payload["timeframe"]) if payload.get("timeframe") is not None else None),
+            max_log_age_minutes=(int(payload["max_log_age_minutes"])
+                                 if payload.get("max_log_age_minutes") is not None else None),
             max_entropy_abs_z=float(payload.get("max_entropy_abs_z", 3.0)),
             max_occupancy_drift_l1=float(payload.get("max_occupancy_drift_l1", 0.2)),
             max_flip_rate_drift_abs=float(payload.get("max_flip_rate_drift_abs", 0.1)),

@@ -4,6 +4,7 @@ version = "0.4.0"
 description = "Classical ML models: state space models, sklearn estimators, and regime detection"
 requires-python = ">=3.12"
 dependencies = [
+    "okmich-quant-core",
     "okmich-quant-features",
     "numba==0.63.1",
     "pandas==2.3.0",
@@ -17,6 +18,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
+okmich-quant-core = { workspace = true }
 okmich-quant-features = { workspace = true }
 
 [build-system]

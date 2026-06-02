@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "okmich_quant_core/logging/schema/runner_status.json",
+  "title": "Runner status file (v1.0.0)",
+  "description": "Per-logical-system runner lifecycle status (LOGGING_CONTRACT runner-lifecycle channel). A single last-write-wins JSON at <log_base>/<strategy>/<symbol>/<timeframe>/status.json, written atomically at startup (state=running) and shutdown (state=stopped + proven broker_disconnected). The Supervisor reads it directly for clean-stop proof and restart detection; it is NOT a JSONL log record.",
+  "type": "object",
+  "properties": {
+    "log_schema_version": {"type": "string"},
+    "state": {"enum": ["running", "stopped"]},
+    "runner_id": {"type": "string"},
+    "runner_start_token": {"type": "string"},
+    "pid": {"type": "integer"},
+    "broker": {"type": "string"},
+    "account_id": {"type": "string"},
+    "broker_session_id": {"type": ["string", "null"]},
+    "logical_systems": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "library_versions": {"type": "object"},
+    "started_at": {"type": ["string", "null"], "format": "date-time"},
+    "stopped_at": {"type": ["string", "null"], "format": "date-time"},
+    "broker_disconnected": {"type": ["boolean", "null"]},
+    "clean": {"type": ["boolean", "null"]},
+    "reason": {"type": ["string", "null"]}
+  },
+  "required": [
+    "log_schema_version", "state", "runner_id", "runner_start_token", "pid",
+    "broker", "account_id", "logical_systems", "started_at"
+  ],
+  "additionalProperties": true
+}

@@ -118,6 +118,12 @@ class MultiTrader:
             except Exception as e:
                 logger.error(f"Error in position check for '{strategy_key}': {e}", exc_info=True,)
 
+    def _strategy_for_key(self, strategy_key: str) -> Optional[BaseStrategy]:
+        for strategy in self.strategies:
+            if self._get_strategy_key(strategy) == strategy_key:
+                return strategy
+        return None
+
     def run(self, run_dt: datetime):
         for strategy in self.strategies:
             strategy_key = self._get_strategy_key(strategy)
@@ -125,6 +131,9 @@ class MultiTrader:
 
             if not health.is_enabled:
                 logger.warning(f"Strategy '{strategy_key}' is disabled, skipping execution")
+                # Dispatch layer holds the logger for a strategy the template never reaches, so it
+                # still emits the ops-channel skipped heartbeat (§5.3/§7.3).
+                strategy.emit_skipped_disabled_bar(run_dt)
                 continue
 
             start_time = time()
@@ -136,7 +145,7 @@ class MultiTrader:
                 logger.debug(f"Strategy '{strategy_key}' executed successfully in {execution_time_ms:.2f}ms")
             except Exception as e:
                 execution_time_ms = (time() - start_time) * 1000
-                health.record_error(execution_time_ms)
+                health.record_error(execution_time_ms, last_error=str(e))
 
                 logger.error(
                     f"Error in strategy '{strategy_key}' "
@@ -149,6 +158,9 @@ class MultiTrader:
 
                 if not health.is_enabled:
                     logger.critical(f"Circuit breaker tripped for '{strategy_key}' - strategy is now DISABLED")
+                    # Structured ops-channel record IN ADDITION to the critical+Telegram alert (§7.3).
+                    strategy.emit_circuit_breaker_tripped(
+                        consecutive_errors=health.consecutive_errors, last_error=str(e))
                     if strategy.notifier:
                         strategy.notifier.on_circuit_breaker_tripped(strategy_key, health.consecutive_errors)
 
@@ -192,7 +204,13 @@ class MultiTrader:
     def enable_strategy(self, strategy_name: str):
         strategy_key = self._resolve_strategy_key(strategy_name)
         if strategy_key is not None:
-            self.health_trackers[strategy_key].enable()
+            health = self.health_trackers[strategy_key]
+            was_enabled = health.is_enabled
+            health.enable()
+            if not was_enabled and health.is_enabled:
+                strategy = self._strategy_for_key(strategy_key)
+                if strategy is not None:
+                    strategy.emit_strategy_reenabled(reason="manual")
 
     def disable_strategy(self, strategy_name: str):
         strategy_key = self._resolve_strategy_key(strategy_name)
@@ -200,9 +218,12 @@ class MultiTrader:
             self.health_trackers[strategy_key].disable()
 
     def enable_all(self):
-        for health in self.health_trackers.values():
+        for strategy in self.strategies:
+            strategy_key = self._get_strategy_key(strategy)
+            health = self.health_trackers[strategy_key]
             if not health.is_enabled:
                 health.enable()
+                strategy.emit_strategy_reenabled(reason="manual")
 
     def disable_all(self):
         for health in self.health_trackers.values():

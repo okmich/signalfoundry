@@ -5,8 +5,6 @@ import argparse
 import json
 import logging
 import sys
-import traceback
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +25,14 @@ from .feature_loader import derive_feature_baseline_from_oos_window, load_transf
 _log = logging.getLogger(__name__)
 
 
+class StaleInferenceLogError(RuntimeError):
+    """The most recent gate-eligible bar is older than ``MonitorConfig.max_log_age_minutes``.
+
+    Raised before scoring so a stalled/broken live stream is never scored as healthy — which would
+    reset the violation counters and mask the outage. Surfaced as a per-symbol failure by ``main()``.
+    """
+
+
 def _read_metadata(artifact_dir: Path) -> dict[str, Any]:
     path = artifact_dir / "metadata.json"
     if not path.is_file():
@@ -34,11 +40,34 @@ def _read_metadata(artifact_dir: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _glob_inference_logs(log_dir: Path, strategy_name: str) -> list[Path]:
-    """Return ``inference_<strategy>_<YYYYMMDD>.jsonl`` files sorted by date suffix."""
-    pattern = f"inference_{strategy_name}_*.jsonl"
-    files = sorted(log_dir.glob(pattern))
-    return files
+def _glob_inference_logs(log_base: Path, strategy_name: str, symbol: str,
+                         timeframe: int | None = None) -> list[Path]:
+    """Return the OPS-path inference files for ONE logical system, sorted by date.
+
+    Path layout (LOGGING_CONTRACT §10 / OPS §7):
+    ``<log_base>/<strategy>/<symbol>/<timeframe>/inference/inference_<YYYYMMDD>.jsonl``. Sorted
+    lexicographically, which is chronological for the zero-padded ``YYYYMMDD`` filename suffix.
+
+    A logical system is ``strategy/symbol/timeframe`` and the drift baselines are cadence-specific,
+    so this must resolve to a SINGLE timeframe. When ``timeframe`` is given, only that segment is
+    read. When it is ``None`` the timeframe is auto-detected, but if logs exist under more than one
+    timeframe a ``ValueError`` is raised rather than silently mixing M1/M5/H1 records into one frame.
+    """
+    base = Path(log_base) / strategy_name / symbol
+    if timeframe is not None:
+        return sorted((base / str(timeframe)).glob("inference/inference_*.jsonl"))
+    tf_dirs_with_logs = sorted(
+        d for d in base.glob("*") if d.is_dir() and any(d.glob("inference/inference_*.jsonl"))
+    )
+    if len(tf_dirs_with_logs) > 1:
+        raise ValueError(
+            f"_glob_inference_logs: {base} has inference logs under multiple timeframes "
+            f"{[d.name for d in tf_dirs_with_logs]}; drift baselines are cadence-specific. "
+            f"Set MonitorConfig.timeframe to disambiguate."
+        )
+    if not tf_dirs_with_logs:
+        return []
+    return sorted(tf_dirs_with_logs[0].glob("inference/inference_*.jsonl"))
 
 
 def _serialise_cycle_report(report: MonitoringCycleReport) -> dict[str, Any]:
@@ -140,37 +169,40 @@ def run_monitor_for_symbol(cfg: MonitorConfig, symbol: str,
     )
 
     strategy_name = cfg.strategy_name_template.format(symbol=symbol)
-    log_files = _glob_inference_logs(cfg.inference_log_base_dir, strategy_name)
+    log_files = _glob_inference_logs(cfg.inference_log_base_dir, strategy_name, symbol, cfg.timeframe)
     if not log_files:
+        tf_seg = cfg.timeframe if cfg.timeframe is not None else "*"
         raise FileNotFoundError(
             f"run_monitor_for_symbol: no inference logs found at "
-            f"{cfg.inference_log_base_dir}/inference_{strategy_name}_*.jsonl"
+            f"{cfg.inference_log_base_dir}/{strategy_name}/{symbol}/{tf_seg}/inference/inference_*.jsonl"
         )
 
     frame = read_inference_log(log_files).tail(cfg.tail_n)
 
-    # Override gate thresholds with caller-tuned values.
-    from okmich_quant_ml.posterior_inference import (
-        score_feature_health, score_loglik_health, score_posterior_health,
-    )
-    posterior_report = score_posterior_health(
-        frame.posteriors, posterior_baselines,
+    # Freshness gate: refuse to score a stale stream. read_inference_log quarantines bad recent lines
+    # but still returns older valid rows, so without this a broken/stalled live stream could be scored
+    # as healthy and silently RESET the alert counters. Fail the cycle instead (counters untouched).
+    if cfg.max_log_age_minutes is not None:
+        last_ts = frame.label_timestamps[-1].to_pydatetime()
+        age_minutes = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60.0
+        if age_minutes > cfg.max_log_age_minutes:
+            raise StaleInferenceLogError(
+                f"run_monitor_for_symbol: {symbol} inference log is stale — last gate-eligible bar "
+                f"{last_ts.isoformat()} is {age_minutes:.1f}min old "
+                f"(> max_log_age_minutes={cfg.max_log_age_minutes}); refusing to score stale data."
+            )
+
+    # Delegate to run_streaming_gates with the caller-tuned thresholds. Doing the scoring here by hand
+    # would bypass that function's pre-validation (feature-name alignment + minimum-window) — a
+    # feature-name mismatch silently pairs the wrong KS columns, and an under-populated tail aborts
+    # mid-eval. Forwarding the thresholds keeps both guards and removes the duplicated aggregation.
+    report = run_streaming_gates(
+        frame, posterior_baselines, feature_baselines, loglik_baselines,
         max_entropy_abs_z=cfg.max_entropy_abs_z,
         max_occupancy_drift_l1=cfg.max_occupancy_drift_l1,
         max_flip_rate_drift_abs=cfg.max_flip_rate_drift_abs,
-    )
-    feature_report = score_feature_health(
-        frame.features, feature_baselines,
-        max_ks_statistic=cfg.max_ks_statistic, alpha=cfg.ks_alpha,
-    )
-    loglik_report = score_loglik_health(
-        frame.logliks, loglik_baselines, max_abs_z=cfg.max_loglik_abs_z,
-    )
-    overall_ok = bool(posterior_report.overall_ok and feature_report.overall_ok and loglik_report.overall_ok)
-    report = MonitoringCycleReport(
-        overall_ok=overall_ok, posterior=posterior_report, feature=feature_report, loglik=loglik_report,
-        log_window_n=frame.n_bars, log_window_start_ts=frame.label_timestamps[0],
-        log_window_end_ts=frame.label_timestamps[-1],
+        max_ks_statistic=cfg.max_ks_statistic, ks_alpha=cfg.ks_alpha,
+        max_loglik_abs_z=cfg.max_loglik_abs_z,
     )
 
     _append_cycle_report(cfg.output_dir, symbol, _serialise_cycle_report(report))

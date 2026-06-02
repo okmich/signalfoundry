@@ -37,21 +37,31 @@ from okmich_quant_ml.posterior_inference import (
 # ---- fixtures ----------------------------------------------------------------
 
 def _make_record(ts: str, features: dict[str, float], probs: list[float] | None, loglik: float | None,
-                 bar_close: float = 100.0, label_ts: str | None = None) -> dict:
-    """One inference-log record matching the core InferenceLogRecord schema.
-
-    HMM-specific fields (probs, loglik, state_id, etc.) live under ``extras``.
-    """
+                 bar_close: float = 100.0, label_ts: str | None = None, event: str = "bar") -> dict:
+    """One LOGGING_CONTRACT v1.0.0 ``bar`` record. HMM fields (probs, loglik, …) live in ``extras``."""
     if label_ts is None:
         label_ts = ts
     return {
+        "log_schema_version": "1.0.0",
+        "event": event,
         "wall_clock_utc": ts,
+        "runner_id": "fl3-1",
+        "runner_start_token": "tok",
+        "logical_system_id": "fl3/EURUSD/5",
+        "strategy": "fl3",
+        "symbol": "EURUSD",
+        "timeframe": 5,
+        "broker": "Deriv",
+        "account_id": "123",
+        "broker_session_id": None,
+        "order_tag": 1,
         "asof_bar_ts": ts,
-        "label_bar_ts": label_ts,
+        "outcome": "ok",
         "bar_close": bar_close,
-        "features": features,
+        "label_bar_ts": label_ts,
         "direction": 0,
         "confidence": None if probs is None else float(max(probs)),
+        "features": features,
         "extras": {
             "engine": "fl3",
             "lag": 3,
@@ -228,8 +238,8 @@ def test_read_inference_log_skips_blank_lines(tmp_path: Path) -> None:
     assert log.n_bars == 1
 
 
-def test_read_inference_log_raises_on_invalid_json_in_middle(tmp_path: Path) -> None:
-    """Invalid JSON in the middle of the file is corruption, not torn-write — raise."""
+def test_read_inference_log_quarantines_bad_json_and_continues(tmp_path: Path) -> None:
+    """§13: a corrupt mid-file line is quarantined (warn) and parsing continues — never aborts."""
     path = tmp_path / "inference.jsonl"
     good = _make_record("2026-05-01T00:00:00", {"tsi": 0.1, "dbl_rets": -0.001}, [0.7, 0.2, 0.1], -2.0)
     good_after = _make_record("2026-05-01T00:10:00", {"tsi": 0.2, "dbl_rets": 0.002}, [0.4, 0.3, 0.3], -2.0)
@@ -238,64 +248,120 @@ def test_read_inference_log_raises_on_invalid_json_in_middle(tmp_path: Path) -> 
         fh.write("{not valid json}\n")
         fh.write(json.dumps(good_after) + "\n")
 
-    with pytest.raises(ValueError, match="invalid JSON"):
-        read_inference_log(path)
+    with pytest.warns(RuntimeWarning, match="quarantined"):
+        log = read_inference_log(path)
+    assert log.n_bars == 2  # both healthy heartbeats survive the corrupt line between them
 
 
-def test_read_inference_log_tolerates_torn_last_line(tmp_path: Path) -> None:
-    """A torn final line (trader killed mid-write) is skipped with a warning, not raised."""
+def test_read_inference_log_quarantines_via_side_channel_callback(tmp_path: Path) -> None:
+    path = tmp_path / "inference.jsonl"
+    good = _make_record("2026-05-01T00:00:00", {"tsi": 0.1, "dbl_rets": -0.001}, [0.7, 0.2, 0.1], -2.0)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("{not valid json}\n")
+        fh.write(json.dumps(good) + "\n")
+
+    seen = []
+    with pytest.warns(RuntimeWarning):
+        log = read_inference_log(path, on_quarantine=lambda p, ln, reason: seen.append((ln, reason)))
+    assert log.n_bars == 1
+    assert seen and seen[0][0] == 1 and "invalid JSON" in seen[0][1]
+
+
+def test_read_inference_log_quarantines_torn_last_line(tmp_path: Path) -> None:
     path = tmp_path / "inference.jsonl"
     good = _make_record("2026-05-01T00:00:00", {"tsi": 0.1, "dbl_rets": -0.001}, [0.7, 0.2, 0.1], -2.0)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(good) + "\n")
-        fh.write('{"label_bar_ts": "2026-05-01T00:05:00", "features": {"tsi": 0.2, "db')  # truncated
+        fh.write('{"event": "bar", "label_bar_ts": "2026-05-01T00:05:00", "features": {"tsi": 0.2, "db')  # truncated
 
-    with pytest.warns(RuntimeWarning, match="truncated/invalid last line"):
+    with pytest.warns(RuntimeWarning, match="quarantined"):
         log = read_inference_log(path)
-
     assert log.n_bars == 1
 
 
-def test_read_inference_log_rejects_missing_top_level_keys(tmp_path: Path) -> None:
+def test_read_inference_log_skips_non_bar_records(tmp_path: Path) -> None:
+    """startup / shutdown / breaker records are not gate input — skipped without quarantine."""
     path = tmp_path / "inference.jsonl"
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"label_bar_ts": "2026-05-01T00:00:00", "features": {}}) + "\n")
+    startup = {"log_schema_version": "1.0.0", "event": "startup", "wall_clock_utc": "2026-05-01T00:00:00",
+               "runner_id": "r", "runner_start_token": "t", "logical_system_id": "r", "strategy": "r",
+               "symbol": None, "timeframe": None, "broker": "B", "account_id": "A",
+               "broker_session_id": None, "order_tag": None, "logical_systems": [], "library_versions": {}}
+    bar = _make_record("2026-05-01T00:05:00", {"tsi": 0.2, "dbl_rets": 0.002}, [0.4, 0.3, 0.3], -2.0)
+    _write_jsonl(path, [startup, bar])
 
-    with pytest.raises(ValueError, match=r"missing required keys \['extras'\]"):
-        read_inference_log(path)
+    log = read_inference_log(path)
+    assert log.n_bars == 1  # only the bar row
 
 
-def test_read_inference_log_rejects_non_mapping_extras(tmp_path: Path) -> None:
+def test_read_inference_log_skips_non_ok_outcome_bars(tmp_path: Path) -> None:
+    """error / skipped_disabled bars carry no healthy inference — they must not feed the gates."""
     path = tmp_path / "inference.jsonl"
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "label_bar_ts": "2026-05-01T00:00:00", "features": {"tsi": 0.1}, "extras": ["wrong", "type"],
-        }) + "\n")
+    ok = _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0)
+    err = _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.6], -1.5)
+    err["outcome"] = "error"
+    skipped = _make_record("2026-05-01T00:10:00", {"tsi": 0.3}, [0.5, 0.5], -1.2)
+    skipped["outcome"] = "skipped_disabled"
+    _write_jsonl(path, [ok, err, skipped])
 
-    with pytest.raises(ValueError, match="'extras' must be a mapping"):
-        read_inference_log(path)
+    log = read_inference_log(path)
+    assert log.n_bars == 1  # only the ok bar
+    np.testing.assert_allclose(log.logliks, [-1.0])
 
 
-def test_read_inference_log_rejects_feature_name_change(tmp_path: Path) -> None:
+def test_read_inference_log_quarantines_missing_schema_version(tmp_path: Path) -> None:
+    path = tmp_path / "inference.jsonl"
+    bad = _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0)
+    del bad["log_schema_version"]
+    good = _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.6], -1.5)
+    _write_jsonl(path, [bad, good])
+    with pytest.warns(RuntimeWarning, match="missing required 'log_schema_version'"):
+        log = read_inference_log(path)
+    assert log.n_bars == 1
+
+
+def test_read_inference_log_quarantines_unknown_major(tmp_path: Path) -> None:
+    path = tmp_path / "inference.jsonl"
+    future = _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0)
+    future["log_schema_version"] = "2.0.0"
+    good = _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.6], -1.5)
+    _write_jsonl(path, [future, good])
+
+    with pytest.warns(RuntimeWarning, match="unknown major"):
+        log = read_inference_log(path)
+    assert log.n_bars == 1  # the unknown-major line quarantined; the v1 line read
+
+
+def test_read_inference_log_quarantines_non_mapping_extras_and_continues(tmp_path: Path) -> None:
+    path = tmp_path / "inference.jsonl"
+    bad = _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0)
+    bad["extras"] = ["wrong", "type"]
+    good = _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.6], -1.5)
+    _write_jsonl(path, [bad, good])
+    with pytest.warns(RuntimeWarning, match="'extras' must be a mapping"):
+        log = read_inference_log(path)
+    assert log.n_bars == 1
+
+
+def test_read_inference_log_quarantines_feature_name_change_and_continues(tmp_path: Path) -> None:
     path = tmp_path / "inference.jsonl"
     _write_jsonl(path, [
         _make_record("2026-05-01T00:00:00", {"tsi": 0.1, "dbl_rets": 0.0}, [0.7, 0.3], -1.0),
         _make_record("2026-05-01T00:05:00", {"tsi": 0.2, "different_name": 0.0}, [0.4, 0.6], -1.5),
     ])
+    with pytest.warns(RuntimeWarning, match="feature-name set changed"):
+        log = read_inference_log(path)
+    assert log.n_bars == 1  # first row kept; drifted row quarantined
 
-    with pytest.raises(ValueError, match="feature-name set changed"):
-        read_inference_log(path)
 
-
-def test_read_inference_log_rejects_n_states_change(tmp_path: Path) -> None:
+def test_read_inference_log_quarantines_n_states_change_and_continues(tmp_path: Path) -> None:
     path = tmp_path / "inference.jsonl"
     _write_jsonl(path, [
         _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0),
         _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.3, 0.3], -1.5),
     ])
-
-    with pytest.raises(ValueError, match="posterior length changed"):
-        read_inference_log(path)
+    with pytest.warns(RuntimeWarning, match="posterior length changed"):
+        log = read_inference_log(path)
+    assert log.n_bars == 1
 
 
 def test_read_inference_log_rejects_all_warmup(tmp_path: Path) -> None:
@@ -305,7 +371,7 @@ def test_read_inference_log_rejects_all_warmup(tmp_path: Path) -> None:
         _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, None, None),
     ])
 
-    with pytest.raises(ValueError, match="no fully-populated rows found"):
+    with pytest.raises(ValueError, match="no fully-populated bar rows found"):
         read_inference_log(path)
 
 
@@ -445,34 +511,31 @@ def test_load_baselines_rejects_non_mapping_block() -> None:
 
 # ---- end-to-end writer→reader contract --------------------------------------
 
-def test_jsonl_writer_round_trips_through_reader(tmp_path: Path) -> None:
-    """End-to-end: write records via the core JsonlInferenceLogger, read them back via
-    read_inference_log, verify the contract is round-trippable.
-
-    Catches schema drift between writer and reader that the hand-rolled fixture cannot.
+def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path) -> None:
+    """End-to-end: write contract v1.0.0 ``bar`` records via the conformant JsonlEventLogger, read
+    them back via read_inference_log. Catches schema drift between the live writer and the reader.
     """
-    from okmich_quant_core import InferenceLogRecord, JsonlInferenceLogger
     import pandas as pd
 
-    logger = JsonlInferenceLogger(tmp_path, strategy_name="E2E", fsync=False)
+    from okmich_quant_core.logging import (
+        JsonlEventLogger, LogicalSystemIdentity, RunnerIdentity, SystemRecordFactory,
+    )
+
+    logical = LogicalSystemIdentity(strategy="E2E", symbol="EURUSD", timeframe_minutes=5)
+    runner = RunnerIdentity(runner_id="r", runner_start_token="t", broker="B", account_id="A",
+                            broker_session_id=None)
+    factory = SystemRecordFactory(runner, logical, order_tag=1)
+    logger = JsonlEventLogger(logical, log_base=tmp_path, fsync=False)
     base_ts = pd.Timestamp("2026-05-01T00:00:00+00:00")
-    records = []
     for i in range(3):
         ts = base_ts + pd.Timedelta(minutes=5 * i)
-        records.append(InferenceLogRecord(
-            wall_clock_utc=ts, asof_bar_ts=ts, label_bar_ts=ts,
-            bar_close=100.0 + i, features={"tsi": 0.1 * i, "dbl_rets": 0.001 * i},
-            direction=1, confidence=0.9,
-            extras={
-                "probs": [0.7 - 0.1 * i, 0.2, 0.1 + 0.1 * i],
-                "loglik": -2.0 - 0.1 * i,
-            },
-        ))
-    for r in records:
-        logger.write(r)
-    logger.close()
+        logger.write(factory.bar(asof_bar_ts=ts, outcome="ok", bar_close=100.0 + i, label_bar_ts=ts,
+                                 direction=1, confidence=0.9,
+                                 features={"tsi": 0.1 * i, "dbl_rets": 0.001 * i},
+                                 extras={"probs": [0.7 - 0.1 * i, 0.2, 0.1 + 0.1 * i], "loglik": -2.0 - 0.1 * i}))
+    logger.close()  # drains the bar queue
 
-    log_files = list(tmp_path.glob("inference_E2E_*.jsonl"))
+    log_files = list((tmp_path / "E2E" / "EURUSD" / "5" / "inference").glob("inference_*.jsonl"))
     assert len(log_files) == 1
 
     frame = read_inference_log(log_files[0])

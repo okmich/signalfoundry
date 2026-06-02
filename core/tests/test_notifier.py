@@ -252,6 +252,9 @@ class TestBaseStrategyNotifierIntegration:
 
         mock_config = Mock()
         mock_config.name = "Test"
+        mock_config.symbol = "EURUSD"
+        mock_config.timeframe = 5
+        mock_config.magic = 1
         mock_signal = Mock()
         mock_notifier = Mock(spec=BaseNotifier)
 
@@ -274,6 +277,9 @@ class TestBaseStrategyNotifierIntegration:
 
         mock_config = Mock()
         mock_config.name = "Test"
+        mock_config.symbol = "EURUSD"
+        mock_config.timeframe = 5
+        mock_config.magic = 1
         strategy = ConcreteStrategy(mock_config, Mock())
         strategy.cleanup()  # must not raise
 

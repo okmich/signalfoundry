@@ -6,6 +6,13 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _ops_log_base(tmp_path_factory, monkeypatch):
+    """Redirect the fail-closed default inference logger (BaseStrategy.__init__, LOGGING_CONTRACT §5)
+    to a per-test temp dir so building an IB strategy never writes to the production ops log root."""
+    monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(tmp_path_factory.mktemp("quant_logs")))
+
+
 @pytest.fixture
 def fake_contract():
     """Build a SimpleNamespace contract with conId, symbol, secType, exchange."""

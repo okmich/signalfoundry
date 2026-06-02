@@ -16,7 +16,9 @@ import pandas as pd
 import pytest
 from sklearn.preprocessing import StandardScaler
 
-from okmich_quant_core import InferenceLogRecord, JsonlInferenceLogger
+from okmich_quant_core.logging import (
+    JsonlEventLogger, LogicalSystemIdentity, RunnerIdentity, SystemRecordFactory,
+)
 from okmich_quant_ml.posterior_inference import (
     fit_loglik_drift_baselines,
     fit_posterior_health_baselines,
@@ -91,25 +93,28 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
     }
     (artefact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    # 4. Inference log: write n_log records via the real JsonlInferenceLogger.
+    # 4. Inference log: write n_log contract v1.0.0 ``bar`` records via the real JsonlEventLogger,
+    #    which lays them out at <log_base>/<strategy>/<symbol>/<timeframe>/inference/inference_<date>.jsonl.
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     strategy_name = f"{symbol}_fl3_hmm"
-    logger = JsonlInferenceLogger(log_dir, strategy_name=strategy_name, fsync=False)
+    logical = LogicalSystemIdentity(strategy=strategy_name, symbol=symbol, timeframe_minutes=5)
+    runner = RunnerIdentity(runner_id="mon-test", runner_start_token="tok", broker="Deriv",
+                            account_id="0", broker_session_id=None)
+    factory = SystemRecordFactory(runner, logical, order_tag=1)
+    logger = JsonlEventLogger(logical, log_base=log_dir, fsync=False)
     log_index = pd.date_range("2026-05-15T00:00:00Z", periods=n_log, freq="5min")
     live_posteriors = rng.dirichlet([1.0, 1.0, 1.0], size=n_log)
     live_logliks = rng.normal(loc=-2.0, scale=0.3, size=n_log)
     live_features = rng.normal(size=(n_log, len(feature_columns)))
     for i, ts in enumerate(log_index):
-        logger.write(InferenceLogRecord(
-            wall_clock_utc=pd.Timestamp(ts), asof_bar_ts=pd.Timestamp(ts),
-            label_bar_ts=pd.Timestamp(ts), bar_close=100.0,
+        logger.write(factory.bar(
+            asof_bar_ts=pd.Timestamp(ts), outcome="ok", bar_close=100.0, label_bar_ts=pd.Timestamp(ts),
+            direction=int(np.argmax(live_posteriors[i])) - 1, confidence=float(live_posteriors[i].max()),
             features={col: float(live_features[i, j]) for j, col in enumerate(feature_columns)},
-            direction=int(np.argmax(live_posteriors[i])) - 1,
-            confidence=float(live_posteriors[i].max()),
             extras={"probs": [float(p) for p in live_posteriors[i]], "loglik": float(live_logliks[i])},
         ))
-    logger.close()
+    logger.close()  # drains the bounded bar-writer queue
 
     # 5. Config pointing at all the above.
     output_dir = tmp_path / "monitor_out"
@@ -178,10 +183,41 @@ def test_run_monitor_for_symbol_persists_failure_counters_across_invocations(tmp
     assert state_after_second.posterior_consecutive_failures == 2
 
 
+def test_glob_inference_logs_refuses_to_mix_timeframes(tmp_path: Path) -> None:
+    """Baselines are cadence-specific — logs under >1 timeframe must not be silently concatenated."""
+    from okmich_quant_pipeline.monitoring.run_monitor import _glob_inference_logs
+
+    base = tmp_path / "STRAT" / "EURUSD"
+    for tf in ("5", "15"):
+        d = base / tf / "inference"
+        d.mkdir(parents=True)
+        (d / "inference_20260601.jsonl").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="multiple timeframes"):
+        _glob_inference_logs(tmp_path, "STRAT", "EURUSD")  # ambiguous → refuse
+    # An explicit timeframe disambiguates and reads only that cadence.
+    files = _glob_inference_logs(tmp_path, "STRAT", "EURUSD", timeframe=5)
+    assert len(files) == 1 and files[0].parent.parent.name == "5"
+
+
+def test_run_monitor_for_symbol_stale_log_fails_cycle(tmp_path: Path) -> None:
+    """A stale stream must NOT be scored as healthy (which would reset the alert counters)."""
+    from okmich_quant_pipeline.monitoring.run_monitor import StaleInferenceLogError
+
+    _, cfg = _build_test_fixture(tmp_path)
+    # Fixture log timestamps are 2026-05-15 — far older than now; a tight freshness bound trips.
+    cfg = MonitorConfig(**{**cfg.__dict__, "max_log_age_minutes": 60})
+    counter_path = cfg.output_dir / cfg.symbols[0] / "counter_state.json"
+    with pytest.raises(StaleInferenceLogError, match="stale"):
+        run_monitor_for_symbol(cfg, cfg.symbols[0], notifier=None)
+    # No healthy report was written → the counter state was never created/reset.
+    assert not counter_path.is_file()
+
+
 def test_run_monitor_for_symbol_missing_inference_logs_raises(tmp_path: Path) -> None:
     _, cfg = _build_test_fixture(tmp_path)
-    # Wipe the log dir.
-    for f in cfg.inference_log_base_dir.glob("*.jsonl"):
+    # Wipe the nested OPS-path logs (<base>/<strategy>/<symbol>/<tf>/inference/inference_*.jsonl).
+    for f in cfg.inference_log_base_dir.rglob("inference_*.jsonl"):
         f.unlink()
     with pytest.raises(FileNotFoundError, match="no inference logs found"):
         run_monitor_for_symbol(cfg, cfg.symbols[0], notifier=None)

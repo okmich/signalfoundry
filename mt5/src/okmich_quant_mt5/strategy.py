@@ -1,6 +1,5 @@
 import json
 import logging
-import traceback
 from abc import abstractmethod
 from datetime import datetime
 from typing import Union
@@ -40,10 +39,21 @@ logger = logging.getLogger(__name__)
 
 class BaseMt5Strategy(BaseStrategy):
     def __init__(self, config: StrategyConfig, signal: BaseSignal, *args, **kwargs):
-        super().__init__(config, signal, *args, **kwargs)
+        # Supply the contract envelope's integer-minute timeframe from the MT5 timeframe constant
+        # (a raw MT5 constant is NOT minutes — e.g. H1 == 16385) (LOGGING_CONTRACT §6).
+        tf_min = number_of_minutes_in_timeframe(config.timeframe)
+        if tf_min <= 0:
+            # number_of_minutes_in_timeframe returns -1 for an unrecognised timeframe. A bad value
+            # would silently corrupt the inference-log path segment (.../<tf>/...) and every
+            # asof_bar_ts in the envelope, so fail fast here rather than emit garbage (LOGGING_CONTRACT §6).
+            raise ValueError(
+                f"Unsupported MT5 timeframe {config.timeframe!r}: cannot resolve integer minutes "
+                f"for the inference-log envelope. Supported: {list(timeframe_minutes_dict.keys())}"
+            )
+        super().__init__(config, signal, *args, timeframe_minutes=tf_min, **kwargs)
 
         self.position_manager = get_position_manager(config) if config.position_manager else None
-        self.max_number_of_mins_in_tf = number_of_minutes_in_timeframe(self.strategy_config.timeframe)
+        self.max_number_of_mins_in_tf = tf_min
         self.max_number_of_open_positions = config.max_number_of_open_positions
 
         # load symbol information
@@ -380,78 +390,75 @@ class GenericBasicStrategy(BaseMt5Strategy):
         super().__init__(config, signal, *args, **kwargs)
 
     def on_new_bar(self):
+        # Exceptions propagate to the sealed BaseStrategy.run() template, which records the
+        # outcome=error heartbeat and re-raises for MultiTrader/StrategyHealth — so this body must
+        # NOT swallow them.
         _symbol = self.strategy_config.symbol
         _magic = self.strategy_config.magic
         logging.info(f"GenericBasicStrategy ({self.strategy_config}) on_new_bar: {self.latest_run_dt}. EXECUTING... ")
-        try:
-            price_bars = self.fetch_ohlcv()
+        price_bars = self.fetch_ohlcv()
 
-            # Check if we got valid data
-            if price_bars is None:
-                logger.warning(f"Skipping strategy execution - no valid price data")
-                return None
+        # Check if we got valid data
+        if price_bars is None:
+            logger.warning(f"Skipping strategy execution - no valid price data")
+            return
 
-            entries_long, exits_long, entries_short, exits_short = self.signal_generator.generate(price_bars)
-            entries_long, exits_long, entries_short, exits_short = (
-                entries_long[-1].item(), exits_long[-1].item(),
-                entries_short[-1].item(), exits_short[-1].item(),
-            )
-            logger.info(
-                f"Signal generated for {_symbol} ({self.strategy_config.magic}): "
-                f"{(entries_long, exits_long, entries_short, exits_short)}"
-            )
+        entries_long, exits_long, entries_short, exits_short = self.signal_generator.generate(price_bars)
+        entries_long, exits_long, entries_short, exits_short = (
+            entries_long[-1].item(), exits_long[-1].item(),
+            entries_short[-1].item(), exits_short[-1].item(),
+        )
+        logger.info(
+            f"Signal generated for {_symbol} ({self.strategy_config.magic}): "
+            f"{(entries_long, exits_long, entries_short, exits_short)}"
+        )
 
-            positions = get_positions(_symbol, _magic)
-            if len(positions) > 0 and (exits_long != 0 or exits_short != 0):
-                for pos in positions:
-                    if (exits_long != 0 and pos["type"] == 0) or (exits_short != 0 and pos["type"] == 1):
-                        closed = self.close_position(pos["ticket"])
-                        if closed and self.notifier:
-                            self.notifier.on_trade_closed(
-                                symbol=_symbol,
-                                ticket=pos["ticket"],
-                                profit=pos.get("profit", 0.0),
-                            )
-
-            if entries_long != 0 or entries_short != 0:
-                positions = get_positions(_symbol, _magic)  # call again incase things changed while closing positions
-                if len(positions) >= self.max_number_of_open_positions:
-                    logger.info(f"Got an entry signal but an open position for {_symbol} ({self.strategy_config.magic}) already exist.")
-                else:
-                    # Fetch tick info and determine direction
-                    direction = "buy" if entries_long > 0  else ("sell" if entries_short > 0 else "hold")
-                    tick = self.fetch_latest_tick_info()
-
-                    # Check filters before opening position
-                    filter_context = {
-                        "datetime": self.latest_run_dt,
-                        "symbol_info": self.symbol_info_dict,
-                        "tick_info": tick,
-                        "open_positions": len(positions),
-                        "spread": tick.get("spread", 0),
-                        "signal_type": "long" if entries_long != 0 else "short",
-                    }
-
-                    if not self.filter_chain(filter_context):
-                        logger.info(f"Filter chain blocked entry signal for {_symbol} ({self.strategy_config.magic})")
-                        return None
-
-                    # Filters passed - proceed with opening position
-                    price = tick["ask"] if direction == "buy" else tick["bid"]
-                    opened = self.open_position(direction, price=price)
-                    if opened and self.notifier:
-                        self.notifier.on_trade_opened(
+        positions = get_positions(_symbol, _magic)
+        if len(positions) > 0 and (exits_long != 0 or exits_short != 0):
+            for pos in positions:
+                if (exits_long != 0 and pos["type"] == 0) or (exits_short != 0 and pos["type"] == 1):
+                    closed = self.close_position(pos["ticket"])
+                    if closed and self.notifier:
+                        self.notifier.on_trade_closed(
                             symbol=_symbol,
-                            direction=direction,
-                            volume=self.calculate_lot_size(),
-                            price=price,
-                            sl=0.0,
-                            tp=0.0,
-                            magic=_magic,
-                            ticket=0,
+                            ticket=pos["ticket"],
+                            profit=pos.get("profit", 0.0),
                         )
-        except Exception as e:
-            traceback.print_exc()
-            if self.notifier:
-                self.notifier.on_error(self.strategy_config.name, str(e))
-        return None
+
+        if entries_long != 0 or entries_short != 0:
+            positions = get_positions(_symbol, _magic)  # call again incase things changed while closing positions
+            if len(positions) >= self.max_number_of_open_positions:
+                logger.info(f"Got an entry signal but an open position for {_symbol} ({self.strategy_config.magic}) already exist.")
+            else:
+                # Fetch tick info and determine direction
+                direction = "buy" if entries_long > 0  else ("sell" if entries_short > 0 else "hold")
+                tick = self.fetch_latest_tick_info()
+
+                # Check filters before opening position
+                filter_context = {
+                    "datetime": self.latest_run_dt,
+                    "symbol_info": self.symbol_info_dict,
+                    "tick_info": tick,
+                    "open_positions": len(positions),
+                    "spread": tick.get("spread", 0),
+                    "signal_type": "long" if entries_long != 0 else "short",
+                }
+
+                if not self.filter_chain(filter_context):
+                    logger.info(f"Filter chain blocked entry signal for {_symbol} ({self.strategy_config.magic})")
+                    return
+
+                # Filters passed - proceed with opening position
+                price = tick["ask"] if direction == "buy" else tick["bid"]
+                opened = self.open_position(direction, price=price)
+                if opened and self.notifier:
+                    self.notifier.on_trade_opened(
+                        symbol=_symbol,
+                        direction=direction,
+                        volume=self.calculate_lot_size(),
+                        price=price,
+                        sl=0.0,
+                        tp=0.0,
+                        magic=_magic,
+                        ticket=0,
+                    )

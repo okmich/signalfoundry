@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "okmich_quant_core/logging/schema/strategy_reenabled.json",
+  "title": "LOGGING_CONTRACT strategy_reenabled record (v1.0.0)",
+  "description": "Strategy re-enable (LOGGING_CONTRACT §7.3). Per-strategy; emitted when a circuit-broken strategy is re-enabled.",
+  "type": "object",
+  "properties": {
+    "log_schema_version": {"type": "string"},
+    "event": {"const": "strategy_reenabled"},
+    "wall_clock_utc": {"type": "string", "format": "date-time"},
+    "runner_id": {"type": "string"},
+    "runner_start_token": {"type": "string"},
+    "logical_system_id": {"type": "string"},
+    "strategy": {"type": "string"},
+    "symbol": {"type": "string"},
+    "timeframe": {"type": "integer"},
+    "broker": {"type": "string"},
+    "account_id": {"type": "string"},
+    "broker_session_id": {"type": ["string", "null"]},
+    "order_tag": {"type": ["string", "integer", "null"]},
+    "reason": {"type": ["string", "null"]}
+  },
+  "required": [
+    "log_schema_version", "event", "wall_clock_utc", "runner_id", "runner_start_token",
+    "logical_system_id", "strategy", "symbol", "timeframe", "broker", "account_id"
+  ],
+  "additionalProperties": true
+}

@@ -2277,7 +2277,7 @@ wheels = [
 
 [[package]]
 name = "okmich-quant-core"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "core" }
 dependencies = [
     { name = "numpy" },
@@ -2403,6 +2403,7 @@ source = { editable = "ml" }
 dependencies = [
     { name = "lightgbm" },
     { name = "numba" },
+    { name = "okmich-quant-core" },
     { name = "okmich-quant-features" },
     { name = "pandas" },
     { name = "pomegranate" },
@@ -2417,6 +2418,7 @@ dependencies = [
 requires-dist = [
     { name = "lightgbm", specifier = "==4.6.0" },
     { name = "numba", specifier = "==0.63.1" },
+    { name = "okmich-quant-core", editable = "core" },
     { name = "okmich-quant-features", editable = "features" },
     { name = "pandas", specifier = "==2.3.0" },
     { name = "pomegranate", git = "https://github.com/okmich/pomegranate.git?rev=feat%2Fdtype-parameter-and-log-stability" },
@@ -3760,6 +3762,7 @@ dependencies = [
 dev = [
     { name = "black" },
     { name = "ipython" },
+    { name = "jsonschema" },
     { name = "jupyter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -3774,6 +3777,7 @@ requires-dist = [{ name = "okmich-quant-core", editable = "core" }]
 dev = [
     { name = "black", specifier = ">=23.0.0" },
     { name = "ipython", specifier = ">=8.0.0" },
+    { name = "jsonschema", specifier = ">=4.0.0" },
     { name = "jupyter", specifier = ">=1.0.0" },
     { name = "mypy", specifier = ">=1.5.0" },
     { name = "pytest", specifier = ">=7.4.0" },

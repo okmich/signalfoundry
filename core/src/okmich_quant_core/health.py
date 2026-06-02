@@ -18,6 +18,7 @@ class StrategyHealth:
         self.total_errors = 0
         self.total_runs = 0
         self.total_position_checks = 0
+        self.last_error: Optional[str] = None
 
         # Timing
         self.last_run_time: Optional[datetime] = None
@@ -48,13 +49,15 @@ class StrategyHealth:
         self.last_run_time = datetime.now()
         self.last_success_time = datetime.now()
 
-    def record_error(self, execution_time_ms: float):
+    def record_error(self, execution_time_ms: float, last_error: Optional[str] = None):
         self.consecutive_errors += 1
         self.total_errors += 1
         self.total_runs += 1
         self.total_execution_time_ms += execution_time_ms
         self.last_run_time = datetime.now()
         self.last_error_time = datetime.now()
+        if last_error is not None:
+            self.last_error = last_error
 
         # Circuit breaker: disable after too many consecutive errors
         if self.consecutive_errors >= self.max_consecutive_errors:

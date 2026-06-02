@@ -1,19 +1,17 @@
 """Log-based I/O primitives for the streaming monitoring pipeline.
 
-The live trader writes one JSONL line per inference cycle via
-:class:`okmich_quant_core.JsonlInferenceLogger`; the schema is the universal
-:class:`okmich_quant_core.InferenceLogRecord` with HMM-specific fields nested
-under ``extras``. The monitor process (running on its own cadence, out-of-band)
-reads those files via :func:`read_inference_log`, hydrates the cached
-baselines from ``metadata.json`` via
+The live trader writes one LOGGING_CONTRACT v1.0.0 record per inference cycle via
+:class:`okmich_quant_core.JsonlEventLogger`. The monitor process (running on its own
+cadence, out-of-band) reads those files via :func:`read_inference_log`, hydrates the
+cached baselines from ``metadata.json`` via
 :func:`load_posterior_and_loglik_baselines_from_metadata`, and evaluates the
 three streaming gates via :func:`run_streaming_gates`. The trader has no
 dependency on this module; the monitor has no dependency on the trader.
 
-HMM-runner contract (what the reader expects at each line):
+HMM-runner contract (what the reader pulls from each ``event == "bar"`` record):
 
-* Top-level: ``label_bar_ts`` (ISO string or null) — bar the prediction is for
-* Top-level: ``features`` (dict[str, float]) — emission feature values
+* ``label_bar_ts`` (ISO string or null) — bar the prediction is for
+* ``features`` (dict[str, float]) — emission feature values
 * ``extras.probs`` (list[float] of length n_states) — matured posterior
 * ``extras.loglik`` (float) — per-bar predictive log-likelihood
 
@@ -25,13 +23,18 @@ fully-populated tail.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping
+import warnings
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+from okmich_quant_core.logging import LOG_SCHEMA_VERSION, BarOutcome, LogEventType
+
+_SUPPORTED_MAJOR = int(LOG_SCHEMA_VERSION.split(".")[0])
 
 from .monitoring import FeatureHealthBaselines, FeatureHealthReport, LoglikDriftBaselines, LoglikDriftReport,\
     PosteriorHealthBaselines, PosteriorHealthReport, score_feature_health, score_loglik_health,\
@@ -55,9 +58,9 @@ class InferenceLogFrame:
     consistency across all four fields is asserted on construction.
 
     Named ``InferenceLogFrame`` (rather than the naive ``InferenceLog``) to
-    avoid collision with the per-record :class:`okmich_quant_core.InferenceLogRecord`
+    avoid collision with the per-record :class:`okmich_quant_core.BarRecord`
     that the writer emits — this is the *tabular* / columnar projection of
-    many such records.
+    many such ``bar`` records.
     """
     label_timestamps: pd.DatetimeIndex
     features: NDArray
@@ -119,35 +122,39 @@ def _coerce_paths(paths: str | Path | Iterable[str | Path]) -> list[Path]:
     return [Path(p) for p in paths]
 
 
-def read_inference_log(paths: str | Path | Iterable[str | Path]) -> InferenceLogFrame:
+def _to_utc(value) -> pd.Timestamp:
+    t = pd.Timestamp(value)
+    return t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
+
+
+def read_inference_log(paths: str | Path | Iterable[str | Path],
+                       on_quarantine: Callable[[str, int, str], None] | None = None) -> InferenceLogFrame:
     """Parse one or more inference JSONL files into a typed :class:`InferenceLogFrame`.
 
-    Each line must conform to :class:`okmich_quant_core.InferenceLogRecord`'s
-    serialised form: top-level ``label_bar_ts`` (ISO string or null),
-    ``features`` (dict[str, float]), plus an ``extras`` sub-block carrying
-    HMM-specific fields ``probs`` (list of floats) and ``loglik`` (float).
+    Reads the LOGGING_CONTRACT v1.0.0 event-typed schema (each line is a record with an ``event``
+    discriminator). Only ``event == "bar"`` records with ``outcome == "ok"`` feed the gates;
+    ``startup`` / ``shutdown`` / breaker records and ``error`` / ``skipped_disabled`` bars are
+    skipped (a failed/partial cycle must not leak a stale posterior into the baseline comparison).
+    From each gate-eligible ``bar`` this pulls Tier 1 ``label_bar_ts`` + ``features`` and the HMM
+    ``extras.probs`` / ``extras.loglik`` the gates read.
 
-    ``paths`` may be a single file path or an iterable of paths; files are
-    concatenated in the order they are given (caller is responsible for
-    sorting if chronological order is required — typically by filename when
-    the trader uses daily-rotated log files).
+    ``paths`` may be a single path or an iterable; files are concatenated in the given order
+    (caller sorts — typically by filename for daily-rotated logs).
 
-    Lines where ``label_bar_ts`` is null, or where ``extras.probs`` /
-    ``extras.loglik`` is missing or null, are silently dropped — these are
-    warmup rows the gates cannot evaluate. Lines where required top-level
-    keys are missing entirely raise ``ValueError``. The feature-name set
-    and ``n_states`` must be consistent across all retained rows, otherwise
-    a ``ValueError`` is raised — schema changes (variant swap, n_states
-    change) must rotate to a new log file rather than appending.
+    **Warmup rows** — a ``bar`` where ``label_bar_ts`` is null, or ``extras.probs`` /
+    ``extras.loglik`` is missing/null — are silently dropped; the gates run on the populated tail.
 
-    **Truncated tail tolerance:** if the *last* line of a file fails to
-    parse as JSON, it is treated as a torn write (trader killed mid-flush)
-    and skipped with a warning rather than raising. Earlier invalid lines
-    still raise — they indicate genuine corruption, not crash truncation.
+    **Quarantine-and-continue (LOGGING_CONTRACT §13).** A line that fails to parse, carries an
+    unknown major ``log_schema_version``, or is a structurally invalid ``bar`` (bad ``extras`` /
+    ``features`` type, feature-name drift, ``n_states`` drift) is **rejected, recorded, and an
+    alert-worthy warning raised — then parsing continues**. One corrupt line never blinds the
+    consumer to the healthy heartbeats after it. ``on_quarantine(path, line_no, reason)`` is invoked
+    per offending line (a side channel for the supervisor); a ``RuntimeWarning`` is always raised.
 
-    All timestamps are coerced to UTC (``utc=True``) at read time, so logs
-    written by traders in different timezones / DST regimes compare cleanly
-    on the canonical UTC axis.
+    Raises only for whole-input problems: empty ``paths``, a missing file, or no fully-populated
+    ``bar`` rows across all files (every line empty / non-bar / warmup / quarantined).
+
+    All timestamps are coerced to UTC at read time.
     """
     resolved = _coerce_paths(paths)
     if not resolved:
@@ -159,93 +166,119 @@ def read_inference_log(paths: str | Path | Iterable[str | Path]) -> InferenceLog
     loglik_values: list[float] = []
     feature_names: tuple[str, ...] | None = None
     n_states: int | None = None
+    quarantined_total = 0
 
     for path in resolved:
         if not path.is_file():
             raise FileNotFoundError(f"read_inference_log: log file not found: {path}")
+        # Per-file quarantine accounting. We deliberately do NOT warn per line: the default
+        # warnings filter de-dups by call site, so a systematically-bad file would surface only its
+        # first quarantine and silently hide the rest. Instead, the per-line detail goes to the
+        # on_quarantine side channel, and one aggregate alert-worthy warning is raised per file (§13).
+        file_quarantined: list[tuple[int, str]] = []
+
+        def _quarantine(line_no: int, reason: str, _p: Path = path) -> None:
+            file_quarantined.append((line_no, reason))
+            if on_quarantine is not None:
+                on_quarantine(str(_p), line_no, reason)
+
         with open(path, "r", encoding="utf-8") as fh:
-            raw_lines = fh.readlines()
-        for line_no, raw in enumerate(raw_lines, start=1):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                # Last-line failure → likely torn write from trader killed mid-flush.
-                # Skip with a warning so the monitor sees the rest of the file.
-                if line_no == len(raw_lines):
-                    import warnings
-                    warnings.warn(
-                        f"read_inference_log: ignoring truncated/invalid last line at {path}:{line_no}: {exc}",
-                        RuntimeWarning,
-                    )
+            for line_no, raw in enumerate(fh, start=1):  # stream — never materialise the whole file
+                raw = raw.strip()
+                if not raw:
                     continue
-                raise ValueError(f"read_inference_log: invalid JSON at {path}:{line_no}: {exc}") from exc
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    _quarantine(line_no, f"invalid JSON: {exc}")
+                    continue
 
-            required = ("label_bar_ts", "features", "extras")
-            missing = [k for k in required if k not in record]
-            if missing:
-                raise ValueError(
-                    f"read_inference_log: missing required keys {missing} at {path}:{line_no}"
-                )
+                if not isinstance(record, Mapping) or "event" not in record:
+                    _quarantine(line_no, "missing 'event' discriminator")
+                    continue
 
-            extras = record["extras"]
-            if not isinstance(extras, Mapping):
-                raise ValueError(
-                    f"read_inference_log: 'extras' must be a mapping at {path}:{line_no}, "
-                    f"got {type(extras).__name__}"
-                )
+                version = record.get("log_schema_version")
+                if version is None:
+                    _quarantine(line_no, "missing required 'log_schema_version'")
+                    continue
+                try:
+                    if int(str(version).split(".")[0]) > _SUPPORTED_MAJOR:
+                        _quarantine(line_no, f"unknown major log_schema_version {version!r} "
+                                             f"(consumer supports major {_SUPPORTED_MAJOR})")
+                        continue
+                except (ValueError, AttributeError):
+                    _quarantine(line_no, f"unparseable log_schema_version {version!r}")
+                    continue
 
-            # Warmup / null-decision rows: any of the gate inputs missing → drop silently.
-            if record["label_bar_ts"] is None:
-                continue
-            probs = extras.get("probs")
-            loglik = extras.get("loglik")
-            if probs is None or loglik is None:
-                continue
+                if record["event"] != LogEventType.BAR.value:
+                    continue  # startup / shutdown / breaker records are not gate input
 
-            features = record["features"]
-            if not isinstance(features, Mapping):
-                raise ValueError(
-                    f"read_inference_log: 'features' must be a mapping at {path}:{line_no}, "
-                    f"got {type(features).__name__}"
-                )
+                # Only completed cycles feed the gates: an error/skipped bar must not leak a stale or
+                # partial posterior into the drift baseline comparison.
+                if record.get("outcome") != BarOutcome.OK.value:
+                    continue
 
-            row_feature_names = tuple(features.keys())
-            if feature_names is None:
-                feature_names = row_feature_names
-            elif row_feature_names != feature_names:
-                raise ValueError(
-                    f"read_inference_log: feature-name set changed at {path}:{line_no}: "
-                    f"expected {feature_names}, got {row_feature_names}"
-                )
+                extras = record.get("extras", {})
+                if not isinstance(extras, Mapping):
+                    _quarantine(line_no, f"'extras' must be a mapping, got {type(extras).__name__}")
+                    continue
+                features = record.get("features", {})
+                if not isinstance(features, Mapping):
+                    _quarantine(line_no, f"'features' must be a mapping, got {type(features).__name__}")
+                    continue
 
-            if not isinstance(probs, list):
-                raise ValueError(
-                    f"read_inference_log: extras['probs'] must be a list at {path}:{line_no}, "
-                    f"got {type(probs).__name__}"
-                )
-            row_n_states = len(probs)
-            if n_states is None:
-                n_states = row_n_states
-            elif row_n_states != n_states:
-                raise ValueError(
-                    f"read_inference_log: posterior length changed at {path}:{line_no}: "
-                    f"expected {n_states}, got {row_n_states}"
-                )
+                # Warmup / null-decision rows: any gate input missing → drop silently.
+                if record.get("label_bar_ts") is None:
+                    continue
+                probs = extras.get("probs")
+                loglik = extras.get("loglik")
+                if probs is None or loglik is None:
+                    continue
 
-            label_ts.append(pd.Timestamp(record["label_bar_ts"], tz="UTC")
-                            if pd.Timestamp(record["label_bar_ts"]).tz is None
-                            else pd.Timestamp(record["label_bar_ts"]).tz_convert("UTC"))
-            feature_rows.append([float(features[name]) for name in feature_names])
-            posterior_rows.append([float(p) for p in probs])
-            loglik_values.append(float(loglik))
+                row_feature_names = tuple(features.keys())
+                if feature_names is None:
+                    feature_names = row_feature_names
+                elif row_feature_names != feature_names:
+                    _quarantine(line_no, f"feature-name set changed: expected {feature_names}, "
+                                         f"got {row_feature_names} (rotate to a new file on schema change)")
+                    continue
+
+                if not isinstance(probs, list):
+                    _quarantine(line_no, f"extras['probs'] must be a list, got {type(probs).__name__}")
+                    continue
+                if n_states is None:
+                    n_states = len(probs)
+                elif len(probs) != n_states:
+                    _quarantine(line_no, f"posterior length changed: expected {n_states}, got {len(probs)} "
+                                         f"(rotate to a new file on n_states change)")
+                    continue
+
+                try:
+                    row_features = [float(features[name]) for name in feature_names]
+                    row_label = _to_utc(record["label_bar_ts"])
+                    row_probs = [float(p) for p in probs]
+                    row_loglik = float(loglik)
+                except (KeyError, TypeError, ValueError) as exc:
+                    _quarantine(line_no, f"non-numeric gate values: {exc}")
+                    continue
+                label_ts.append(row_label)
+                feature_rows.append(row_features)
+                posterior_rows.append(row_probs)
+                loglik_values.append(row_loglik)
+
+        if file_quarantined:
+            quarantined_total += len(file_quarantined)
+            first_ln, first_reason = file_quarantined[0]
+            warnings.warn(
+                f"read_inference_log: quarantined {len(file_quarantined)} line(s) in {path}; "
+                f"first at line {first_ln}: {first_reason}", RuntimeWarning,
+            )
 
     if not label_ts:
         raise ValueError(
-            f"read_inference_log: no fully-populated rows found across {len(resolved)} file(s) "
-            f"— every line either was empty, was a warmup row, or had null probs/loglik."
+            f"read_inference_log: no fully-populated bar rows found across {len(resolved)} file(s) "
+            f"— every line was empty, non-bar, a non-ok outcome, a warmup row, or quarantined "
+            f"(quarantined={quarantined_total})."
         )
 
     return InferenceLogFrame(label_timestamps=pd.DatetimeIndex(label_ts), features=np.asarray(feature_rows, dtype=float),
@@ -274,8 +307,16 @@ class MonitoringCycleReport:
 
 def run_streaming_gates(log: InferenceLogFrame, posterior_baselines: PosteriorHealthBaselines,
                         feature_baselines: FeatureHealthBaselines,
-                        loglik_baselines: LoglikDriftBaselines) -> MonitoringCycleReport:
+                        loglik_baselines: LoglikDriftBaselines, *,
+                        max_entropy_abs_z: float = 3.0, max_occupancy_drift_l1: float = 0.2,
+                        max_flip_rate_drift_abs: float = 0.1, max_ks_statistic: float = 0.1,
+                        ks_alpha: float = 0.01, max_loglik_abs_z: float = 3.0) -> MonitoringCycleReport:
     """Evaluate all three streaming gates against ``log`` and aggregate.
+
+    Gate thresholds are forwarded to the underlying scorers; the defaults match each scorer's own
+    defaults, so callers that don't tune them get identical behaviour. Tuning callers (the streaming
+    monitor) pass them here rather than calling the scorers directly, so the pre-validation guards
+    below (feature-name alignment, minimum window) are never bypassed.
 
     Each gate is run against the entire log slice the caller passes:
 
@@ -314,9 +355,13 @@ def run_streaming_gates(log: InferenceLogFrame, posterior_baselines: PosteriorHe
             f"or pass a wider trailing slice."
         )
 
-    posterior_report = score_posterior_health(log.posteriors, posterior_baselines)
-    feature_report = score_feature_health(log.features, feature_baselines)
-    loglik_report = score_loglik_health(log.logliks, loglik_baselines)
+    posterior_report = score_posterior_health(log.posteriors, posterior_baselines,
+                                              max_entropy_abs_z=max_entropy_abs_z,
+                                              max_occupancy_drift_l1=max_occupancy_drift_l1,
+                                              max_flip_rate_drift_abs=max_flip_rate_drift_abs)
+    feature_report = score_feature_health(log.features, feature_baselines,
+                                          max_ks_statistic=max_ks_statistic, alpha=ks_alpha)
+    loglik_report = score_loglik_health(log.logliks, loglik_baselines, max_abs_z=max_loglik_abs_z)
 
     overall_ok = bool(posterior_report.overall_ok and feature_report.overall_ok and loglik_report.overall_ok)
     return MonitoringCycleReport(overall_ok=overall_ok, posterior=posterior_report, feature=feature_report,

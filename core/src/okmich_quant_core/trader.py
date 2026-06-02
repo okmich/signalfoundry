@@ -38,9 +38,16 @@ class Trader:
         except Exception as e:
             logger.error(f"Error in position check for '{self.health.strategy_name}': {e}", exc_info=True)
 
+    @property
+    def strategies(self):
+        """Uniform accessor (parity with MultiTrader) so the runner can bind/enumerate strategies."""
+        return [self.strategy]
+
     def run(self, run_dt: datetime):
         if not self.health.is_enabled:
             logger.warning( f"Strategy '{self.health.strategy_name}' is disabled, skipping execution")
+            # Ops-channel heartbeat so a circuit-broken system is distinguishable from wedged (§7.3).
+            self.strategy.emit_skipped_disabled_bar(run_dt)
             return
 
         start_time = time()
@@ -54,7 +61,7 @@ class Trader:
                 f"in {execution_time_ms:.2f}ms")
         except Exception as e:
             execution_time_ms = (time() - start_time) * 1000
-            self.health.record_error(execution_time_ms)
+            self.health.record_error(execution_time_ms, last_error=str(e))
 
             logger.error(
                 f"Error in strategy '{self.health.strategy_name}' "
@@ -70,6 +77,9 @@ class Trader:
                     f"Circuit breaker tripped for '{self.health.strategy_name}' - "
                     f"strategy is now DISABLED"
                 )
+                # Structured ops-channel record IN ADDITION to the critical+Telegram alert (§7.3).
+                self.strategy.emit_circuit_breaker_tripped(
+                    consecutive_errors=self.health.consecutive_errors, last_error=str(e))
                 if self.strategy.notifier:
                     self.strategy.notifier.on_circuit_breaker_tripped(
                         self.health.strategy_name, self.health.consecutive_errors
@@ -79,7 +89,10 @@ class Trader:
         return self.health.get_status_summary()
 
     def enable(self):
+        was_enabled = self.health.is_enabled
         self.health.enable()
+        if not was_enabled and self.health.is_enabled:
+            self.strategy.emit_strategy_reenabled(reason="manual")
 
     def disable(self):
         self.health.disable()

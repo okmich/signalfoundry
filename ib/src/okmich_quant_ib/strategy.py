@@ -3,14 +3,16 @@ the ``GenericBasicIBStrategy`` execution loop fired on completed-bar events.
 """
 import asyncio
 import logging
-import traceback
 from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Optional, Union
 
+import pandas as pd
 from ib_async import IB, Contract
 
-from okmich_quant_core import BaseSignal, BaseStrategy, OrderType, PositionSizingType, StrategyConfig
+from okmich_quant_core import (
+    BarOutcome, BaseSignal, BaseStrategy, OrderType, PositionSizingType, StrategyConfig, StrategyHealth,
+)
 from okmich_quant_core.notification.base import BaseNotifier
 from okmich_quant_core.price_buffer import PriceBuffer
 
@@ -35,9 +37,31 @@ logger = logging.getLogger(__name__)
 
 
 class BaseIBStrategy(BaseStrategy):
+    #: The async per-bar seam is sealed: it owns the inference-log heartbeat (§5.1).
+    _IB_SEALED = frozenset({"_on_bar_close"})
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)  # also runs BaseStrategy's seal (run / _emit_bar_record / bind)
+        for name in BaseIBStrategy._IB_SEALED:
+            if name in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__} may not override sealed BaseIBStrategy.{name}() — the inference-log "
+                    f"heartbeat lives there (LOGGING_CONTRACT §5.1). Implement on_new_bar() instead."
+                )
+
     def __init__(self, config: StrategyConfig, signal: BaseSignal, contract_cfg: IBContractConfig,
-                 notifier: Optional[BaseNotifier] = None, **kwargs):
-        super().__init__(config, signal, notifier, **kwargs)
+                 notifier: Optional[BaseNotifier] = None, *, max_consecutive_errors: int = 5, **kwargs):
+        tf_min = bar_size_to_minutes(config.timeframe)
+        if tf_min >= 1440:
+            raise ValueError(
+                f"Timeframe '{config.timeframe}' is not supported in real-time bar mode. "
+                "Daily bars cannot be assembled from 5-second real-time bars; override "
+                "_bootstrap and subscribe via reqHistoricalDataAsync polling instead."
+            )
+        super().__init__(config, signal, notifier, timeframe_minutes=tf_min, **kwargs)
+        # Per-strategy circuit breaker — IB has no MultiTrader, so the breaker lives here to bring
+        # IB to MT5 near-par for circuit_breaker_tripped / strategy_reenabled / skipped_disabled (§7.3).
+        self._ib_health = StrategyHealth(config.name, max_consecutive_errors)
         self.contract_cfg = contract_cfg
         self.max_number_of_open_positions = config.max_number_of_open_positions
 
@@ -49,24 +73,22 @@ class BaseIBStrategy(BaseStrategy):
         self._rt_bars = None
         self._ticker = None
 
-        _tf_min = bar_size_to_minutes(config.timeframe)
-        if _tf_min >= 1440:
-            raise ValueError(
-                f"Timeframe '{config.timeframe}' is not supported in real-time bar mode. "
-                "Daily bars cannot be assembled from 5-second real-time bars; override "
-                "_bootstrap and subscribe via reqHistoricalDataAsync polling instead."
-            )
         self.price_buffer = PriceBuffer(
             symbol=config.symbol,
             timeframe=config.timeframe,
             buffer_size=config.bars_to_copy,
             exclude_columns=getattr(config, "exclude_columns", None),
-            timeframe_minutes=_tf_min,
+            timeframe_minutes=tf_min,
         )
         self.filter_chain = create_filter(config)
         self.position_manager = None
         self._bracket_trades: dict[int, list] = {}
         self._bar_lock = asyncio.Lock()
+
+    @property
+    def health(self) -> StrategyHealth:
+        """The per-strategy circuit-breaker health tracker (IB's MultiTrader-equivalent)."""
+        return self._ib_health
 
     # ---- Lifecycle ----
 
@@ -165,18 +187,60 @@ class BaseIBStrategy(BaseStrategy):
     # ---- Event handlers ----
 
     async def _on_bar_close(self, completed_bar: dict) -> None:
+        """SEALED IB seam — the un-bypassable per-bar inference-log heartbeat (§5.1, design A).
+
+        Mirrors the sync ``BaseStrategy.run()`` template for the event-driven IB path: derive
+        ``asof_bar_ts`` from the framework BarAggregator boundary, wrap ``on_new_bar()``, emit the
+        Tier 0 ``bar`` record (+ best-effort Tier 1), then drive the IB circuit breaker. Unlike MT5
+        it does NOT re-raise (no MultiTrader above it) — the breaker is the bookkeeping target.
+        """
         if completed_bar.get("partial", False):
             logger.debug(f"Skipping partial bar for {self.strategy_config.symbol}")
             return
+        asof_bar_ts = completed_bar["time"]  # framework-derived UTC bar boundary (not developer data)
+        # The disabled-check, the cycle, and the breaker update all run UNDER the bar lock so the
+        # breaker state is read+written atomically w.r.t. the cycle. Otherwise two queued bar callbacks
+        # could both pass an outside-the-lock enabled-check and the second would run on_new_bar() after
+        # the first already tripped the breaker.
         async with self._bar_lock:
+            if not self._ib_health.is_enabled:
+                # Circuit-broken: skip the cycle but emit a skipped heartbeat so ops sees why this
+                # system went quiet while siblings keep trading (§7.3).
+                self._emit_bar_record(asof_bar_ts=asof_bar_ts, outcome=BarOutcome.SKIPPED_DISABLED)
+                return
+            error: Optional[Exception] = None
             try:
                 self._append_bar(completed_bar)
                 self.latest_run_dt = completed_bar["time"]
                 await self.on_new_bar()
             except Exception as e:
+                error = e
                 logger.exception(f"Error in on_new_bar for {self.strategy_config.symbol}: {e}")
                 if self.notifier:
                     self.notifier.on_error(self.strategy_config.name, str(e))
+            self._emit_bar_record(asof_bar_ts=asof_bar_ts,
+                                  outcome=BarOutcome.ERROR if error is not None else BarOutcome.OK)
+            self._record_bar_health(error)
+
+    def _record_bar_health(self, error: Optional[Exception]) -> None:
+        """Drive the IB circuit breaker after a bar, mirroring MultiTrader.run() semantics (§7.3)."""
+        was_enabled = self._ib_health.is_enabled
+        if error is None:
+            self._ib_health.record_success(0.0)
+            return
+        self._ib_health.record_error(0.0)
+        if was_enabled and not self._ib_health.is_enabled:  # just tripped
+            self.emit_circuit_breaker_tripped(consecutive_errors=self._ib_health.consecutive_errors,
+                                              last_error=str(error))
+            if self.notifier:
+                self.notifier.on_circuit_breaker_tripped(self.strategy_config.name,
+                                                         self._ib_health.consecutive_errors)
+
+    def reenable(self) -> None:
+        """Re-enable a circuit-broken strategy and emit strategy_reenabled (parity with MT5, §7.3)."""
+        if not self._ib_health.is_enabled:
+            self._ib_health.enable()
+            self.emit_strategy_reenabled(reason="manual")
 
     def _append_bar(self, completed_bar: dict) -> None:
         """Append a single completed OHLCV bar to the PriceBuffer.
@@ -187,7 +251,6 @@ class BaseIBStrategy(BaseStrategy):
         rejected as not-yet-closed. By the time ``_emit`` fires we are already
         inside the next 5-second period, so wall clock is a safe ceiling.
         """
-        import pandas as pd
         ts = completed_bar["time"]
         df = pd.DataFrame(
             {
@@ -397,101 +460,98 @@ class GenericBasicIBStrategy(BaseIBStrategy):
             f"GenericBasicIBStrategy ({self.strategy_config}) on_new_bar @ {self.latest_run_dt}"
         )
 
-        try:
-            price_bars = self.fetch_price_bars()
-            if price_bars is None or len(price_bars) < self.strategy_config.bars_to_copy:
-                logger.warning(f"Insufficient price data for {_symbol}")
-                return
+        # Exceptions propagate to the sealed _on_bar_close seam, which records the outcome=error
+        # heartbeat, notifies, and drives the IB circuit breaker — so this body must NOT swallow them.
+        price_bars = self.fetch_price_bars()
+        if price_bars is None or len(price_bars) < self.strategy_config.bars_to_copy:
+            logger.warning(f"Insufficient price data for {_symbol}")
+            return
 
-            entries_long, exits_long, entries_short, exits_short = self.signal_generator.generate(price_bars)
-            entries_long, exits_long, entries_short, exits_short = (
-                entries_long[-1].item(), exits_long[-1].item(),
-                entries_short[-1].item(), exits_short[-1].item(),
-            )
-            logger.info(
-                f"Signal {_symbol}({_magic}): "
-                f"L={entries_long},{exits_long} S={entries_short},{exits_short}"
-            )
+        entries_long, exits_long, entries_short, exits_short = self.signal_generator.generate(price_bars)
+        entries_long, exits_long, entries_short, exits_short = (
+            entries_long[-1].item(), exits_long[-1].item(),
+            entries_short[-1].item(), exits_short[-1].item(),
+        )
+        logger.info(
+            f"Signal {_symbol}({_magic}): "
+            f"L={entries_long},{exits_long} S={entries_short},{exits_short}"
+        )
 
+        positions = self.get_open_positions()
+        managed_closing_con_ids: set[int] = set()
+
+        if self.position_manager and positions:
+            managed_closing_con_ids = await self.position_manager.manage_positions(positions)
             positions = self.get_open_positions()
-            managed_closing_con_ids: set[int] = set()
 
-            if self.position_manager and positions:
-                managed_closing_con_ids = await self.position_manager.manage_positions(positions)
-                positions = self.get_open_positions()
+        signal_closed_con_ids: set[int] = set()
 
-            signal_closed_con_ids: set[int] = set()
-
-            if positions and (exits_long or exits_short):
-                for pos in positions:
-                    if pos["contract"].conId in managed_closing_con_ids:
-                        logger.info(
-                            f"Skipping signal close for {_symbol}: manager already submitted "
-                            f"a close for conId={pos['contract'].conId}"
-                        )
-                        continue
-                    is_long = pos["position"] > 0
-                    is_short = pos["position"] < 0
-                    if (exits_long and is_long) or (exits_short and is_short):
-                        if self.position_manager:
-                            stop_cancelled = await self.position_manager.cancel_protective_stop(pos)
-                            if not stop_cancelled:
-                                logger.critical(
-                                    f"Aborting close for {_symbol}: protective stop could not be "
-                                    "confirmed cancelled. Will retry on next bar."
-                                )
-                                continue
-                        submitted = await self.close_position(pos)
-                        if submitted:
-                            signal_closed_con_ids.add(pos["contract"].conId)
-                            logger.info(f"Close order submitted for {_symbol} position {pos['position']}")
-                        else:
-                            logger.error(f"Close order failed for {_symbol} position {pos['position']}")
-
-            all_closing_con_ids = managed_closing_con_ids | signal_closed_con_ids
-            if all_closing_con_ids:
-                logger.info(
-                    f"Skipping entry for {_symbol}: close submitted on this bar for conIds={all_closing_con_ids}"
-                )
-                return
-
-            if entries_long and entries_short:
-                logger.warning(
-                    f"Ambiguous signal for {_symbol}: both long and short entry on same bar — skipping entry"
-                )
-                return
-
-            if entries_long or entries_short:
-                direction = "BUY" if entries_long else "SELL"
-                positions = self.get_open_positions()
-                pending = get_pending_orders(
-                    self.ib, _symbol, _magic,
-                    con_id=self.contract.conId, action_filter=direction,
-                )
-                if len(positions) + len(pending) >= self.max_number_of_open_positions:
+        if positions and (exits_long or exits_short):
+            for pos in positions:
+                if pos["contract"].conId in managed_closing_con_ids:
                     logger.info(
-                        f"Entry signal ignored — max positions ({len(positions)} open + "
-                        f"{len(pending)} pending) reached for {_symbol}"
+                        f"Skipping signal close for {_symbol}: manager already submitted "
+                        f"a close for conId={pos['contract'].conId}"
                     )
-                    return
+                    continue
+                is_long = pos["position"] > 0
+                is_short = pos["position"] < 0
+                if (exits_long and is_long) or (exits_short and is_short):
+                    if self.position_manager:
+                        stop_cancelled = await self.position_manager.cancel_protective_stop(pos)
+                        if not stop_cancelled:
+                            logger.critical(
+                                f"Aborting close for {_symbol}: protective stop could not be "
+                                "confirmed cancelled. Will retry on next bar."
+                            )
+                            continue
+                    submitted = await self.close_position(pos)
+                    if submitted:
+                        signal_closed_con_ids.add(pos["contract"].conId)
+                        logger.info(f"Close order submitted for {_symbol} position {pos['position']}")
+                    else:
+                        logger.error(f"Close order failed for {_symbol} position {pos['position']}")
 
-                filter_context = {
-                    "datetime": self.latest_run_dt,
-                    "contract_info": self.contract_info,
-                    "open_positions": len(positions),
-                    "signal_type": "long" if entries_long else "short",
-                    "tick_info": self._current_tick_info(),
-                }
-                if not self.filter_chain(filter_context):
-                    logger.info(f"Filter chain blocked entry for {_symbol}")
-                    return
+        all_closing_con_ids = managed_closing_con_ids | signal_closed_con_ids
+        if all_closing_con_ids:
+            logger.info(
+                f"Skipping entry for {_symbol}: close submitted on this bar for conIds={all_closing_con_ids}"
+            )
+            return
 
-                submitted = await self.open_position(direction)
-                if submitted:
-                    logger.info(f"Entry order submitted for {_symbol} direction={direction}")
-                else:
-                    logger.error(f"Entry order failed for {_symbol} direction={direction}")
-        except Exception as e:
-            traceback.print_exc()
-            if self.notifier:
-                self.notifier.on_error(self.strategy_config.name, str(e))
+        if entries_long and entries_short:
+            logger.warning(
+                f"Ambiguous signal for {_symbol}: both long and short entry on same bar — skipping entry"
+            )
+            return
+
+        if entries_long or entries_short:
+            direction = "BUY" if entries_long else "SELL"
+            positions = self.get_open_positions()
+            pending = get_pending_orders(
+                self.ib, _symbol, _magic,
+                con_id=self.contract.conId, action_filter=direction,
+            )
+            if len(positions) + len(pending) >= self.max_number_of_open_positions:
+                logger.info(
+                    f"Entry signal ignored — max positions ({len(positions)} open + "
+                    f"{len(pending)} pending) reached for {_symbol}"
+                )
+                return
+
+            filter_context = {
+                "datetime": self.latest_run_dt,
+                "contract_info": self.contract_info,
+                "open_positions": len(positions),
+                "signal_type": "long" if entries_long else "short",
+                "tick_info": self._current_tick_info(),
+            }
+            if not self.filter_chain(filter_context):
+                logger.info(f"Filter chain blocked entry for {_symbol}")
+                return
+
+            submitted = await self.open_position(direction)
+            if submitted:
+                logger.info(f"Entry order submitted for {_symbol} direction={direction}")
+            else:
+                logger.error(f"Entry order failed for {_symbol} direction={direction}")

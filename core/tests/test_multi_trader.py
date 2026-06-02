@@ -3,39 +3,67 @@ Tests for MultiTrader class with multiple strategies.
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from okmich_quant_core.multi_trader import MultiTrader
 from okmich_quant_core.base_strategy import BaseStrategy
 from okmich_quant_core.config import StrategyConfig
+from okmich_quant_core.logging import BaseEventLogger, RunnerIdentity
+from okmich_quant_core.signal import BaseSignal
+
+
+_bar_seq = [0]
+
+
+def _bar_dt() -> datetime:
+    """Monotonically increasing bar timestamps spaced 1 minute apart (clears run()'s dup-guard)."""
+    _bar_seq[0] += 1
+    return datetime(2026, 1, 1) + timedelta(minutes=_bar_seq[0])
+
+
+class _RecordingLogger(BaseEventLogger):
+    """In-memory inference-log sink (no thread, no disk) so dispatch tests stay fast + isolated."""
+
+    def __init__(self):
+        self.records = []
+
+    def write(self, record):
+        self.records.append(record)
+
+    def drain(self, timeout=None):
+        pass
+
+    def close(self):
+        pass
 
 
 class MockStrategy(BaseStrategy):
-    """Mock strategy for testing."""
+    """Mock strategy for testing. Drives the real sealed template via on_new_bar()/is_new_bar()."""
 
     def __init__(self, name="MockStrategy", symbol="EURUSD", magic=1):
+        super().__init__(StrategyConfig(name=name, symbol=symbol, timeframe=1, magic=magic),
+                         BaseSignal(), inference_logger=_RecordingLogger())
+        self.bind_runner_identity(RunnerIdentity(runner_id="test-runner", runner_start_token="tok",
+                                                 broker="test", account_id="0", broker_session_id=None))
         self.name = name
-        self.strategy_config = StrategyConfig(name=name, symbol=symbol, timeframe=1, magic=magic)
-        self.notifier = None
         self.run_count = 0
         self.position_check_count = 0
         self.should_fail = False
         self.cleanup_called = False
 
     def is_new_bar(self, run_dt: datetime) -> bool:
-        """Mock implementation - always returns True for testing."""
         return True
 
     def on_new_bar(self):
-        pass
-
-    def run(self, run_dt: datetime):
         self.run_count += 1
         if self.should_fail:
             raise ValueError(f"Intentional error in {self.name}")
 
     def manage_positions(self, run_dt: datetime, flag: bool = False) -> int:
         self.position_check_count += 1
-        if self.should_fail:
+        # Raise only in the position-check path (flag=False); the new-bar path (flag=True) must
+        # reach on_new_bar so the heartbeat + run-count reflect the cycle.
+        if self.should_fail and not flag:
             raise ValueError(f"Position check error in {self.name}")
         return 0
 
@@ -62,7 +90,7 @@ class TestMultiTrader:
         strat2 = MockStrategy("MeanReversion", symbol="GBPUSD", magic=1001)
         multi_trader = MultiTrader([strat1, strat2])
 
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         assert "MeanReversion[EURUSD:1001]" in multi_trader.health_trackers
         assert "MeanReversion[GBPUSD:1001]" in multi_trader.health_trackers
@@ -97,7 +125,7 @@ class TestMultiTrader:
         strat2 = MockStrategy("Strat2")
         multi_trader = MultiTrader([strat1, strat2])
 
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         assert strat1.run_count == 1
         assert strat2.run_count == 1
@@ -111,7 +139,7 @@ class TestMultiTrader:
         strat1.should_fail = True  # Only first fails
 
         multi_trader = MultiTrader([strat1, strat2])
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         # Strat1 failed, Strat2 succeeded
         assert strat1.run_count == 1
@@ -127,15 +155,15 @@ class TestMultiTrader:
 
         multi_trader = MultiTrader([strat1, strat2], max_consecutive_errors=2)
 
-        multi_trader.run(datetime.now())
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
+        multi_trader.run(_bar_dt())
 
         # Strat1 should be disabled, Strat2 still enabled
         assert multi_trader.health_trackers["Strat1"].is_enabled is False
         assert multi_trader.health_trackers["Strat2"].is_enabled is True
 
         # Next run: only Strat2 executes
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
         assert strat1.run_count == 2  # Not incremented
         assert strat2.run_count == 3  # Still running
 
@@ -156,7 +184,7 @@ class TestMultiTrader:
         strat2 = MockStrategy("Strat2")
         multi_trader = MultiTrader([strat1, strat2])
 
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         status = multi_trader.get_health_status()
         assert "Strat1" in status
@@ -171,7 +199,7 @@ class TestMultiTrader:
         strat1.should_fail = True
 
         multi_trader = MultiTrader([strat1, strat2])
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         agg_stats = multi_trader.get_aggregate_stats()
         assert agg_stats["total_strategies"] == 2
@@ -215,7 +243,7 @@ class TestMultiTrader:
         strat2 = MockStrategy("Strat2")
         multi_trader = MultiTrader([strat1, strat2])
 
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
         multi_trader.close()
 
         assert strat1.cleanup_called is True
@@ -267,7 +295,7 @@ class TestMultiTrader:
         strat1.should_fail = True
 
         multi_trader = MultiTrader([strat1, strat2, strat3])
-        multi_trader.run(datetime.now())
+        multi_trader.run(_bar_dt())
 
         # All strategies should have attempted to run
         assert strat1.run_count == 1
