@@ -18,6 +18,7 @@ from .base import (
 from .identity import LogicalSystemIdentity, LogRootConfigError, RunnerIdentity
 from .jsonl import JsonlEventLogger
 from .runner_status import RunnerStatus
+from .text_log import setup_text_logger, text_log_dir
 
 __all__ = [
     # LOGGING_CONTRACT v1.0.0 — inference-log channel (per-bar heartbeat + per-strategy breaker)
@@ -42,6 +43,9 @@ __all__ = [
     "UnknownSchemaMajorError",
     # runner-lifecycle channel (status file, read directly by the Supervisor)
     "RunnerStatus",
+    # per-process text log (human-readable; resolves LOG_BASE, else the config dir)
+    "setup_text_logger",
+    "text_log_dir",
 ]
 
 #: Names removed in 0.7.0 (LOGGING_CONTRACT v1.0.0) — turn a bare ImportError into a migration hint.

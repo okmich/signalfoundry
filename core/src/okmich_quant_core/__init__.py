@@ -15,6 +15,8 @@ from .logging import (
     RunnerStatus,
     StrategyReenabledRecord,
     SystemRecordFactory,
+    setup_text_logger,
+    text_log_dir,
 )
 from .multi_trader import MultiTrader
 from .notification import BaseNotifier, Telegram, TelegramNotifier
