@@ -15,7 +15,7 @@ Workflow:
     >>> result = screener.screen(candidates, strategy=ScreenStrategy.ABLATION,
     ...                           baseline=["macd_26_55_13", "dbl_smoothed_log_rets"])
     >>> result.results_   # ranked DataFrame
-    >>> result.keepers    # Pareto-optimal non-trap subsets
+    >>> result.asymmetry_candidates    # Pareto-optimal non-trap subsets (Stage-1 candidates)
 
 Implementation notes:
     * Evaluator state labels are ``argmax(filtering gamma)`` (causal MAP), not the offline Viterbi path.
@@ -391,7 +391,7 @@ class HmmFeatureScreener:
                 "elapsed_sec": ev.elapsed_sec,
             })
         df = pd.DataFrame(rows)
-        status_order = {"keeper": 0, "trap": 1, "fragile": 2, "dominated": 3}
+        status_order = {"asymmetry_candidate": 0, "trap": 1, "fragile": 2, "dominated": 3}
         df["_status_rank"] = df["pareto_status"].map(status_order).fillna(99)
         df = (df.sort_values(["_status_rank", "axis_separation"], ascending=[True, False])
                 .drop(columns=["_status_rank"])
