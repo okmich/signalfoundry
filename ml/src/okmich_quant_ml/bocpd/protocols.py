@@ -16,12 +16,10 @@ class ObservationModel(Protocol):
     Optional fast-path (duck-typed at runtime by the detector):
         - ``batch_update_posterior(xs, posterior, log_hazard, log_growth) -> NDArray``
 
-    When implemented, ``batch_update_posterior`` must run the full Adams–MacKay
-    recursion over ``xs`` and return the per-step run-length posterior matrix of
-    shape ``(len(xs), r_max)``. It **must also advance the observation model's
-    sufficient-statistic bank to the post-batch state** — equivalent to calling
-    ``update(x)`` for every ``x`` in ``xs``. Without that self-update, the
-    detector's state becomes silently inconsistent after a batch call.
+    When implemented, ``batch_update_posterior`` must run the full Adams–MacKay recursion over ``xs`` and return the
+    per-step run-length posterior matrix of shape ``(len(xs), r_max)``. It **must also advance the observation model's
+    sufficient-statistic bank to the post-batch state** — equivalent to calling ``update(x)`` for every ``x`` in ``xs``.
+    Without that self-update, the detector's state becomes silently inconsistent after a batch call.
     """
 
     def log_pred_probs(self, x: float) -> NDArray:

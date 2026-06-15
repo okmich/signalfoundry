@@ -594,8 +594,7 @@ def map_label_to_momentum_score(df: pd.DataFrame, regime_col: str = "regime", re
 
 def map_regime_to_volatility_score(df: pd.DataFrame, regime_col: str = "regime", vol_proxy_col: str = None,
                                    method: str = "median", min_samples: int = 30, tie_tolerance: float = 1e-6,
-                                   return_diagnostics: bool = False) -> dict[Any, int] | tuple[
-    dict[Any, int], pd.DataFrame]:
+                                   return_diagnostics: bool = False) -> dict[Any, int] | tuple[dict[Any, int], pd.DataFrame]:
     """
     Map regime labels to ordered volatility buckets where buckets increase monotonically with empirical within-regime volatility.
 
@@ -836,8 +835,8 @@ def map_regime_to_volatility_score(df: pd.DataFrame, regime_col: str = "regime",
 
 def map_regime_to_path_structure_score(df: pd.DataFrame, regime_col: str = "regime", method: str = "id_chop",
                                        min_samples: int = 30, choppiness_range: tuple[int, int] = (0, 4),
-                                       lookback: int = 14, return_diagnostics: bool = False) -> dict[Any, int] | tuple[
-    dict[Any, int], pd.DataFrame]:
+                                       lookback: int = 14,
+                                       return_diagnostics: bool = False) -> dict[Any, int] | tuple[dict[Any, int], pd.DataFrame]:
     """
     Map regime labels to an ordered choppiness score where scores increase monotonically with empirical within-regime
     choppiness (path complexity, oscillation, whipsaw).
