@@ -16,15 +16,15 @@ upstream.
 **Streaming / online use:** this package is designed for **batch** calls — the caller passes a full ``(T, K)`` posterior
 matrix (or a trailing-window slice) and gets back a ``(T,)`` or ``(T, K)`` output. Calling ``run()``/``transform()``/
 ``infer()`` row-by-row resets all temporal state every call: EMA recurrence restarts from ``probs[0]``, rolling means
-compute over a single sample, ``StabilityGateInferer`` sees flip rate 0, and ``HOLD_LAST`` abstain cannot carry the
-prior label across calls. Online deployments must either (a) pass a sufficient trailing window per call (the lambda
-notebook's pattern — ``O(window)`` memory, correct results) or (b) wait for a future ``transform_one`` / ``infer_one`` /
-``reset`` API to be added. Single-row calls without trailing context will produce results that materially diverge from
-batch.
+compute over a single sample, ``StabilityGateInferer`` sees flip rate 0, and ``HOLD_LAST`` abstain cannot carry the prior
+label across calls. Online deployments must either (a) pass a sufficient trailing window per call (the lambdanotebook's
+pattern — ``O(window)`` memory, correct results) or (b) wait for a future ``transform_one`` / ``infer_one`` /``reset``
+API to be added. Single-row calls without trailing context will produce results that materially diverge from batch.
 """
 
 from .adaptive_lag import AdaptiveLagInferer, AdaptiveLagResult, StabilityCriterion,\
     compute_trajectories, lag_commitment_audit
+from .asymmetry import ForwardOutcome, bartlett_hac_variance, forward_outcome_by_state
 from .diagnostics import CalibrationRecommendation, CalibrationReport, DynamicsReport, SmoothingRecommendation,\
     posterior_calibration_report, recommend_calibration, recommend_smoothing, summarize_posterior_dynamics
 from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
@@ -62,6 +62,9 @@ __all__ = [
     "StabilityCriterion",
     "compute_trajectories",
     "lag_commitment_audit",
+    "ForwardOutcome",
+    "forward_outcome_by_state",
+    "bartlett_hac_variance",
     "EmaPosteriorTransformer",
     "RollingMeanPosteriorTransformer",
     "KalmanPosteriorTransformer",
