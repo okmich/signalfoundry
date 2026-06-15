@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from .features import _validate_posterior_matrix
+from okmich_quant_ml.posterior_inference.features import validate_posterior_matrix
 
 
 class ForwardOutcome(NamedTuple):
@@ -128,7 +128,7 @@ def forward_outcome_by_state(P: NDArray, outcomes: dict[str, ForwardOutcome], *,
         Tidy long frame, one row per ``(axis, state)``, with columns: ``axis, state, state_label, horizon, n_valid,
         n_map, coverage, n_eff, w_mean, q25, q50, q75, pooled_mean, delta_vs_pooled, se_hac, t_hac, low_coverage``.
     """
-    p = _validate_posterior_matrix(P, "forward_outcome_by_state")
+    p = validate_posterior_matrix(P, "forward_outcome_by_state")
     T, K = p.shape
     if T > 0:
         max_row_dev = float(np.abs(p.sum(axis=1) - 1.0).max())

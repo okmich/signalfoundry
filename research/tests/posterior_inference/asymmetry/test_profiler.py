@@ -2,12 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_ml.posterior_inference import (
+from okmich_quant_research.posterior_inference.asymmetry import (
     ForwardOutcome,
     bartlett_hac_variance,
     forward_outcome_by_state,
 )
-from okmich_quant_ml.posterior_inference.asymmetry import _weighted_quantiles
+from okmich_quant_research.posterior_inference.asymmetry.profiler import _weighted_quantiles
 
 
 def _two_state_split_probs(T: int, p_hi: float = 0.9) -> np.ndarray:

@@ -5,8 +5,8 @@ from numpy.typing import NDArray
 from scipy.special import rel_entr, xlogy
 
 
-def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12,
-                               normalize: bool = False, negativity_tol: float = 1e-9) -> NDArray:
+def validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12,
+                              normalize: bool = False, negativity_tol: float = 1e-9) -> NDArray:
     """Validate a posterior matrix and optionally normalize rows onto the simplex.
 
     With ``normalize=False`` (default), the returned array is the input cast to ``float`` with no value-side mutation —
@@ -43,6 +43,10 @@ def _validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-1
         raise ValueError(f"{func_name}: posterior rows must have strictly positive sums.")
     clipped /= row_sums
     return clipped
+
+
+# Backwards-compatible internal alias; external packages should import the public ``validate_posterior_matrix``.
+_validate_posterior_matrix = validate_posterior_matrix
 
 
 def _validate_window(window: int, func_name: str) -> None:
