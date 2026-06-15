@@ -74,8 +74,9 @@ class VbtTradeAnalytics:
       - Entry view : "When I enter during X, how do I perform?"
       - Exit view  : "When I close during X, how do I perform?"
 
-    Required columns:
-        'Entry Index', 'Exit Index', 'PnL'
+    Required columns (vectorbt ≥ 0.25 naming):
+        'Entry Timestamp', 'Exit Timestamp', 'PnL'
+    Older vectorbt outputs using 'Entry Index' / 'Exit Index' are auto-renamed.
     Optional columns:
         'Direction' (missing/blank values are treated as "Unknown")
     """
@@ -117,21 +118,26 @@ class VbtTradeAnalytics:
     # Data preparation — returns (entry_df, exit_df)
     # ------------------------------------------------------------------
 
-    _REQUIRED_COLUMNS = {"Entry Index", "Exit Index", "PnL"}
+    _REQUIRED_COLUMNS = {"Entry Timestamp", "Exit Timestamp", "PnL"}
+    _LEGACY_RENAME = {"Entry Index": "Entry Timestamp", "Exit Index": "Exit Timestamp"}
 
     def _prepare(self, df: pd.DataFrame):
         df = df.copy()
         df.columns = [c.strip() for c in df.columns]
+
+        legacy = {old: new for old, new in self._LEGACY_RENAME.items() if old in df.columns and new not in df.columns}
+        if legacy:
+            df = df.rename(columns=legacy)
 
         missing = self._REQUIRED_COLUMNS - set(df.columns)
         if missing:
             raise ValueError(f"trades_df is missing required columns: {sorted(missing)}. "
                              f"Expected columns from pf.trades.records_readable: {sorted(self._REQUIRED_COLUMNS)}")
 
-        df["Entry Index"] = pd.to_datetime(df["Entry Index"])
-        df["Exit Index"]  = pd.to_datetime(df["Exit Index"])
+        df["Entry Timestamp"] = pd.to_datetime(df["Entry Timestamp"])
+        df["Exit Timestamp"]  = pd.to_datetime(df["Exit Timestamp"])
 
-        df["duration_min"] = (df["Exit Index"] - df["Entry Index"]).dt.total_seconds() / 60
+        df["duration_min"] = (df["Exit Timestamp"] - df["Entry Timestamp"]).dt.total_seconds() / 60
         df["duration_bucket"] = df["duration_min"].map(_get_duration_bucket)
 
         if "Direction" in df.columns:
@@ -140,8 +146,8 @@ class VbtTradeAnalytics:
         else:
             df["direction"] = SESSION_UNKNOWN
 
-        entry_df = self._add_time_dims(df, "Entry Index", self._source_tz)
-        exit_df  = self._add_time_dims(df, "Exit Index", self._source_tz)
+        entry_df = self._add_time_dims(df, "Entry Timestamp", self._source_tz)
+        exit_df  = self._add_time_dims(df, "Exit Timestamp", self._source_tz)
 
         return entry_df, exit_df
 

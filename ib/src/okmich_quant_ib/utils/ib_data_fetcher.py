@@ -290,6 +290,8 @@ def main() -> None:
     parser.add_argument("--currency", default="USD")
     parser.add_argument("--primary-exchange", default="",
                         help="Tiebreaker for SMART (e.g. NASDAQ)")
+    parser.add_argument("--last-trade-date", default="", metavar="YYYYMM[DD]",
+                        help="FUT/OPT contract month (YYYYMM) or expiry (YYYYMMDD); disambiguates futures")
     parser.add_argument("--bar-size", required=True, choices=list(BAR_SIZE_MINUTES),
                         metavar="BAR_SIZE", help="e.g. '1 min', '5 mins', '1 hour'")
     parser.add_argument("--start", required=True, metavar="YYYY-MM-DD")
@@ -322,6 +324,7 @@ def main() -> None:
         exchange=args.exchange,
         currency=args.currency,
         primary_exchange=args.primary_exchange,
+        last_trade_date=args.last_trade_date,
     )
     start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     if args.end:

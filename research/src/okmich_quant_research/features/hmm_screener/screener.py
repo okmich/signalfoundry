@@ -263,7 +263,7 @@ class HmmFeatureScreener:
     def _call_evaluator(self, subset: tuple[str, ...], gamma: np.ndarray,
                        state_labels: np.ndarray, evaluator_df: pd.DataFrame) -> AxisEvaluation:
         evaluator = get_evaluator(self.config.signal_type)
-        kwargs: dict = {}
+        kwargs: dict = {"respect_sessions": self.config.respect_session_boundaries}
         if self.config.signal_type == "momentum":
             kwargs["is_directional"] = self._infer_is_directional(subset)
         return evaluator(gamma=gamma, state_labels=state_labels, raw_data=evaluator_df,
