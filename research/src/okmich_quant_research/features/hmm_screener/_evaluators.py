@@ -29,12 +29,39 @@ from ._result import AxisEvaluation
 AxisEvaluator = Callable[..., AxisEvaluation]
 
 
-def _build_forward_log_returns(close: NDArray, state_labels: NDArray, horizon: int) -> pd.DataFrame:
-    """Build a per-row DataFrame with state + forward log-return at ``horizon``."""
+def _session_ids(raw_data: pd.DataFrame, respect_sessions: bool) -> NDArray | None:
+    """Per-row session id (one session per calendar date) for forward-window clipping.
+
+    Returns int64 normalized-date stamps when ``respect_sessions`` is True and the
+    frame carries a DatetimeIndex; ``None`` otherwise (caller then keeps the legacy
+    session-blind behaviour). Intraday RTH bars share a calendar date within a
+    session and change date across the overnight gap, so equality of these stamps
+    is exactly the "same session" test.
+    """
+    if not respect_sessions:
+        return None
+    idx = raw_data.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        return None
+    return idx.normalize().asi8
+
+
+def _build_forward_log_returns(close: NDArray, state_labels: NDArray, horizon: int,
+                               session_ids: NDArray | None = None) -> pd.DataFrame:
+    """Build a per-row DataFrame with state + forward log-return at ``horizon``.
+
+    When ``session_ids`` is provided, forward returns whose window crosses a session
+    boundary (``session_ids[t] != session_ids[t + horizon]``) are set NaN and dropped,
+    so the label never spans the overnight gap.
+    """
     log_close = np.log(close)
     fwd = np.full(len(close), np.nan)
     if len(close) > horizon:
-        fwd[:-horizon] = log_close[horizon:] - log_close[:-horizon]
+        valid = log_close[horizon:] - log_close[:-horizon]
+        if session_ids is not None:
+            valid = valid.copy()
+            valid[session_ids[horizon:] != session_ids[:-horizon]] = np.nan
+        fwd[:-horizon] = valid
     return pd.DataFrame({"state": state_labels[:len(close)], "returns": fwd}).dropna()
 
 
@@ -95,14 +122,16 @@ def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
 
 
 def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
+                       horizons: tuple[int, ...], respect_sessions: bool = False,
+                       **_ignored) -> AxisEvaluation:
     """Direction axis: forward log-return median spread + count of conservatively-significant states.
 
     Median (not mean) keeps the score robust to the heavy right/left tails of intraday FX forward
     returns — aligning the trend axis with the other axes, which already use medians.
     """
     primary_horizon = horizons[0] if horizons else 12
-    fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon)
+    sessions = _session_ids(raw_data, respect_sessions)
+    fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon, sessions)
     if len(fwd_df) < 30:
         return AxisEvaluation(0.0, 0.0, "n_significant_states",
                               raw_details={"error": "fewer than 30 valid forward returns"})
@@ -122,14 +151,16 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
 
 
 def evaluate_momentum(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                     horizons: tuple[int, ...], is_directional: bool = True, **_ignored) -> AxisEvaluation:
+                     horizons: tuple[int, ...], is_directional: bool = True,
+                     respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
     """Momentum axis: forward log-return rank spread + count of distinct momentum scores.
 
     ``is_directional`` selects between signed momentum (rank by signed median) and magnitude-only momentum
     (rank by ``|median|``). The screener decides by inspecting the baseline features' registry-declared ``directional`` flag.
     """
     primary_horizon = horizons[0] if horizons else 12
-    fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon)
+    sessions = _session_ids(raw_data, respect_sessions)
+    fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon, sessions)
     if len(fwd_df) < 30:
         return AxisEvaluation(0.0, 0.0, "n_distinct_scores",
                               raw_details={"error": "fewer than 30 valid forward returns"})
@@ -154,7 +185,8 @@ def evaluate_momentum(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Dat
 
 
 def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
+                       horizons: tuple[int, ...], respect_sessions: bool = False,
+                       **_ignored) -> AxisEvaluation:
     """Volatility axis: forward realized-vol median spread + distinct bucket count."""
     primary_horizon = horizons[0] if horizons else 12
     close = raw_data["close"].values
@@ -162,6 +194,7 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
         return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
                               raw_details={"error": "not enough bars for forward vol"})
 
+    sessions = _session_ids(raw_data, respect_sessions)
     log_close = np.log(close)
     log_rets = np.diff(log_close, prepend=log_close[0])
     # Trailing forward window RMS of log-rets — proxy for realized vol over horizon h.
@@ -170,6 +203,9 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
     sq = log_rets ** 2
     cumsum_sq = np.cumsum(sq)
     for t in range(len(close) - primary_horizon):
+        # Skip windows that cross the overnight gap when session-clipping is on.
+        if sessions is not None and sessions[t] != sessions[t + primary_horizon]:
+            continue
         window_sumsq = cumsum_sq[t + primary_horizon] - cumsum_sq[t]
         fwd_vol[t] = float(np.sqrt(window_sumsq / primary_horizon))
 
@@ -220,7 +256,8 @@ def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: 
 
 
 def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
+                       horizons: tuple[int, ...], respect_sessions: bool = False,
+                       **_ignored) -> AxisEvaluation:
     """Liquidity axis: forward median volume spread + bucket monotonicity.
 
     Computes the forward cumulative volume over ``horizons[0]`` bars, then ranks states by median forward volume via
@@ -257,9 +294,15 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
                               raw_details={"error": "not enough bars for forward volume"})
 
     # Forward cumulative volume over horizon h. Guard the trailing window with NaN.
+    sessions = _session_ids(raw_data, respect_sessions)
     cumsum_vol = np.cumsum(volume)
     fwd_vol = np.full(len(close), np.nan)
-    fwd_vol[:-primary_horizon] = cumsum_vol[primary_horizon:] - cumsum_vol[:-primary_horizon]
+    diffs = cumsum_vol[primary_horizon:] - cumsum_vol[:-primary_horizon]
+    if sessions is not None:
+        # Drop forward-volume windows that span the overnight gap.
+        diffs = diffs.copy()
+        diffs[sessions[primary_horizon:] != sessions[:-primary_horizon]] = np.nan
+    fwd_vol[:-primary_horizon] = diffs
     # Treat negative volumes (shouldn't happen for real data but defensive) as missing
     # rather than producing nonsense ranks.
     fwd_vol[fwd_vol < 0] = np.nan

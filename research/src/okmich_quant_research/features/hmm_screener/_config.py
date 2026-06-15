@@ -54,6 +54,14 @@ class HmmScreenerConfig:
     mm_n_components: int = 3
     data_size: int = 80_000
     horizons: tuple[int, ...] = (12, 60)
+    # When True, forward-looking axis evaluators (momentum / direction / volatility /
+    # liquidity) clip the forward-return / forward-vol / forward-volume window at
+    # session (calendar-date) boundaries: a bar whose forward window would cross the
+    # overnight gap is dropped from scoring instead of carrying an overnight-gap-
+    # contaminated label. Default False preserves the legacy (leaky) behaviour so
+    # existing screens are unchanged until they opt in. Requires a DatetimeIndex on
+    # ``raw_data``; silently a no-op otherwise.
+    respect_session_boundaries: bool = False
     honesty_threshold: float = 0.99
     honesty_trap_rate: float = 0.40
     # Phase-A structural quality gate (run before Pareto). Subsets failing either
