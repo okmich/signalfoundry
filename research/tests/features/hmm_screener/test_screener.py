@@ -66,7 +66,7 @@ def test_screener_end_to_end_direction_axis_returns_populated_result() -> None:
     non_error = [e for e in result.evaluations if e.error is None]
     assert len(non_error) >= 1
     # Pareto statuses must be one of the four values.
-    valid_statuses = {ParetoStatus.KEEPER, ParetoStatus.TRAP, ParetoStatus.FRAGILE, ParetoStatus.DOMINATED}
+    valid_statuses = {ParetoStatus.ASYMMETRY_CANDIDATE, ParetoStatus.TRAP, ParetoStatus.FRAGILE, ParetoStatus.DOMINATED}
     assert all(e.pareto_status in valid_statuses for e in result.evaluations)
 
 
@@ -193,7 +193,7 @@ def test_screener_classify_fragile_excluded_from_pareto_frontier() -> None:
         _make_subset_eval(features=("healthy",), axis_sep=1.0, secondary=2.0, honesty=0.05, balance=2.0),
     ]
     statuses = screener._classify(evs)
-    assert statuses == [ParetoStatus.FRAGILE, ParetoStatus.KEEPER]
+    assert statuses == [ParetoStatus.FRAGILE, ParetoStatus.ASYMMETRY_CANDIDATE]
 
 
 def test_screener_classify_trap_supersedes_fragile_check_only_when_healthy() -> None:
@@ -269,8 +269,12 @@ def test_screener_result_fragile_property_and_repr() -> None:
     # `__repr__` includes the fragile count.
     repr_text = repr(result)
     assert "1 fragile" in repr_text
-    assert "keepers" in repr_text
+    assert "candidates" in repr_text
     assert "traps" in repr_text
+
+
+def test_subset_coherence_warnings_are_per_subset() -> None:
+    """Off-axis / unregistered-feature warnings name only the subset(s) that actually contain the offending feature."""
     raw = _make_synthetic_ohlc(T=200)
     config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)

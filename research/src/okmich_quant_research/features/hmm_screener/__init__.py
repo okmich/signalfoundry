@@ -19,7 +19,7 @@ Quick start
     >>> screener = HmmFeatureScreener(config, raw_data, feature_engineering_fn)
     >>> result = screener.screen(candidates, strategy=ScreenStrategy.ABLATION)
     >>> result.results_       # ranked DataFrame
-    >>> result.keepers        # Pareto-optimal non-trap subsets
+    >>> result.asymmetry_candidates  # Pareto-optimal non-trap subsets (Stage-1 candidates)
 """
 from ._config import HMM_ALGO_REGISTRY, HmmScreenerConfig, ScreenStrategy, build_hmm
 from ._evaluators import (

@@ -125,7 +125,7 @@ def test_screener_end_to_end_liquidity_axis() -> None:
     result = screener.screen(["abs_log_rets", "vol_log"], strategy=ScreenStrategy.ABLATION)
 
     assert len(result.evaluations) >= 1
-    assert all(e.pareto_status in {ParetoStatus.KEEPER, ParetoStatus.TRAP,
+    assert all(e.pareto_status in {ParetoStatus.ASYMMETRY_CANDIDATE, ParetoStatus.TRAP,
                                    ParetoStatus.FRAGILE, ParetoStatus.DOMINATED}
                for e in result.evaluations)
     non_error = [e for e in result.evaluations if e.error is None]

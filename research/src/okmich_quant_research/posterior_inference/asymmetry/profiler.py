@@ -5,10 +5,9 @@ profile whose cross-state contrast *is* the asymmetry signal. It is the offline 
 (``forward_outcome_by_state``); the live exploitation of any asymmetry it surfaces is built separately and only after a
 finding survives walk-forward validation.
 
-**Causality contract.** Every row of ``P`` must already be a causal/decision-time posterior (pure filtering, or an
-``as_of``-aligned matured posterior). The outcome series are forward-measured: ``values[t]`` is the outcome realised over
-``(t, t + horizon]`` known only in hindsight — they are audit targets, never live inputs. This function must not be called
-inside a live signal path.
+**Causality contract.** Every row of ``P`` must already be a causal/decision-time **filtering** posterior. The outcome
+series are forward-measured: ``values[t]`` is the outcome realised over ``(t, t + horizon]`` known only in hindsight —
+they are audit targets, never live inputs. This function must not be called inside a live signal path.
 
 **Overlap correction.** Horizon-``h`` forward outcomes at consecutive bars share ``h - 1`` bars, so a naive ``mean/std``
 t-stat is invalid. Significance of the per-state contrast uses a Bartlett-kernel HAC (Newey–West) long-run variance with
@@ -26,7 +25,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from .features import _validate_posterior_matrix
+from okmich_quant_ml.posterior_inference.features import validate_posterior_matrix
 
 
 class ForwardOutcome(NamedTuple):
@@ -109,7 +108,7 @@ def forward_outcome_by_state(P: NDArray, outcomes: dict[str, ForwardOutcome], *,
     Parameters
     ----------
     P
-        Causal posterior matrix ``(T, K)`` — pure filtering or ``as_of``-aligned. **Rows must sum to 1** within
+        Causal **filtering** posterior matrix ``(T, K)``. **Rows must sum to 1** within
         ``row_sum_tol``; the function raises otherwise (the contrast math depends on a proper posterior).
     outcomes
         Mapping ``axis_name -> ForwardOutcome``. Each ``values`` is length ``T``; its ``horizon`` sets the HAC bandwidth.
@@ -128,7 +127,7 @@ def forward_outcome_by_state(P: NDArray, outcomes: dict[str, ForwardOutcome], *,
         Tidy long frame, one row per ``(axis, state)``, with columns: ``axis, state, state_label, horizon, n_valid,
         n_map, coverage, n_eff, w_mean, q25, q50, q75, pooled_mean, delta_vs_pooled, se_hac, t_hac, low_coverage``.
     """
-    p = _validate_posterior_matrix(P, "forward_outcome_by_state")
+    p = validate_posterior_matrix(P, "forward_outcome_by_state")
     T, K = p.shape
     if T > 0:
         max_row_dev = float(np.abs(p.sum(axis=1) - 1.0).max())

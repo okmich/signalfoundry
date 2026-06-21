@@ -132,3 +132,22 @@ def test_omega_zero_raises():
 def test_omega_negative_raises():
     with pytest.raises(ValueError, match="omega must be > 0"):
         continuous_trend_labeling(pd.Series([100.0, 110.0]), omega=-0.1)
+
+
+def test_omega_nan_raises():
+    with pytest.raises(ValueError, match="omega must be > 0"):
+        continuous_trend_labeling(pd.Series([100.0, 110.0]), omega=float("nan"))
+
+
+# ---------------------------------------------------------------------------
+# Non-finite price rejection — a NaN/inf bar must not receive a real label
+# ---------------------------------------------------------------------------
+
+def test_nan_price_raises():
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        continuous_trend_labeling(pd.Series([100.0, 110.0, np.nan, 120.0]), omega=0.05)
+
+
+def test_inf_price_raises():
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        continuous_trend_labeling(np.array([100.0, np.inf, 110.0]), omega=0.05)

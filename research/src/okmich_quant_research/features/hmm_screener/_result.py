@@ -60,10 +60,14 @@ class HmmScreenerResult:
     stage_reports: list[StageReport] = field(default_factory=list)
 
     @property
-    def keepers(self) -> list[SubsetEvaluation]:
-        """Pareto-optimal, non-trap subsets, ordered by axis_separation descending."""
+    def asymmetry_candidates(self) -> list[SubsetEvaluation]:
+        """Pareto-optimal, non-trap subsets (structural asymmetry candidates), ordered by axis_separation descending.
+
+        Stage-1 output: these still need Stage-2 confirmation (walk-forward + incremental) before any is *confirmed*
+        asymmetry. This is the list that feeds the confirmer funnel.
+        """
         return sorted(
-            (e for e in self.evaluations if e.pareto_status == ParetoStatus.KEEPER),
+            (e for e in self.evaluations if e.pareto_status == ParetoStatus.ASYMMETRY_CANDIDATE),
             key=lambda e: e.axis_separation, reverse=True,
         )
 
@@ -90,8 +94,8 @@ class HmmScreenerResult:
 
     def __repr__(self) -> str:
         n = len(self.evaluations)
-        n_keep = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.KEEPER)
+        n_candidates = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.ASYMMETRY_CANDIDATE)
         n_trap = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.TRAP)
         n_frag = sum(1 for e in self.evaluations if e.pareto_status == ParetoStatus.FRAGILE)
         n_err = sum(1 for e in self.evaluations if e.error is not None)
-        return f"HmmScreenerResult({n} subsets, {n_keep} keepers, {n_trap} traps, {n_frag} fragile, {n_err} errors)"
+        return f"HmmScreenerResult({n} subsets, {n_candidates} candidates, {n_trap} traps, {n_frag} fragile, {n_err} errors)"
