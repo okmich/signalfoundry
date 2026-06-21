@@ -21,6 +21,22 @@ import pandas as pd
 from .channels import envelope
 
 
+_NONFINITE_PRICE_MSG = "prices contains NaN or infinite values; clean the data before labeling."
+
+
+def _as_finite_price_array(prices: Union[pd.Series, np.ndarray]) -> np.ndarray:
+    """Coerce prices to an ndarray (Series -> .values) and reject non-finite values (NaN/inf).
+
+    Shared by the batch and streaming array entry points so they enforce one input contract: CTL is a
+    percentage-of-price state machine, and a NaN/inf bar would otherwise fall through every comparison yet
+    still be assigned a directional label (false supervision). Mirrors directional_change.idc_parse.
+    """
+    x = prices.values if isinstance(prices, pd.Series) else np.asarray(prices)
+    if len(x) and not np.isfinite(x).all():
+        raise ValueError(_NONFINITE_PRICE_MSG)
+    return x
+
+
 def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float = 0.15) -> Union[pd.Series, np.ndarray]:
     """Continuous Trend Labeling (CTL) — sequential, no look-ahead.
 
@@ -34,11 +50,11 @@ def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float
 
     Return type mirrors input: pd.Series -> pd.Series (index preserved); np.ndarray -> np.ndarray.
     """
-    if omega <= 0:
+    if not math.isfinite(omega) or omega <= 0:
         raise ValueError(f"omega must be > 0, got {omega}")
 
     is_series = isinstance(prices, pd.Series)
-    x = prices.values if is_series else np.asarray(prices)
+    x = _as_finite_price_array(prices)  # rejects NaN/inf so missing bars can't get a false +/-1 label
     n = len(x)
 
     labels = np.full(n, np.nan, dtype=np.float64)
@@ -93,21 +109,136 @@ def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float
 
 
 ##############################################################################################################
+############################### STREAMING (O(1) PER-BAR) CTL STATE MACHINE ###################################
+##############################################################################################################
+#
+# Live/online projection of continuous_trend_labeling. The batch function above must replay the whole price history to
+# know the CURRENT label with certainty — expensive to recompute every bar. CTLState persists the state machine's running
+# extremes so, after a one-time warm-up over a long-enough history, each new bar costs O(1): no history reload, no recompute.
+#
+# Field names mirror the locals of continuous_trend_labeling so the two can be audited side by side.
+# Bar-for-bar equivalence with the batch function is asserted by tests/trend/test_ctl_streaming_equivalence.py
+# over CTL's domain: strictly positive prices (omega is a % of price). De-meaned/normalised series that can go
+# negative are out of domain for both implementations.
+#
+# Warm-up / certainty-of-flip: the FSM is only O(1) AFTER burn-in. To match a from-scratch batch run bar-for-bar you must
+# warm it up from far enough back that direction != 0 and the running extreme sits on the current leg (the same reason a
+# live runner must seed CTL with enough bars before its first confirmed label). Pay that warm-up once at startup via
+# ctl_warm_up / ctl_streaming_replay, then advance with ctl_step.
+
+
+@dataclass
+class CTLState:
+    """O(1) streaming state for continuous_trend_labeling — a faithful per-bar projection of the batch machine.
+
+    Warm up once (ctl_warm_up / ctl_streaming_replay), then advance one bar at a time with ctl_step. Field names
+    mirror the batch function's locals; paper symbols are noted in comments.
+    """
+    omega: float
+    direction: int = 0           # paper: Cid — 0 pre-trigger, +1 up, -1 down
+    first_price: float = 0.0     # paper: FP — anchor for the initial trigger
+    x_high: float = 0.0          # running max (paper: xH)
+    t_high: int = 0              # index of running max (paper: HT)
+    x_low: float = 0.0           # running min (paper: xL)
+    t_low: int = 0               # index of running min (paper: LT)
+    initialized: bool = False
+
+    def __post_init__(self):
+        if not math.isfinite(self.omega) or self.omega <= 0:
+            raise ValueError(f"omega must be > 0, got {self.omega}")
+
+
+def ctl_step(state: CTLState, price: float, i: int) -> int:
+    """Advance the streaming CTL state by one bar; return the label for bar i. Mutates `state` in place.
+
+    Returns 0/-1/+1. Pre-trigger warmup returns 0 (the batch function emits NaN there — callers that need the NaN
+    contract should map 0 -> NaN on the warmup region). Reproduces both the initial-trigger pass (anchored on
+    first_price = the first price seen) and the second-pass pivot dynamics of continuous_trend_labeling.
+
+    Non-finite price (NaN/inf): the state is NOT updated and the current label is held (0 while pre-trigger, else the
+    running direction), so a single missing/bad tick neither corrupts the running extremes nor forces a spurious
+    flat. The array entry points (ctl_warm_up / ctl_streaming_replay) instead reject non-finite input, matching
+    continuous_trend_labeling — clean warm-up data is required; only the live single-bar step is lenient.
+    """
+    if not math.isfinite(price):
+        return state.direction
+    if not state.initialized:
+        state.first_price = price
+        state.x_high = price; state.x_low = price
+        state.t_high = i; state.t_low = i
+        state.initialized = True
+        return 0
+
+    omega = state.omega
+    if state.direction == 0:
+        if price > state.first_price + state.first_price * omega:
+            state.x_high = price; state.t_high = i; state.direction = 1
+            return 1
+        if price < state.first_price - state.first_price * omega:
+            state.x_low = price; state.t_low = i; state.direction = -1
+            return -1
+        return 0
+
+    if state.direction == 1:
+        if price > state.x_high:
+            state.x_high = price; state.t_high = i
+        if price < state.x_high - state.x_high * omega and state.t_low <= state.t_high:
+            state.x_low = price; state.t_low = i; state.direction = -1
+            return -1
+        return 1
+
+    # state.direction == -1
+    if price < state.x_low:
+        state.x_low = price; state.t_low = i
+    if price > state.x_low + state.x_low * omega and state.t_high <= state.t_low:
+        state.x_high = price; state.t_high = i; state.direction = 1
+        return 1
+    return -1
+
+
+def ctl_warm_up(prices: Union[pd.Series, np.ndarray], omega: float) -> CTLState:
+    """Replay a warm-up history and return the LIVE state for incremental stepping.
+
+    Use at startup: pass enough history that the FSM has burned in (direction != 0 with the running extreme on the
+    current leg), keep the returned state, then feed each new bar to ctl_step with a monotonically increasing
+    index. The first live index should be len(prices) (i.e. continue the warm-up index).
+    """
+    state = CTLState(omega=float(omega))  # validates omega (finite, > 0)
+    x = _as_finite_price_array(prices)
+    for i in range(len(x)):
+        ctl_step(state, float(x[i]), i)
+    return state
+
+
+def ctl_streaming_replay(prices: Union[pd.Series, np.ndarray], omega: float) -> np.ndarray:
+    """Replay a price series through the streaming FSM and return per-bar labels as int64 (0/-1/+1).
+
+    Equivalence harness for the batch continuous_trend_labeling (warmup NaN <-> 0). For live use prefer
+    ctl_warm_up (keeps the state) followed by per-bar ctl_step calls.
+    """
+    state = CTLState(omega=float(omega))  # validates omega (finite, > 0)
+    x = _as_finite_price_array(prices)
+    out = np.zeros(len(x), dtype=np.int64)
+    for i in range(len(x)):
+        out[i] = ctl_step(state, float(x[i]), i)
+    return out
+
+
+##############################################################################################################
 ########################## THREE-CLASS LABEL DERIVATION (BAND-GATED CTL) #####################################
 ##############################################################################################################
 #
 # Turns the binary CTL output into a {-1, 0, +1} ternary label by gating CTL labels with an ATR-based envelope band
-# (MA +/- k*ATR). Class-0 marks bars where price sits inside the band — the noise / low-confidence zone —
-# while +/-1 marks confident directional regimes.
+# (MA +/- k*ATR). Class-0 marks bars where price sits inside the band — the noise / low-confidence zone — while +/-1 marks
+# confident directional regimes.
 #
 # Calibration of (omega, ma_period, atr_period, k_atr) happens upstream; this module
 # provides:
-#   - compute_band_state — turn an (already-enveloped) close + (upper, lower)
-#     into a {-1, 0, +1} ternary state (envelope itself is sourced from .misc),
+#   - compute_band_state — turn an (already-enveloped) close + (upper, lower) into a {-1, 0, +1} ternary state
+#       (envelope itself is sourced from .misc),
 #   - attach_labels for offline / batch use given an explicit (omega, BandParams),
-#   - apply_3class_labels for runtime use that accepts a pre-resolved (omega, band)
-#     and rescales bar-count parameters to the input timeframe. Caller is
-#     responsible for sourcing the config (typically from a SymbolMetastore block).
+#   - apply_3class_labels for runtime use that accepts a pre-resolved (omega, band) and rescales bar-count parameters
+#       to the input timeframe. Caller is responsible for sourcing the config (typically from a SymbolMetastore block).
 
 
 @dataclass(frozen=True)
@@ -118,25 +249,39 @@ class BandParams:
     k_atr: float
 
     def __post_init__(self):
+        # bool is an int subclass in Python; reject it explicitly so True/False can't pose as a period.
+        if isinstance(self.ma_period, bool) or not isinstance(self.ma_period, (int, np.integer)):
+            raise ValueError(f"ma_period must be an integer, got {self.ma_period!r}")
         if self.ma_period < 2:
             raise ValueError("ma_period must be >= 2")
+        if isinstance(self.atr_period, bool) or not isinstance(self.atr_period, (int, np.integer)):
+            raise ValueError(f"atr_period must be an integer, got {self.atr_period!r}")
         if self.atr_period < 2:
             raise ValueError("atr_period must be >= 2")
-        if self.k_atr <= 0:
+        if not math.isfinite(self.k_atr) or self.k_atr <= 0:
             raise ValueError("k_atr must be > 0")
 
 
 def compute_band_state(close: pd.Series, upper: pd.Series, lower: pd.Series) -> np.ndarray:
-    """Ternary band state: +1 above upper, -1 below lower, 0 inside (or warmup NaN)."""
+    """Ternary band state: +1 above upper, -1 below lower, 0 inside (or warmup NaN).
+
+    POSITIONAL: the three inputs are compared element-by-element by position, NOT by pandas index. Pass
+    same-length, same-order inputs (as attach_labels does); index labels are ignored. This prevents a
+    reordered/mismatched index from silently pairing a close with the wrong band level — the previous
+    implementation mixed index-aligned comparisons with a positional validity mask.
+    """
     if not (len(close) == len(upper) == len(lower)):
         raise ValueError(
             f"compute_band_state: length mismatch — "
             f"close={len(close)}, upper={len(upper)}, lower={len(lower)}"
         )
-    state = np.zeros(len(close), dtype=np.int8)
-    valid = (upper.notna() & lower.notna()).to_numpy()
-    state[(close > upper).to_numpy() & valid] = 1
-    state[(close < lower).to_numpy() & valid] = -1
+    close_arr = np.asarray(close, dtype=np.float64)
+    upper_arr = np.asarray(upper, dtype=np.float64)
+    lower_arr = np.asarray(lower, dtype=np.float64)
+    state = np.zeros(len(close_arr), dtype=np.int8)
+    valid = np.isfinite(upper_arr) & np.isfinite(lower_arr)
+    state[(close_arr > upper_arr) & valid] = 1
+    state[(close_arr < lower_arr) & valid] = -1
     return state
 
 
@@ -172,8 +317,8 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
                   ternary_col: str = "ctl_label_3class") -> pd.DataFrame:
     """Compute envelope + binary CTL + 3-class labels and attach to a copy of df.
 
-    Storage convention: the binary CTL label is the source-of-truth staging label; the 3-class column is a
-    derived quasi-posterior used by downstream models that want a 'confidence' interpretation.
+    Storage convention: the binary CTL label is the source-of-truth staging label; the 3-class column is a derived
+    quasi-posterior used by downstream models that want a 'confidence' interpretation.
 
     Returns df with: 'ma', 'upper', 'lower', 'band_state', binary_col, ternary_col.
 
@@ -182,10 +327,8 @@ def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
     """
     out = df.copy()
 
-    out["upper"], out["ma"], out["lower"], _, _ = envelope(
-        out["close"], out["high"], out["low"],
-        ma_period=band.ma_period, atr_period=band.atr_period, k_atr=band.k_atr,
-    )
+    out["upper"], out["ma"], out["lower"], _, _ = envelope(out["close"], out["high"], out["low"],
+        ma_period=band.ma_period, atr_period=band.atr_period, k_atr=band.k_atr)
     ctl_raw = np.asarray(continuous_trend_labeling(out["close"], omega=omega), dtype=np.float64)
     bs = compute_band_state(out["close"], out["upper"], out["lower"])
     out["band_state"] = bs

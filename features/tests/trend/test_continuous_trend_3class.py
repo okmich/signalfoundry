@@ -39,6 +39,27 @@ def test_band_params_rejects_negative_k_atr():
         BandParams(ma_period=5, atr_period=5, k_atr=-1.0)
 
 
+def test_band_params_rejects_nan_k_atr():
+    with pytest.raises(ValueError, match="k_atr must be > 0"):
+        BandParams(ma_period=5, atr_period=5, k_atr=float("nan"))
+
+
+def test_band_params_rejects_non_integer_ma_period():
+    with pytest.raises(ValueError, match="ma_period must be an integer"):
+        BandParams(ma_period=5.5, atr_period=5, k_atr=1.0)
+
+
+def test_band_params_rejects_non_integer_atr_period():
+    with pytest.raises(ValueError, match="atr_period must be an integer"):
+        BandParams(ma_period=5, atr_period=5.5, k_atr=1.0)
+
+
+def test_band_params_accepts_numpy_integer_periods():
+    """math.ceil-style scaling and JSON configs can hand back numpy ints — those must be accepted."""
+    band = BandParams(ma_period=np.int64(20), atr_period=np.int32(14), k_atr=1.0)
+    assert band.ma_period == 20
+
+
 def test_band_params_is_frozen():
     band = BandParams(ma_period=5, atr_period=5, k_atr=1.0)
     with pytest.raises((AttributeError, Exception)):  # FrozenInstanceError
@@ -87,6 +108,22 @@ def test_band_state_length_mismatch_raises():
     lower = pd.Series([1.0] * 6)
     with pytest.raises(ValueError, match="length mismatch"):
         compute_band_state(close, upper, lower)
+
+
+def test_band_state_is_positional_not_index_aligned():
+    """Reordered indexes must NOT realign: classification follows position, not label."""
+    close = pd.Series([110.0, 90.0], index=[1, 0])   # deliberately reversed index
+    upper = pd.Series([108.0, 108.0], index=[0, 1])
+    lower = pd.Series([92.0, 92.0], index=[0, 1])
+    # Positional: pos0 close=110 > upper=108 -> +1 ; pos1 close=90 < lower=92 -> -1
+    np.testing.assert_array_equal(compute_band_state(close, upper, lower), np.array([1, -1], dtype=np.int8))
+
+
+def test_band_state_accepts_ndarray_inputs():
+    close = np.array([110.0, 90.0, 100.0])
+    upper = np.array([108.0, 108.0, 108.0])
+    lower = np.array([92.0, 92.0, 92.0])
+    np.testing.assert_array_equal(compute_band_state(close, upper, lower), np.array([1, -1, 0], dtype=np.int8))
 
 
 # ---------------------------------------------------------------------------

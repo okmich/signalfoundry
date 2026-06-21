@@ -5,6 +5,13 @@ Directional regime labels
   continuous_trend_labeling      Price-action state machine; +1 / -1 / 0
   trend_persistence_labeling     Vol-normalised drift; +1 / -1 / 0
 
+Streaming CTL (O(1) per-bar; live/online use)
+---------------------------------------------
+  CTLState                       Persistent state mirroring continuous_trend_labeling's machine
+  ctl_step                       Advance the state by one bar; returns the bar's label
+  ctl_warm_up                    Replay a history once, return the live state for incremental stepping
+  ctl_streaming_replay           Replay a series through the FSM (equivalence harness / batch parity)
+
 Channels (mean line +/- vol-based half-width)
 ---------------------------------------------
   bollinger_band                 SMA +/- k*stdev (returns bands + %B + width)
@@ -39,9 +46,9 @@ import pandas as pd
 import numpy as np
 
 from .channels import bollinger_band, envelope, keltner_channels
-from .continuous_trend import continuous_trend_labeling
-from .normalized_ma import (MovingAverageType, ma_slope_norm, norm_dema, norm_ema, norm_lwma, norm_moving_average,
-                            norm_sma, norm_smma, norm_tema, norm_vwap)
+from .continuous_trend import CTLState, continuous_trend_labeling, ctl_step, ctl_streaming_replay, ctl_warm_up
+from .normalized_ma import MovingAverageType, ma_slope_norm, norm_dema, norm_ema, norm_lwma, norm_moving_average, \
+                            norm_sma, norm_smma, norm_tema, norm_vwap
 from .trend_persistence import trend_persistence_labeling
 from .z_score_trend import zscore_trend_features
 
@@ -84,6 +91,11 @@ __all__ = [
     # Directional labels
     "continuous_trend_labeling",
     "trend_persistence_labeling",
+    # Streaming CTL (live/online)
+    "CTLState",
+    "ctl_step",
+    "ctl_warm_up",
+    "ctl_streaming_replay",
     # Channels
     "bollinger_band",
     "envelope",
