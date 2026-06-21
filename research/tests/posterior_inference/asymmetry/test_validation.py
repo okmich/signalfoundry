@@ -11,6 +11,7 @@ from okmich_quant_research.posterior_inference.asymmetry import (
     validate_outcomes,
     validate_stream,
 )
+from okmich_quant_research.posterior_inference.asymmetry.validation import _bonferroni_t
 
 
 def _one_hot_stream(states: np.ndarray, T: int, K: int = 2, fold_ids: np.ndarray | None = None) -> PosteriorStream:
@@ -60,7 +61,7 @@ def test_rejects_baseline_only_separation() -> None:
     forward = 2.0 * b + rng.standard_normal(T)      # residual is genuine noise, independent of the state
     fold_ids = np.arange(T) // 1000                 # 4 folds for the stability backstop
     stream = _one_hot_stream(states, T, fold_ids=fold_ids)
-    report = validate_outcomes(stream, [AxisProbe("vol", 1, True, forward, b)], min_coverage=100.0)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, b)], min_coverage=100.0)
     assert report.verdicts["vol"] == ValidationVerdict.REJECTED
     raw = report.table[(report.table.kind == "raw") & (report.table.market_axis == "vol")]
     assert raw.t_hac.abs().max() > 3.0              # raw separation is real — and still rejected
@@ -74,7 +75,7 @@ def test_confirms_incremental_separation_and_fold_stable() -> None:
     forward = 2.0 * b + 0.5 * states + 1e-3 * rng.standard_normal(T)
     fold_ids = np.arange(T) // 1000            # 4 folds
     stream = _one_hot_stream(states, T, fold_ids=fold_ids)
-    report = validate_outcomes(stream, [AxisProbe("vol", 1, True, forward, b)], min_coverage=100.0)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, b)], min_coverage=100.0)
     assert report.verdicts["vol"] == ValidationVerdict.CONFIRMED
     assert not report.per_fold.empty
     assert (report.per_fold.t_hac.abs() > 2.0).mean() >= 0.6
@@ -87,7 +88,7 @@ def test_inconclusive_when_coverage_too_low() -> None:
     states = rng.integers(0, 2, T)
     forward = 2.0 * b + 0.5 * states
     stream = _one_hot_stream(states, T)
-    report = validate_outcomes(stream, [AxisProbe("vol", 1, True, forward, b)], min_coverage=1e9)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, b)], min_coverage=1e9)
     assert report.verdicts["vol"] == ValidationVerdict.INCONCLUSIVE
 
 
@@ -101,7 +102,7 @@ def test_inconclusive_when_incremental_coverage_thin_but_raw_is_fine() -> None:
     baseline = np.full(T, np.nan)
     baseline[-80:] = rng.standard_normal(80)                 # baseline finite on only 80 rows -> thin residual
     stream = _one_hot_stream(states, T)
-    report = validate_outcomes(stream, [AxisProbe("vol", 1, True, forward, baseline)], min_coverage=200.0)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, baseline)], min_coverage=200.0)
     assert report.verdicts["vol"] == ValidationVerdict.INCONCLUSIVE
 
 
@@ -114,7 +115,7 @@ def test_fold_ids_accepts_python_list() -> None:
     forward = 2.0 * b + 0.5 * states + 1e-3 * rng.standard_normal(T)
     fold_ids = list(np.arange(T) // 1000)                    # plain Python list
     stream = _one_hot_stream(states, T, fold_ids=fold_ids)
-    report = validate_outcomes(stream, [AxisProbe("vol", 1, True, forward, b)], min_coverage=100.0)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, b)], min_coverage=100.0)
     assert report.verdicts["vol"] == ValidationVerdict.CONFIRMED
     assert sorted(report.per_fold.fold.unique().tolist()) == [0, 1, 2, 3]
 
@@ -134,3 +135,30 @@ def test_validate_stream_builds_probes_and_judges() -> None:
     report = validate_stream(stream, prices, axes=[MarketAxis.VOLATILITY], horizons=[2, 4], min_coverage=50.0)
     assert "volatility" in report.verdicts
     assert set(report.table.kind) == {"raw", "incremental"}
+    assert "volatility" in set(report.focal_summary.market_axis)
+
+
+def test_bonferroni_t_deflates_with_more_tests() -> None:
+    assert _bonferroni_t(2.0, 1) == pytest.approx(2.0)            # no deflation for a single comparison
+    assert _bonferroni_t(2.0, 3) > 2.0                            # best-of-3 must clear a higher bar
+    assert _bonferroni_t(2.0, 9) > _bonferroni_t(2.0, 3)          # monotone in the number of comparisons
+
+
+def test_focal_is_best_incremental_not_raw_winner() -> None:
+    # state 2 is the RAW winner (large baseline -> large forward) but pure clustering (no incremental); the only
+    # incremental edge lives off the raw winner. The verdict must focus there, not on the raw winner.
+    rng = np.random.default_rng(7)
+    T = 900
+    states = np.repeat([0, 1, 2], T // 3)
+    b = rng.standard_normal(T) * 0.1
+    b[states == 2] += 3.0                                            # state 2 separates on the baseline (clustering)
+    forward = 2.0 * b + 1.0 * (states == 0) + 0.01 * rng.standard_normal(T)  # incremental edge planted off state 2
+    stream = _one_hot_stream(states, T, K=3)
+    report = validate_outcomes(stream, [AxisProbe("vol", 1, forward, b)], min_coverage=20.0)
+
+    raw = report.table[report.table.kind == "raw"]
+    raw_winner = int(raw.loc[raw.delta_vs_pooled.abs().idxmax(), "state"])
+    focal_state = int(report.focal_summary.iloc[0].focal_state)
+    assert raw_winner == 2                                           # raw separation is the clustering state
+    assert focal_state != 2                                          # but the verdict focuses on the incremental winner
+    assert report.verdicts["vol"] == ValidationVerdict.CONFIRMED     # single fold -> pooled-only; the edge is real

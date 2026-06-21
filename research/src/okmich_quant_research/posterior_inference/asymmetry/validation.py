@@ -20,6 +20,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+from scipy.stats import norm
 
 from .profiler import ForwardOutcome, forward_outcome_by_state
 from .forward_axes import MarketAxis, forward_axis_series
@@ -49,15 +50,18 @@ class PosteriorStream:
 class ValidationVerdict(enum.StrEnum):
     CONFIRMED = "confirmed"        # incremental, overlap-corrected, fold-stable edge on the axis
     REJECTED = "rejected"          # no incremental edge (separation, if any, is just baseline persistence)
-    INCONCLUSIVE = "inconclusive"  # focal state lacks the coverage to judge
+    INCONCLUSIVE = "inconclusive"  # no judgeable incremental cell (coverage), or folds present but none assessable
 
 
 class AxisProbe(NamedTuple):
-    """One unit of validation work: an axis at a horizon, with its forward outcome and trailing baseline."""
+    """One unit of validation work: an axis at a horizon, with its forward outcome and trailing baseline.
+
+    The per-axis verdict searches the best-incremental cell across *all* a given axis's probes (states x horizons), so no
+    horizon is privileged — every probe for an axis is a candidate cell.
+    """
 
     axis: str
     horizon: int
-    primary: bool                  # only primary-horizon probes drive the verdict + fold-stability
     forward: NDArray
     baseline: NDArray
 
@@ -65,7 +69,8 @@ class AxisProbe(NamedTuple):
 @dataclass(frozen=True)
 class ValidationReport:
     table: pd.DataFrame                       # per (axis, horizon, kind in {raw, incremental}, state) contrast + t_hac
-    per_fold: pd.DataFrame                    # per (axis, fold) incremental focal-state t_hac
+    focal_summary: pd.DataFrame               # per axis: best-incremental (focal) cell, its deflated bar, fold-frac, verdict
+    per_fold: pd.DataFrame                    # per (axis, fold) incremental focal-cell t_hac
     verdicts: dict[str, ValidationVerdict]    # axis -> verdict
     summary: str
 
@@ -121,6 +126,21 @@ def _fold_stability(probs: NDArray, fold_ids: NDArray, unique_folds: NDArray, ax
     return (passes / evaluable if evaluable else float("nan")), evaluable, rows
 
 
+def _bonferroni_t(t_threshold: float, n_tests: int) -> float:
+    """Two-sided Bonferroni-adjusted ``|t|`` bar a best-of-``n_tests`` statistic must clear to hold the family-wise error
+    at the level implied by ``t_threshold`` (``n_tests=1`` returns ``t_threshold``). Deflates the best-cell search so a
+    near-miss has to be real, not the largest of many draws."""
+    n = max(int(n_tests), 1)
+    alpha = 2.0 * float(norm.sf(t_threshold))            # two-sided per-comparison alpha implied by t_threshold
+    return float(norm.isf((alpha / n) / 2.0))            # two-sided t for that alpha spread over n comparisons
+
+
+def _inconclusive_focal_row(axis: str) -> dict:
+    return {"market_axis": axis, "focal_state": -1, "focal_state_label": None, "horizon": -1,
+            "delta_vs_pooled": float("nan"), "t_hac": float("nan"), "deflated_t": float("nan"),
+            "n_cells_tested": 0, "fold_fraction": float("nan"), "verdict": ValidationVerdict.INCONCLUSIVE.value}
+
+
 def validate_outcomes(stream: PosteriorStream, probes: list[AxisProbe], *, min_coverage: float = 200.0,
                       t_threshold: float = 2.0, min_stable_fraction: float = 0.6) -> ValidationReport:
     """Judge pre-built probes. Pure: no price/HMM dependency, so it is unit-testable with planted edges."""
@@ -138,47 +158,54 @@ def validate_outcomes(stream: PosteriorStream, probes: list[AxisProbe], *, min_c
     table = pd.concat(raw_parts + inc_parts, ignore_index=True)
 
     fold_rows: list[dict] = []
+    focal_rows: list[dict] = []
     verdicts: dict[str, ValidationVerdict] = {}
     fold_ids = np.asarray(stream.fold_ids) if stream.fold_ids is not None else None
     unique_folds = np.unique(fold_ids) if fold_ids is not None else np.array([])
     can_test_folds = unique_folds.size >= 2
 
-    for pr in (p for p in probes if p.primary):
-        raw = table[(table.market_axis == pr.axis) & (table.kind == "raw") & (table.horizon == pr.horizon)]
-        eligible = raw[~raw.low_coverage]
-        if eligible.empty:                                            # nothing separated enough to even judge
-            verdicts[pr.axis] = ValidationVerdict.INCONCLUSIVE
-            continue
-        focal = int(eligible.loc[eligible.delta_vs_pooled.abs().idxmax(), "state"])
-
-        inc = table[(table.market_axis == pr.axis) & (table.kind == "incremental")
-                    & (table.horizon == pr.horizon) & (table.state == focal)].iloc[0]
-        if bool(inc.low_coverage):                                    # residual too thin to judge -> not a rejection
-            verdicts[pr.axis] = ValidationVerdict.INCONCLUSIVE
-            continue
-        if not (np.isfinite(inc.t_hac) and abs(inc.t_hac) > t_threshold):
-            verdicts[pr.axis] = ValidationVerdict.REJECTED            # no incremental edge over the baseline
-            continue
-        if not can_test_folds:
-            verdicts[pr.axis] = ValidationVerdict.CONFIRMED           # pooled-only stream (e.g. frozen artifact)
+    inc_table = table[table.kind == "incremental"]
+    for axis in dict.fromkeys(pr.axis for pr in probes):                       # unique axes, order preserved
+        cells = inc_table[(inc_table.market_axis == axis) & (~inc_table.low_coverage) & inc_table.t_hac.notna()]
+        if cells.empty:                                                        # no judgeable incremental cell
+            verdicts[axis] = ValidationVerdict.INCONCLUSIVE
+            focal_rows.append(_inconclusive_focal_row(axis))
             continue
 
-        fraction, evaluable, rows = _fold_stability(probs, fold_ids, unique_folds, pr.axis, pr.horizon,
-                                                     residuals[(pr.axis, pr.horizon)], focal, stream.state_names,
-                                                     min_coverage, t_threshold)
-        fold_rows.extend(rows)
-        if evaluable == 0:                                            # folds present but none assessable
-            verdicts[pr.axis] = ValidationVerdict.INCONCLUSIVE
-        elif fraction >= min_stable_fraction:
-            verdicts[pr.axis] = ValidationVerdict.CONFIRMED
+        best = cells.loc[cells.t_hac.abs().idxmax()]                           # best incremental over (state, horizon)
+        focal_state, focal_h, n_cells = int(best.state), int(best.horizon), int(len(cells))
+        deflated_t = _bonferroni_t(t_threshold, n_cells)                       # deflate the best-of-n_cells search
+        pooled_pass = abs(best.t_hac) > deflated_t
+
+        fraction = float("nan")
+        if not pooled_pass:
+            verdict = ValidationVerdict.REJECTED                               # no incremental edge beyond the baseline
+        elif not can_test_folds:
+            verdict = ValidationVerdict.CONFIRMED                              # single-fold stream: pooled-only
         else:
-            verdicts[pr.axis] = ValidationVerdict.REJECTED           # significant pooled, but not fold-stable
+            fraction, evaluable, rows = _fold_stability(probs, fold_ids, unique_folds, axis, focal_h,
+                                                         residuals[(axis, focal_h)], focal_state, stream.state_names,
+                                                         min_coverage, t_threshold)
+            fold_rows.extend(rows)
+            if evaluable == 0:
+                verdict = ValidationVerdict.INCONCLUSIVE
+            else:
+                verdict = (ValidationVerdict.CONFIRMED if fraction >= min_stable_fraction
+                           else ValidationVerdict.REJECTED)                    # deflated-significant but not fold-stable
+        verdicts[axis] = verdict
+        focal_rows.append({"market_axis": axis, "focal_state": focal_state, "focal_state_label": best.state_label,
+                           "horizon": focal_h, "delta_vs_pooled": float(best.delta_vs_pooled),
+                           "t_hac": float(best.t_hac), "deflated_t": deflated_t, "n_cells_tested": n_cells,
+                           "fold_fraction": fraction, "verdict": verdict.value})
 
     confirmed = [a for a, v in verdicts.items() if v == ValidationVerdict.CONFIRMED]
     summary = (f"confirmed={confirmed or 'none'}; verdicts=" +
                ", ".join(f"{a}:{v.value}" for a, v in verdicts.items()))
+    focal_cols = ["market_axis", "focal_state", "focal_state_label", "horizon", "delta_vs_pooled", "t_hac",
+                  "deflated_t", "n_cells_tested", "fold_fraction", "verdict"]
     per_fold = pd.DataFrame(fold_rows, columns=["market_axis", "fold", "state", "t_hac", "delta_vs_pooled"])
-    return ValidationReport(table=table, per_fold=per_fold, verdicts=verdicts, summary=summary)
+    return ValidationReport(table=table, focal_summary=pd.DataFrame(focal_rows, columns=focal_cols),
+                            per_fold=per_fold, verdicts=verdicts, summary=summary)
 
 
 def validate_stream(stream: PosteriorStream, prices: pd.DataFrame, *, axes: list[MarketAxis], horizons: list[int],
@@ -187,7 +214,8 @@ def validate_stream(stream: PosteriorStream, prices: pd.DataFrame, *, axes: list
     """Build per-axis probes from ``prices`` (aligned to ``stream.index``), then judge via ``validate_outcomes``.
 
     ``prices`` must contain ``stream.index`` (axis series are computed on the full frame for correct forward/trailing
-    windows, then sliced to the stream's rows). ``horizons[0]`` is the primary horizon that drives each axis verdict.
+    windows, then sliced to the stream's rows). Each axis's verdict is the best deflated, fold-stable incremental cell
+    across all (state x horizon) — no horizon is privileged.
     """
     if not horizons:
         raise ValueError("validate_stream: horizons must be non-empty.")
@@ -197,8 +225,8 @@ def validate_stream(stream: PosteriorStream, prices: pd.DataFrame, *, axes: list
 
     probes: list[AxisProbe] = []
     for axis in axes:
-        for i, h in enumerate(horizons):
+        for h in horizons:
             forward_full, baseline_full = forward_axis_series(prices, axis, h)
-            probes.append(AxisProbe(axis.value, h, i == 0, forward_full[pos], baseline_full[pos]))
+            probes.append(AxisProbe(axis.value, h, forward_full[pos], baseline_full[pos]))
     return validate_outcomes(stream, probes, min_coverage=min_coverage, t_threshold=t_threshold,
                              min_stable_fraction=min_stable_fraction)
