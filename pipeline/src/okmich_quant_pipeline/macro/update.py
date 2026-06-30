@@ -19,8 +19,9 @@ from pathlib import Path
 import pandas as pd
 
 from okmich_quant_pipeline._io import atomic_write_parquet
-from okmich_quant_pipeline.macro._types import SERIES, MacroSeries
-from okmich_quant_pipeline.macro.fetchers import fred
+from okmich_quant_pipeline.macro._types import SERIES, FredSource, MacroSeries
+from okmich_quant_pipeline.macro.fetchers import alfred, fred
+from okmich_quant_pipeline.macro.fred_key import load_fred_key
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,12 @@ def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastor
         last_obs = pd.to_datetime(existing["date"]).max().date()
         cosd = max(start, last_obs - dt.timedelta(days=overlap_days))
 
-    new = fred.fetch(series, cosd, end)
+    if spec.source is FredSource.API:
+        # Keyed JSON: output_type=4 for first-print vintages (idempotent — a settled obs always
+        # returns the same first release, so the keep-last merge never clobbers it), else latest.
+        new = alfred.fetch(series, cosd, end, api_key=load_fred_key(), output_type=4 if spec.vintage else 1)
+    else:
+        new = fred.fetch(series, cosd, end)
     merged = _merge(None if full else existing, new)
     if merged.empty:
         raise ValueError(f"no observations for {series.value} ({spec.fred_id}) in {cosd}..{end}")

@@ -130,10 +130,15 @@ nfci `level/chg4`. All windows are observation-based (cadence-correct), computed
 series — never on the broadcast intraday frame.
 
 **Vintage note.** The data layer uses FRED's *latest-vintage* CSV plus a conservative publish stamp
-(`available_from_utc`), not point-in-time ALFRED. Sound for this set: VIX/VIX3M are market closes
-(never revised); BAA10Y/DTWEXBGS/DGS/NFCI carry only minor revisions and the publish lag dominates.
-Point-in-time ALFRED vintages (and restoring genuine ICE HY-OAS) need a free FRED **API key** — see
-Planned additions.
+(`available_from_utc`). VIX/VIX3M are market closes (never revised); BAA10Y/DTWEXBGS/DGS/NFCI carry
+only minor revisions and the publish lag dominates. The keyed-API **first-print vintage path is
+built** (`fetchers/alfred.py` + a per-series `FredSource`/`vintage` discriminator), but **no
+production series is vintaged yet**: NFCI's ALFRED archive only starts 2011-05-27 (vintaging it would
+drop ~2010–2011), so it stayed on the CSV path. The machinery exists for the surprise-channel actuals
+(where first-print is mandatory). **ICE HY-OAS could not be restored to full history** — `BAMLH0A0HYM2`
+is licence-capped to a rolling ~3y window *even with the key* (the cap is on the data, not the
+anonymous CSV); it is added as an **opt-in** `HY_OAS` series (`HY_OAS_RECIPES`, kept out of
+`DEFAULT_RECIPES` so its 2023+-only coverage can't NaN-truncate longer datasets).
 
 ### Planned data additions (not yet built)
 
@@ -265,12 +270,14 @@ taken up, not part of building the layer.
 
 **Done since first draft:** (#1) feature store + coverage reports — **built**. The `news_calendar`
 fetchers — **migrated in-package** (were lab-side). The **event-timing** half of the event channel
-(`minutes_to_next` / `minutes_since_last` / `blackout`) — **built**.
+(`minutes_to_next` / `minutes_since_last` / `blackout`) — **built**. (#2) keyed-API **vintage
+machinery** (`fred_key.py`, `fetchers/alfred.py`, `FredSource`/`vintage` dispatch) — **built**.
 
 **Remaining (data-centric):**
-2. **Point-in-time vintages** — **unblocked** (free FRED API key now on disk; never commit the value).
-   ALFRED vintages → first-print actuals + restore real ICE HY-OAS. *Now also a prerequisite for the
-   surprise feature below — do this next.*
+2. **Point-in-time vintages** — machinery **built**, but the two intended wins both hit data limits
+   (see Vintage note): ICE HY-OAS stays ~3y licence-capped *with the key* (added opt-in, not in
+   defaults); NFCI first-print archive only starts 2011, so it stayed on CSV. The keyed first-print
+   path is ready and is the **prerequisite for the surprise feature** (its actuals *must* be first-print).
 3. **Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. *(Not cleanly
    on FRED — WTI is `DCOILWTICO`, but DXY / Gold spot need another source, reintroducing the Yahoo
    dependency we dropped; resolve sourcing before adding.)*

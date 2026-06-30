@@ -108,6 +108,17 @@ DEFAULT_RECIPES: tuple[FeatureRecipe, ...] = (
 )
 
 
+# Opt-in ICE BofA HY-OAS recipes — deliberately NOT in DEFAULT_RECIPES. The FRED series is
+# licence-capped to a rolling ~3y window (no pre-2023 history), so folding it into the defaults would
+# NaN-truncate any longer macro-joined dataset via the attach's drop_warmup. Concat explicitly
+# (``DEFAULT_RECIPES + HY_OAS_RECIPES``) only for 2023+ work that wants the high-yield credit gauge.
+HY_OAS_RECIPES: tuple[FeatureRecipe, ...] = (
+    FeatureRecipe("hy_oas_level", (MacroSeries.HY_OAS,), level),
+    FeatureRecipe("hy_oas_z20", (MacroSeries.HY_OAS,), partial(zscore, window=20)),
+    FeatureRecipe("hy_oas_chg5", (MacroSeries.HY_OAS,), partial(change, periods=5)),
+)
+
+
 def compute_macro_features(raw: pd.DataFrame, recipes: tuple[FeatureRecipe, ...] = DEFAULT_RECIPES) -> pd.DataFrame:
     """Compute conditioning features from the long raw macro frame.
 

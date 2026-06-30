@@ -132,8 +132,10 @@ detector, not a system; stop there.
 
 ## 9. Out of scope (this PR)
 
-Factor reduction/PCA; daily macro-HMM posteriors (Path B); changes to source `dataset_builder.py`;
-ALFRED vintages / ICE HY-OAS (FRED API key now on disk — that's the next sprint).
+Factor reduction/PCA; daily macro-HMM posteriors (Path B); changes to source `dataset_builder.py`.
+(The keyed-API first-print vintage machinery is now **built** — `fetchers/alfred.py` + a per-series
+`FredSource`/`vintage` discriminator — though no production series is vintaged yet; see the spec's
+Vintage note for why NFCI stayed on CSV and HY-OAS is opt-in.)
 
 **Update:** the event channel's *timing* features (`minutes_to_next` / `minutes_since_last` /
 `blackout`) are now built in `news_calendar/features.py` and attached by

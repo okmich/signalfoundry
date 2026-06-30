@@ -62,10 +62,10 @@ def _fetched(series: MacroSeries, dates: list[str], values: list[float]) -> pd.D
 
 
 def synth_raw(periods: int = 40) -> pd.DataFrame:
-    """Synthetic raw long frame for all four series, stamped via real policies."""
+    """Synthetic raw long frame for every registered series, stamped via real policies."""
     dates = pd.bdate_range("2024-01-01", periods=periods)
     base = {MacroSeries.VIX: 15.0, MacroSeries.VIX_3M: 17.0,
-            MacroSeries.CREDIT_SPREAD: 1.5, MacroSeries.USD_BROAD: 120.0,
+            MacroSeries.CREDIT_SPREAD: 1.5, MacroSeries.HY_OAS: 3.5, MacroSeries.USD_BROAD: 120.0,
             MacroSeries.US_2Y: 1.0, MacroSeries.US_10Y: 3.0, MacroSeries.NFCI: -0.2}
     frames = []
     for s in MacroSeries:
