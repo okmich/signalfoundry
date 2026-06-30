@@ -208,7 +208,8 @@ Two consumption paths. Do **Path A** first; graduate to **Path B** only if A sho
    `dataset_builder`**, so the earlier lab → source backwards-dependency concern is moot: the
    attach stays a standalone post-step (keeping the macro-vs-no-macro ablation a reversible
    `± columns`), and folding it into `dataset_builder` as `_add_macro_features()` is now a trivial
-   in-package option. See `ASOF_MERGE_SPEC.md`.
+   in-package option. The merge algorithm + no-lookahead reasoning live in the `align.py` /
+   `_types.py` / `features.py` module docstrings.
 4. **Screen, don't assume.** Let the existing HMM screener
    (`research/.../features/hmm_screener/`) test whether each macro feature adds
    axis separation; it already Pareto-classifies on `(axis_separation, honesty)`. A macro
