@@ -20,7 +20,7 @@ import logging
 import sys
 from pathlib import Path
 
-from okmich_quant_pipeline.macro._io import atomic_write_parquet
+from okmich_quant_pipeline._io import atomic_write_parquet
 from okmich_quant_pipeline.macro.features import DEFAULT_RECIPES, FeatureRecipe, compute_macro_features
 from okmich_quant_pipeline.macro.reader import load_macro
 from okmich_quant_pipeline.macro.report import MacroReport, build_report, write_report

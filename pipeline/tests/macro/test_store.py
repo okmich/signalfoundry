@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_pipeline.macro._io import atomic_write_parquet
+from okmich_quant_pipeline._io import atomic_write_parquet
 from okmich_quant_pipeline.macro._types import SERIES, MacroSeries
 from okmich_quant_pipeline.macro.features import FeatureRecipe, level, ratio
 from okmich_quant_pipeline.macro.report import (
@@ -56,7 +56,7 @@ def test_atomic_write_parquet_roundtrips_and_leaves_no_tmp(tmp_path) -> None:
     path = tmp_path / "x.parquet"
     atomic_write_parquet(df, path)
     assert path.exists()
-    assert not (tmp_path / "x.parquet.tmp").exists()
+    assert not list(tmp_path.glob("*.tmp"))  # unique temp consumed by the rename, none left behind
     pd.testing.assert_frame_equal(pd.read_parquet(path), df)
 
 
@@ -70,6 +70,7 @@ def test_atomic_write_parquet_no_partial_file_on_failure(tmp_path, monkeypatch) 
     with pytest.raises(RuntimeError):
         atomic_write_parquet(pd.DataFrame({"a": [1]}), path)
     assert not path.exists()  # os.replace never ran -> no file under the final name
+    assert not list(tmp_path.glob("*.tmp"))  # failed write cleans up its temp
 
 
 def test_build_feature_store_roundtrip(tmp_path) -> None:

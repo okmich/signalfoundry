@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from okmich_quant_pipeline.macro._io import atomic_write_parquet
+from okmich_quant_pipeline._io import atomic_write_parquet
 from okmich_quant_pipeline.macro._types import SERIES, MacroSeries
 from okmich_quant_pipeline.macro.fetchers import fred
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
@@ -42,7 +42,7 @@ def _merge(existing: pd.DataFrame | None, new: pd.DataFrame) -> pd.DataFrame:
 
 
 def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastore, *,
-                  full: bool, start: dt.date, end: dt.date, overlap_days: int) -> dict:
+                  full: bool, start: dt.date, end: dt.date, overlap_days: int, allow_shrink: bool = False) -> dict:
     """Fetch (incremental or full), merge with existing, atomic-write, update metastore."""
     spec = SERIES[series]
     path = store_dir / f"{series.value}.parquet"
@@ -58,6 +58,20 @@ def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastor
     merged = _merge(None if full else existing, new)
     if merged.empty:
         raise ValueError(f"no observations for {series.value} ({spec.fred_id}) in {cosd}..{end}")
+
+    # Full re-fetch discards `existing`, so a partial provider response or a too-late `--start`
+    # could replace a good historical asset with a truncated one (the empty guard above only
+    # catches a *zero*-row fetch). Refuse to narrow the date span unless explicitly allowed.
+    # Incremental runs merge with `existing` and so can never shrink — only `full` needs this.
+    if full and existing is not None and not existing.empty and not allow_shrink:
+        ex = pd.to_datetime(existing["date"])
+        new_dates = pd.to_datetime(merged["date"])
+        if new_dates.min() > ex.min() or new_dates.max() < ex.max():
+            raise ValueError(
+                f"{series.value}: full re-fetch would shrink coverage "
+                f"[{ex.min().date()}..{ex.max().date()}] -> [{new_dates.min().date()}..{new_dates.max().date()}]; "
+                f"pass --allow-shrink to override"
+            )
     atomic_write_parquet(merged, path)
 
     dates = pd.to_datetime(merged["date"])
@@ -75,7 +89,8 @@ def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastor
 
 
 def update_all(store_dir: Path, *, full: bool = False, start: dt.date = DEFAULT_START,
-               end: dt.date | None = None, overlap_days: int = DEFAULT_OVERLAP_DAYS) -> dict[str, bool]:
+               end: dt.date | None = None, overlap_days: int = DEFAULT_OVERLAP_DAYS,
+               allow_shrink: bool = False) -> dict[str, bool]:
     """Update every registered series; returns ``{series: success}``."""
     store_dir = Path(store_dir)
     end = end or dt.date.today()
@@ -84,7 +99,8 @@ def update_all(store_dir: Path, *, full: bool = False, start: dt.date = DEFAULT_
     results: dict[str, bool] = {}
     for series in MacroSeries:
         try:
-            rec = update_series(series, store_dir, metastore, full=full, start=start, end=end, overlap_days=overlap_days)
+            rec = update_series(series, store_dir, metastore, full=full, start=start, end=end,
+                                overlap_days=overlap_days, allow_shrink=allow_shrink)
             logger.info(f"  {series.value:<14} {rec['fred_id']:<14} {rec['n_obs']:5d} obs  {rec['first_obs']} .. {rec['last_obs']}")
             results[series.value] = True
         except Exception as exc:  # one bad series must not abort the rest
@@ -101,9 +117,11 @@ def main() -> None:
     parser.add_argument("--start", type=lambda s: dt.date.fromisoformat(s), default=DEFAULT_START, help="Earliest observation date (default 2010-01-01).")
     parser.add_argument("--end", type=lambda s: dt.date.fromisoformat(s), default=dt.date.today(), help="Latest observation date (default today).")
     parser.add_argument("--overlap-days", type=int, default=DEFAULT_OVERLAP_DAYS, help="Incremental: re-fetch this many days before last_obs to absorb revisions.")
+    parser.add_argument("--allow-shrink", action="store_true", help="Permit a --full re-fetch to narrow a series' date span (e.g. an intentional narrower --start).")
     args = parser.parse_args()
 
-    results = update_all(Path(args.out), full=args.full, start=args.start, end=args.end, overlap_days=args.overlap_days)
+    results = update_all(Path(args.out), full=args.full, start=args.start, end=args.end,
+                         overlap_days=args.overlap_days, allow_shrink=args.allow_shrink)
     ok, total = sum(results.values()), len(results)
     print(f"\n{ok}/{total} series updated -> {args.out}")
     sys.exit(0 if ok == total else 1)

@@ -27,8 +27,8 @@ from okmich_quant_pipeline.macro.features import (
     compute_macro_features,
     zscore,
 )
+from okmich_quant_pipeline.http import get
 from okmich_quant_pipeline.macro.fetchers.fred import _parse
-from okmich_quant_pipeline.macro.http import get
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 from okmich_quant_pipeline.macro.reader import load_macro
 from okmich_quant_pipeline.macro.update import _merge, update_series
@@ -418,6 +418,26 @@ def test_update_series_incremental_absorbs_revision_without_growing(tmp_path: Pa
     assert rec2["n_obs"] == 3  # count unchanged — the date already existed
     out = pd.read_parquet(tmp_path / "VIX.parquet").set_index("date")["value"]
     assert out.loc["2024-01-03"] == 12.5  # revision absorbed end-to-end
+
+
+def test_update_full_refetch_shrink_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ms = MacroMetastore(tmp_path)
+    full_dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, full_dates, [1.0] * 5))
+    update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                  start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 5), overlap_days=60)
+
+    # A full re-fetch that returns a truncated span (later start) must be refused, asset preserved.
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, ["2024-01-04", "2024-01-05"], [9.0, 9.0]))
+    with pytest.raises(ValueError, match="shrink"):
+        update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                      start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 5), overlap_days=60)
+    assert len(pd.read_parquet(tmp_path / "VIX.parquet")) == 5  # untouched on disk
+
+    # Explicit opt-in overrides the guard.
+    rec = update_series(MacroSeries.VIX, tmp_path, ms, full=True, start=dt.date(2024, 1, 1),
+                        end=dt.date(2024, 1, 5), overlap_days=60, allow_shrink=True)
+    assert rec["n_obs"] == 2
 
 
 def test_fred_parse_rejects_malformed_single_column_response() -> None:

@@ -19,7 +19,7 @@ import io
 import pandas as pd
 
 from okmich_quant_pipeline.macro._types import SERIES, MacroSeries, SeriesSpec
-from okmich_quant_pipeline.macro.http import get
+from okmich_quant_pipeline.http import get
 
 _CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={fred_id}&cosd={start}&coed={end}"
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from okmich_quant_pipeline.macro._io import atomic_write_text
+from okmich_quant_pipeline._io import atomic_write_text
 
 REPORT_FILENAME = "_report.json"
 

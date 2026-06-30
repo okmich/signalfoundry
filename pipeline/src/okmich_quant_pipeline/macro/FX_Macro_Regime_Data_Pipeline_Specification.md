@@ -185,8 +185,9 @@ intraday model, to avoid feeding 4 collinear copies of "the USD factor."
 Two consumption paths. Do **Path A** first; graduate to **Path B** only if A shows lift.
 
 ### Path A — exogenous columns (start here) — **BUILT**
-1. **Fetcher:** `okmich_quant_pipeline.macro` package (`fetchers/`, `http.py`, `_types.py`,
-   `metastore.py`, `update.py`, `reader.py`). Per-series parquet + `_metadata.json` metastore at
+1. **Fetcher:** `okmich_quant_pipeline.macro` package (`fetchers/`, `_types.py`, `metastore.py`,
+   `update.py`, `reader.py`) over the shared `okmich_quant_pipeline.http` / `._io` utilities.
+   Per-series parquet + `_metadata.json` metastore at
    `E:\data_dump\macro_data\daily\`, refreshed via `fetch-macro-data` (incremental) / `--full`.
    *The fetcher code is the deliverable.*
 2. **Daily features:** `features.compute_macro_features` (z-scores, term-structure ratio,
