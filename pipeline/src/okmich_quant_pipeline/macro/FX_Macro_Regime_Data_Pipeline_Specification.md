@@ -276,7 +276,8 @@ proven to add edge.**
   (`compute_event_features` → `attach_events_to_dataset`, computed **per-bar**). *Surprise:* FF-native
   `macro_event_surprise` (`economic_events.py` / `fetch-economic-events` → `attach_surprise_to_dataset`),
   standardized causally per event type, broadcast via `ExplicitRelease` + `align.attach_exogenous`.
-- **Keyed-API vintage machinery** — `fred_key.py`, `fetchers/alfred.py` (first-print `output_type=4`),
+- **Keyed-API vintage machinery** — `fetchers/alfred.py` (first-print `output_type=4`; key read from
+  the `FRED_API_KEY` env var),
   `FredSource`/`vintage` dispatch. Caveats it surfaced: ICE HY-OAS is ~3y licence-capped *even with the
   key* (opt-in `HY_OAS`, kept out of defaults); NFCI's first-print archive starts only 2011, so NFCI
   stayed on CSV. **No production series is first-print-vintaged**; the path is retained for vintaged

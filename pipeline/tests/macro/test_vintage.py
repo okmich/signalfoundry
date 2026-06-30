@@ -1,6 +1,6 @@
-"""Vintage sprint tests — FRED key loader, ALFRED first-print fetcher, source dispatch, HY-OAS.
+"""Vintage sprint tests — FRED API key (env), ALFRED first-print fetcher, source dispatch, HY-OAS.
 
-All offline: the key loader uses temp files / env; the ALFRED fetcher is exercised on a recorded
+All offline: the key is read from ``$FRED_API_KEY``; the ALFRED fetcher is exercised on a recorded
 JSON fixture; no test hits the network.
 """
 from __future__ import annotations
@@ -16,7 +16,6 @@ from okmich_quant_pipeline.macro import update as update_mod
 from okmich_quant_pipeline.macro._types import SERIES, MacroSeries
 from okmich_quant_pipeline.macro.fetchers import alfred
 from okmich_quant_pipeline.macro.fetchers.alfred import _parse
-from okmich_quant_pipeline.macro.fred_key import ENV_VAR, load_fred_key
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 
 _VALID = "9d6" + "a" * 27 + "bc"  # 32 lowercase-alnum chars; not a real key
@@ -28,40 +27,25 @@ def _fix(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# S0.1 — key loader (secret never leaks into return paths or errors)
+# S0.1 — FRED API key from $FRED_API_KEY (env only; secret, never logged)
 # --------------------------------------------------------------------------- #
 
-def test_key_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / ".fred").write_text("f" * 32)  # a different valid-shaped key on disk
-    monkeypatch.setenv(ENV_VAR, f"  {_VALID}  ")  # whitespace must be stripped
-    assert load_fred_key(tmp_path / ".fred") == _VALID  # env wins, file ignored
+def test_fred_api_key_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", f"  {_VALID}  ")  # surrounding whitespace stripped
+    assert update_mod._fred_api_key() == _VALID
 
 
-def test_key_read_from_file_when_no_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_VAR, raising=False)
-    (tmp_path / ".fred").write_text(f"{_VALID}\n")
-    assert load_fred_key(tmp_path / ".fred") == _VALID
+def test_fred_api_key_missing_raises_naming_the_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    with pytest.raises(RuntimeError) as exc:
+        update_mod._fred_api_key()
+    assert "FRED_API_KEY" in str(exc.value)  # error names the env var, carries no key value
 
 
-def test_key_empty_env_falls_through_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(ENV_VAR, "   ")  # blank env is ignored, not treated as the key
-    (tmp_path / ".fred").write_text(_VALID)
-    assert load_fred_key(tmp_path / ".fred") == _VALID
-
-
-def test_key_missing_everywhere_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_VAR, raising=False)
-    with pytest.raises(FileNotFoundError):
-        load_fred_key(tmp_path / "absent.fred")
-
-
-def test_key_malformed_raises_without_leaking_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_VAR, raising=False)
-    secret = "TOTALLY-not-a-valid-key-but-secret"
-    (tmp_path / ".fred").write_text(secret)
-    with pytest.raises(ValueError) as exc:
-        load_fred_key(tmp_path / ".fred")
-    assert secret not in str(exc.value)  # the key value must never appear in the error
+def test_fred_api_key_blank_env_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FRED_API_KEY", "   ")  # blank is not a key
+    with pytest.raises(RuntimeError):
+        update_mod._fred_api_key()
 
 
 # --------------------------------------------------------------------------- #
@@ -128,14 +112,14 @@ def test_update_dispatches_api_for_hy_oas_csv_for_others(tmp_path: Path, monkeyp
                         lambda series, start, end, *, api_key, output_type: calls.__setitem__("alfred", (series, output_type)) or _frame(series, ["2024-01-05"], [3.5]))
     monkeypatch.setattr(update_mod.fred, "fetch",
                         lambda series, start, end: calls.__setitem__("fred", series) or _frame(series, ["2024-01-05"], [1.0]))
-    monkeypatch.setattr(update_mod, "load_fred_key", lambda: "k" * 32)
+    monkeypatch.setattr(update_mod, "_fred_api_key", lambda: "k" * 32)
     ms = MacroMetastore(tmp_path)
 
     update_mod.update_series(MacroSeries.HY_OAS, tmp_path, ms, full=True, start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 31), overlap_days=60)
     assert calls["alfred"] == (MacroSeries.HY_OAS, 1) and "fred" not in calls  # API, latest (vintage=False)
 
     # A CSV series must use fred.fetch and never touch the key loader.
-    monkeypatch.setattr(update_mod, "load_fred_key", lambda: pytest.fail("key loaded for a CSV series"))
+    monkeypatch.setattr(update_mod, "_fred_api_key", lambda: pytest.fail("key loaded for a CSV series"))
     update_mod.update_series(MacroSeries.VIX, tmp_path, ms, full=True, start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 31), overlap_days=60)
     assert calls["fred"] == MacroSeries.VIX
 
@@ -147,13 +131,13 @@ def test_update_vintage_series_requests_output_type_4(tmp_path: Path, monkeypatc
     monkeypatch.setitem(update_mod.SERIES, MacroSeries.HY_OAS, replace(SERIES[MacroSeries.HY_OAS], vintage=True))
     monkeypatch.setattr(update_mod.alfred, "fetch",
                         lambda series, start, end, *, api_key, output_type: captured.__setitem__("ot", output_type) or _frame(series, ["2024-01-05"], [3.5]))
-    monkeypatch.setattr(update_mod, "load_fred_key", lambda: "k" * 32)
+    monkeypatch.setattr(update_mod, "_fred_api_key", lambda: "k" * 32)
     update_mod.update_series(MacroSeries.HY_OAS, tmp_path, MacroMetastore(tmp_path), full=True, start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 31), overlap_days=60)
     assert captured["ot"] == 4
 
 
 def test_api_series_refetch_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(update_mod, "load_fred_key", lambda: "k" * 32)
+    monkeypatch.setattr(update_mod, "_fred_api_key", lambda: "k" * 32)
     monkeypatch.setattr(update_mod.alfred, "fetch",
                         lambda series, start, end, *, api_key, output_type: _frame(series, ["2024-01-05", "2024-01-12"], [3.5, 3.6]))
     ms = MacroMetastore(tmp_path)

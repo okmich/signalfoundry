@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,6 @@ import pandas as pd
 from okmich_quant_pipeline._io import atomic_write_parquet
 from okmich_quant_pipeline.macro._types import SERIES, FredSource, MacroSeries
 from okmich_quant_pipeline.macro.fetchers import alfred, fred
-from okmich_quant_pipeline.macro.fred_key import load_fred_key
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_STORE = r"E:\data_dump\macro_data\daily"
 DEFAULT_START = dt.date(2010, 1, 1)
 DEFAULT_OVERLAP_DAYS = 60
+
+
+def _fred_api_key() -> str:
+    """Return the FRED API key from ``$FRED_API_KEY`` (required only for keyed ``FredSource.API`` series).
+
+    A secret: the value is never logged. Read lazily — anonymous CSV series never touch it.
+    """
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("FRED_API_KEY is not set (required for keyed FRED/ALFRED series; export it before fetching)")
+    return key
 
 
 def _merge(existing: pd.DataFrame | None, new: pd.DataFrame) -> pd.DataFrame:
@@ -58,7 +69,7 @@ def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastor
     if spec.source is FredSource.API:
         # Keyed JSON: output_type=4 for first-print vintages (idempotent — a settled obs always
         # returns the same first release, so the keep-last merge never clobbers it), else latest.
-        new = alfred.fetch(series, cosd, end, api_key=load_fred_key(), output_type=4 if spec.vintage else 1)
+        new = alfred.fetch(series, cosd, end, api_key=_fred_api_key(), output_type=4 if spec.vintage else 1)
     else:
         new = fred.fetch(series, cosd, end)
     merged = _merge(None if full else existing, new)
