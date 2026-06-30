@@ -1,7 +1,10 @@
 # Macro feature engineering + no-lookahead asof-merge
 
-Status: **IMPLEMENTED** (34 tests passing; verified end-to-end on real EURUSD 5m).
-Package: `okmich_quant_pipeline.macro` (signalfoundry/pipeline). Store refreshed via `fetch-macro-data`.
+Status: **IMPLEMENTED** — part of the now-**closed** macro data-asset layer (see the main spec's Status
+section). 122 macro + news_calendar tests passing; verified end-to-end on real EURUSD 5m. The same
+`attach_exogenous` merge serves the macro series, the event-timing features, and the event surprise.
+Package: `okmich_quant_pipeline.macro` (+ `news_calendar`). Stores refreshed via `fetch-macro-data` /
+`fetch-news-calendar` / `fetch-economic-events`.
 
 ---
 

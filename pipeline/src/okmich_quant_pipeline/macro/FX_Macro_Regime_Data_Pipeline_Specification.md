@@ -1,5 +1,10 @@
 # Macro Regime Data Pipeline Specification for Intraday FX Trading
 
+> **STATUS (2026-06-30): DATA-ASSET LAYER COMPLETE — workstream closed.** See [Status](#status--data-asset-layer-complete-closed-2026-06-30).
+> Built: base series, feature store, calendar, event channel (timing + surprise), vintage machinery.
+> Parked: commodity/equity breadth (#3, needs a non-FRED source). Deferred consumer workstream (next):
+> validation (per-year net-of-cost), in-fold PCA, Path B. **No macro feature is yet validated as a strategy.**
+
 > **Revision note (2026-06-23).** Reframed from a *supervised regime classifier* to a
 > *slow-moving conditioner / gate / sizer* layer that plugs into the existing HMM +
 > posterior-inference + CTL stack. The headline change: we do **not** train a model to
@@ -254,52 +259,55 @@ The **no-lookahead backward asof-merge / broadcast layer**. Build it once, test 
 
 ---
 
-## Status & roadmap
+## Status — DATA-ASSET LAYER COMPLETE (closed 2026-06-30)
 
-**Built (data layer):** 7 FRED series → 18 features, leak-free cadence-agnostic attach
-(`okmich_quant_pipeline.macro`), scoped to real instruments (EURUSD / XAUUSD / SP500 / BTC) — never
-synthetics. Plus: the **feature store** (`store.py` / `build-macro-features` + coverage/gap/staleness
-`report.py`); the **`news_calendar` package** migrated in-package (calendar asset built); and the
-**event-timing features** (`news_calendar/features.compute_event_features` →
-`attach.attach_events_to_dataset`: `minutes_to_next` / `minutes_since_last` / `blackout`).
+This workstream was **data-centric**: build a clean, broad, correctly time-aligned exogenous data
+asset, scoped to real instruments (EURUSD / XAUUSD / SP500 / BTC) — never synthetics. **That asset is
+now complete and this workstream is closed.** Whether the data *pays* (per-year net-of-cost) is a
+separate **consumer workstream**, deliberately deferred (below) — **nothing in the data layer is yet
+proven to add edge.**
 
-This workstream is **data-centric**: the goal is a clean, broad, correctly time-aligned exogenous
-data asset. Strategy validation (sizer/gate in `regime_gate_walkforward`, per-year net-of-cost) and
-the daily macro-HMM (Path B) are the eventual *consumers* of this data — deferred until explicitly
-taken up, not part of building the layer.
+### Built (data layer)
+- **7 FRED series → 18 features**, leak-free cadence-agnostic attach (`okmich_quant_pipeline.macro`).
+- **Feature store** — `store.py` / `build-macro-features` + coverage/gap/staleness `report.py`.
+- **`news_calendar`** migrated in-package; high-impact calendar asset (`build.py` / `fetch-news-calendar`).
+- **Event channel — both halves.** *Timing:* `minutes_to_next` / `minutes_since_last` / `blackout`
+  (`compute_event_features` → `attach_events_to_dataset`, computed **per-bar**). *Surprise:* FF-native
+  `macro_event_surprise` (`economic_events.py` / `fetch-economic-events` → `attach_surprise_to_dataset`),
+  standardized causally per event type, broadcast via `ExplicitRelease` + `align.attach_exogenous`.
+- **Keyed-API vintage machinery** — `fred_key.py`, `fetchers/alfred.py` (first-print `output_type=4`),
+  `FredSource`/`vintage` dispatch. Caveats it surfaced: ICE HY-OAS is ~3y licence-capped *even with the
+  key* (opt-in `HY_OAS`, kept out of defaults); NFCI's first-print archive starts only 2011, so NFCI
+  stayed on CSV. **No production series is first-print-vintaged**; the path is retained for vintaged
+  *level* conditioners (and was *not* needed by surprise — see below).
 
-**Done since first draft:** (#1) feature store + coverage reports — **built**. The `news_calendar`
-fetchers — **migrated in-package** (were lab-side). The **event channel** — both halves **built**:
-*timing* (`minutes_to_next` / `minutes_since_last` / `blackout`) and ***surprise*** (FF-native;
-`economic_events.py` + `attach_surprise_to_dataset`). (#2) keyed-API **vintage machinery**
-(`fred_key.py`, `fetchers/alfred.py`, `FredSource`/`vintage` dispatch) — **built**.
-
-**Remaining (data-centric):**
-2. **Point-in-time vintages** — machinery **built**, but the two intended wins both hit data limits
-   (see Vintage note): ICE HY-OAS stays ~3y licence-capped *with the key* (added opt-in, not in
-   defaults); NFCI first-print archive only starts 2011, so it stayed on CSV. The keyed first-print
-   path is ready (the surprise feature ended up *not* needing it — see #4).
-3. **Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. *(Not cleanly
-   on FRED — WTI is `DCOILWTICO`, but DXY / Gold spot need another source, reintroducing the Yahoo
-   dependency we dropped; resolve sourcing before adding.)* **The standout remaining item.**
-
-**Event channel — surprise (BUILT, FF-native).** `surprise = (actual − consensus)/σ`, standardized
-causally per event type. **Decisive S0 finding:** ForexFactory's blob already carries `forecast` +
+**Surprise — why FF-native (decisive S0 finding).** ForexFactory's blob already carries `forecast` +
 `actual` + `previous` for the US releases (NFP/CPI/PPI/GDP/PCE/Retail) in matching headline units back
 to 2011, and FF's `actual` *is* the released headline — so the surprise is correct **by construction**.
-The originally-planned hybrid (ALFRED first-print actual + FF forecast) was **rejected**: reconstructing
-the actual from FRED levels is provably ≠ the headline the forecast targets for change/MoM% series
-(NFP uses the *revised* prior month; CPI/PPI SA factors revise) — only GDP's `%`-change series is clean.
-The `economic_events` store (FF) → `compute_surprise` (causal trailing-σ per type) → `ExplicitRelease`
-stamp at the release instant → `align.attach_exogenous` → `macro_event_surprise`. The vintage machinery
-(#2) is therefore unused by surprise; it remains available for vintaged *level* conditioners.
+The planned hybrid (ALFRED first-print actual + FF forecast) was **rejected**: reconstructing the actual
+from FRED levels is provably ≠ the headline the forecast targets for change/MoM% series (NFP uses the
+*revised* prior month; CPI/PPI SA factors revise) — only GDP's `%`-change series is clean. **Mechanism:**
+`ExplicitRelease` + the backward asof-merge is the *surprise* path (backward-looking); the event-*timing*
+features are forward/symmetric and computed per-bar — two different paths.
 
-**Mechanism note:** `ExplicitRelease` + the backward asof-merge is the path for *surprise* (a
-backward-looking series — now built that way). The event-*timing* features are forward/symmetric, so
-they are computed **per-bar** against the calendar (`compute_event_features`), not via the asof-merge — two
-different paths the earlier draft conflated.
+### Parked — blocked on a decision (not a task)
+- **(#3) Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. WTI is free on
+  FRED (`DCOILWTICO`), but DXY / Gold spot are not, and the Yahoo screen-scrape was deliberately dropped.
+  **Needs a non-FRED source decision before any build** — parked until taken up.
 
-**Never:** the supervised 4-probability regime classifier (no ground truth); macro on synthetics.
+### Deferred — consumer workstream (NOT part of building the layer; none of this is done)
+The data asset is an *input*; whether it adds edge is unproven. Per this repo's discipline — *"if macro
+gating does not lift per-year net, it is a characterized detector, not a system — log it and stop"* —
+the real test has not been run. **Do not treat any macro feature as validated.**
+- **Validation** — prove macro-as-sizer/gate in `research/regime_gate_walkforward/`, **per-year
+  net-of-cost** lift, leakage-guarded (fit anything trainable inside-fold).
+- **Factor reduction / PCA** — the collinearity reduction (~3–4 independent factors, not ~20 columns)
+  belongs **in-fold** in the validation harness, *not* baked into the stored asset (a global fit leaks).
+- **Path B** — daily macro-HMM posteriors (`γ_t` → `MarginGate` / `StabilityGate` → asof-merge to intraday).
+- *(optional)* pre-materialized per-instrument macro-joined frames.
+
+### Never
+The supervised 4-probability regime classifier (no ground truth); macro on synthetics.
 
 ---
 
@@ -309,11 +317,12 @@ For a retail intraday FX/metal trader, the highest information-per-unit-effort m
 are, in order:
 
 1. **VIX (level + term structure)** — sizing via the volatility channel. *Built.*
-2. **Economic-calendar event channel** — **built**: timing features (minutes-to-event / blackout) +
-   FF-native **surprise** (`macro_event_surprise`, standardized causally per event type).
-3. **Credit spread (`BAA10Y`)** — the cleanest free daily risk-on/off gauge. *Built* (real ICE HY-OAS pending API key).
+2. **Economic-calendar event channel** — timing (minutes-to-event / blackout) + FF-native **surprise**
+   (`macro_event_surprise`). *Built.*
+3. **Credit spread (`BAA10Y`)** — the cleanest free daily risk-on/off gauge. *Built.* (Real ICE HY-OAS
+   stays ~3y licence-capped even with the key — added opt-in as `HY_OAS`, not in defaults.)
 4. **Broad trade-weighted USD** — slow directional bias for real FX/metal. *Built.*
 
-Three of the four are built; the **event channel** is the highest-value remaining data add. All
-are **exogenous conditioner inputs** under strict no-lookahead alignment, scoped to real
-instruments — kept as a data asset, not yet validated as a strategy (that's a deliberate later step).
+**All four are built.** They are **exogenous conditioner inputs** under strict no-lookahead alignment,
+scoped to real instruments — a **data asset, not yet validated as a strategy**. Proving per-year
+net-of-cost lift (the deferred consumer workstream) is the deliberate next step, not part of this layer.
