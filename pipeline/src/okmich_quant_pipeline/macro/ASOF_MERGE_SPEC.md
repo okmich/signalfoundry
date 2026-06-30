@@ -137,8 +137,9 @@ Factor reduction/PCA; daily macro-HMM posteriors (Path B); changes to source `da
 `FredSource`/`vintage` discriminator — though no production series is vintaged yet; see the spec's
 Vintage note for why NFCI stayed on CSV and HY-OAS is opt-in.)
 
-**Update:** the event channel's *timing* features (`minutes_to_next` / `minutes_since_last` /
-`blackout`) are now built in `news_calendar/features.py` and attached by
-`attach.attach_events_to_dataset`. They are computed **per-bar** (forward/symmetric in time), so they
-deliberately do **not** use this backward asof-merge — that path remains reserved for the *surprise*
-feature (a backward-looking series), still deferred pending vintaged actuals + consensus.
+**Update:** the event channel is **built**, in two shapes. *Timing* (`minutes_to_next` /
+`minutes_since_last` / `blackout`, `news_calendar/features.py` → `attach_events_to_dataset`) is
+forward/symmetric, computed **per-bar**, and deliberately does **not** use this asof-merge. *Surprise*
+(`economic_events.py` → `attach_surprise_to_dataset`) IS backward-looking, so it rides exactly this
+`attach_exogenous` path: a per-release standardized `surprise` stamped `ExplicitRelease` at the release
+instant, ffilled to each later bar — the canonical use of this merge for an irregular event-driven series.

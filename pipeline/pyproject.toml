@@ -22,6 +22,7 @@ monitor-streaming-gates = "okmich_quant_pipeline.monitoring.run_monitor:main"
 fetch-macro-data = "okmich_quant_pipeline.macro.update:main"
 build-macro-features = "okmich_quant_pipeline.macro.store:main"
 fetch-news-calendar = "okmich_quant_pipeline.news_calendar.build:main"
+fetch-economic-events = "okmich_quant_pipeline.news_calendar.economic_events:main"
 
 [tool.uv.sources]
 okmich-quant-core = { workspace = true }

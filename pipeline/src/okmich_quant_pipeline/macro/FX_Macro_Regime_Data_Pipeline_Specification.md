@@ -269,28 +269,34 @@ the daily macro-HMM (Path B) are the eventual *consumers* of this data — defer
 taken up, not part of building the layer.
 
 **Done since first draft:** (#1) feature store + coverage reports — **built**. The `news_calendar`
-fetchers — **migrated in-package** (were lab-side). The **event-timing** half of the event channel
-(`minutes_to_next` / `minutes_since_last` / `blackout`) — **built**. (#2) keyed-API **vintage
-machinery** (`fred_key.py`, `fetchers/alfred.py`, `FredSource`/`vintage` dispatch) — **built**.
+fetchers — **migrated in-package** (were lab-side). The **event channel** — both halves **built**:
+*timing* (`minutes_to_next` / `minutes_since_last` / `blackout`) and ***surprise*** (FF-native;
+`economic_events.py` + `attach_surprise_to_dataset`). (#2) keyed-API **vintage machinery**
+(`fred_key.py`, `fetchers/alfred.py`, `FredSource`/`vintage` dispatch) — **built**.
 
 **Remaining (data-centric):**
 2. **Point-in-time vintages** — machinery **built**, but the two intended wins both hit data limits
    (see Vintage note): ICE HY-OAS stays ~3y licence-capped *with the key* (added opt-in, not in
    defaults); NFCI first-print archive only starts 2011, so it stayed on CSV. The keyed first-print
-   path is ready and is the **prerequisite for the surprise feature** (its actuals *must* be first-print).
+   path is ready (the surprise feature ended up *not* needing it — see #4).
 3. **Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. *(Not cleanly
    on FRED — WTI is `DCOILWTICO`, but DXY / Gold spot need another source, reintroducing the Yahoo
-   dependency we dropped; resolve sourcing before adding.)*
-4. **Event channel — surprise** *(the gated half)* — `surprise = (first-print actual − consensus)/σ`.
-   **Depends on #2** (vintaged actuals) **and** on consensus/forecast sourcing (the open fork — partly
-   free from the ForexFactory blob we already parse for ECB/BoE; US consensus is the hard piece).
-   Architecture: the *actual* lives once as a vintaged macro series via the `ExplicitRelease`
-   availability policy (calendar supplies release timestamps); `surprise` is a derived join, not a
-   stored duplicate.
+   dependency we dropped; resolve sourcing before adding.)* **The standout remaining item.**
+
+**Event channel — surprise (BUILT, FF-native).** `surprise = (actual − consensus)/σ`, standardized
+causally per event type. **Decisive S0 finding:** ForexFactory's blob already carries `forecast` +
+`actual` + `previous` for the US releases (NFP/CPI/PPI/GDP/PCE/Retail) in matching headline units back
+to 2011, and FF's `actual` *is* the released headline — so the surprise is correct **by construction**.
+The originally-planned hybrid (ALFRED first-print actual + FF forecast) was **rejected**: reconstructing
+the actual from FRED levels is provably ≠ the headline the forecast targets for change/MoM% series
+(NFP uses the *revised* prior month; CPI/PPI SA factors revise) — only GDP's `%`-change series is clean.
+The `economic_events` store (FF) → `compute_surprise` (causal trailing-σ per type) → `ExplicitRelease`
+stamp at the release instant → `align.attach_exogenous` → `macro_event_surprise`. The vintage machinery
+(#2) is therefore unused by surprise; it remains available for vintaged *level* conditioners.
 
 **Mechanism note:** `ExplicitRelease` + the backward asof-merge is the path for *surprise* (a
-backward-looking series). The event-*timing* features are forward/symmetric, so they are computed
-**per-bar** against the calendar (`compute_event_features`), not via the asof-merge — these are two
+backward-looking series — now built that way). The event-*timing* features are forward/symmetric, so
+they are computed **per-bar** against the calendar (`compute_event_features`), not via the asof-merge — two
 different paths the earlier draft conflated.
 
 **Never:** the supervised 4-probability regime classifier (no ground truth); macro on synthetics.
@@ -303,8 +309,8 @@ For a retail intraday FX/metal trader, the highest information-per-unit-effort m
 are, in order:
 
 1. **VIX (level + term structure)** — sizing via the volatility channel. *Built.*
-2. **Economic-calendar event channel** — *timing features (minutes-to-event / blackout) built*; the
-   higher-value **surprise** add is gated on vintaged actuals (#2) + consensus sourcing.
+2. **Economic-calendar event channel** — **built**: timing features (minutes-to-event / blackout) +
+   FF-native **surprise** (`macro_event_surprise`, standardized causally per event type).
 3. **Credit spread (`BAA10Y`)** — the cleanest free daily risk-on/off gauge. *Built* (real ICE HY-OAS pending API key).
 4. **Broad trade-weighted USD** — slow directional bias for real FX/metal. *Built.*
 

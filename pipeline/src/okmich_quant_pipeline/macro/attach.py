@@ -16,6 +16,7 @@ from okmich_quant_pipeline.macro.align import attach_exogenous
 from okmich_quant_pipeline.macro.features import DEFAULT_RECIPES, FeatureRecipe
 from okmich_quant_pipeline.macro.reader import load_macro_features
 from okmich_quant_pipeline.news_calendar._types import ImpactTier
+from okmich_quant_pipeline.news_calendar.economic_events import compute_surprise, load_economic_events
 from okmich_quant_pipeline.news_calendar.features import compute_event_features
 from okmich_quant_pipeline.news_calendar.reader import load_calendar
 
@@ -56,3 +57,21 @@ def attach_events_to_dataset(dataset: pd.DataFrame, calendar_path: Path, *, pref
     feats = compute_event_features(dataset.index, calendar, tiers=tiers, blackout_bars=blackout_bars,
                                    bar_seconds=bar_seconds, horizon_minutes=horizon_minutes).add_prefix(prefix)
     return pd.concat([dataset, feats], axis=1)
+
+
+def attach_surprise_to_dataset(dataset: pd.DataFrame, events_path: Path, *, prefix: str = "macro_event_",
+                               window: int = 24, min_periods: int = 12, fill: float | None = 0.0) -> pd.DataFrame:
+    """Attach the standardized economic-surprise column (``{prefix}surprise``) onto a UTC-indexed dataset.
+
+    Loads the economic-events store, derives the per-release standardized surprise, and broadcasts it
+    via the backward asof-merge (each bar carries the most-recent release's surprise, ffilled). With
+    ``fill=0.0`` (default) bars with no surprise on record yet — pre-history and the σ warmup — are
+    set to 0 ("no recent surprise"), keeping the frame dense; pass ``fill=None`` to leave them NaN.
+    Separate from the macro-series and event-timing attaches so the surprise channel ablates on its own.
+    """
+    feats = compute_surprise(load_economic_events(events_path), window=window, min_periods=min_periods)
+    out = attach_exogenous(dataset, feats, prefix=prefix)
+    col = f"{prefix}surprise"
+    if fill is not None and col in out.columns:
+        out[col] = out[col].fillna(fill)
+    return out
