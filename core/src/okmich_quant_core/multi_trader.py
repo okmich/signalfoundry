@@ -124,7 +124,14 @@ class MultiTrader:
                 return strategy
         return None
 
+    #: Dispatch-tail summary fires only when the whole cycle exceeds this (ms). Strategies gate their
+    #: heavy work to bar boundaries, so off-bar ticks cost ~0ms — this threshold selects the real
+    #: new-bar dispatch (where sequential ordering actually matters) without spamming every poll.
+    _DISPATCH_TAIL_LOG_THRESHOLD_MS = 20.0
+
     def run(self, run_dt: datetime):
+        dispatch_start = time()
+        timings: list[Tuple[str, float]] = []  # (strategy_key, execution_time_ms) in dispatch order
         for strategy in self.strategies:
             strategy_key = self._get_strategy_key(strategy)
             health = self.health_trackers[strategy_key]
@@ -141,11 +148,13 @@ class MultiTrader:
                 strategy.run(run_dt)
                 execution_time_ms = (time() - start_time) * 1000
                 health.record_success(execution_time_ms)
+                timings.append((strategy_key, execution_time_ms))
 
                 logger.debug(f"Strategy '{strategy_key}' executed successfully in {execution_time_ms:.2f}ms")
             except Exception as e:
                 execution_time_ms = (time() - start_time) * 1000
                 health.record_error(execution_time_ms, last_error=str(e))
+                timings.append((strategy_key, execution_time_ms))
 
                 logger.error(
                     f"Error in strategy '{strategy_key}' "
@@ -163,6 +172,17 @@ class MultiTrader:
                         consecutive_errors=health.consecutive_errors, last_error=str(e))
                     if strategy.notifier:
                         strategy.notifier.on_circuit_breaker_tripped(strategy_key, health.consecutive_errors)
+
+        # Sequential-dispatch tail visibility: total wall-clock of this dispatch is when the LAST sleeve
+        # finished — the latency the most-delayed symbol actually experiences. Logged only on real new-bar
+        # cycles (> threshold) so the off-bar polls stay silent. `slowest` localises the cost; the total
+        # vs the bar interval is what tells you whether sequential ordering is materially hurting fills.
+        total_ms = (time() - dispatch_start) * 1000
+        if total_ms >= self._DISPATCH_TAIL_LOG_THRESHOLD_MS and timings:
+            slowest_key, slowest_ms = max(timings, key=lambda kv: kv[1])
+            breakdown = ", ".join(f"{k}={ms:.0f}ms" for k, ms in timings)
+            logger.info(f"Dispatch tail: {len(timings)} sleeve(s) ran in {total_ms:.0f}ms "
+                        f"(slowest {slowest_key} {slowest_ms:.0f}ms) | {breakdown}")
 
     def get_health_status(self) -> Dict[str, dict]:
         return {
