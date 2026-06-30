@@ -1,6 +1,6 @@
 # Macro feature engineering + no-lookahead asof-merge
 
-Status: **IMPLEMENTED** (27 tests passing; verified end-to-end on real EURUSD 5m).
+Status: **IMPLEMENTED** (34 tests passing; verified end-to-end on real EURUSD 5m).
 Package: `okmich_quant_pipeline.macro` (signalfoundry/pipeline). Store refreshed via `fetch-macro-data`.
 
 ---
@@ -67,8 +67,10 @@ mix (proven by `test_mixed_cadence_daily_plus_weekly`, `test_weekly_cadence_atta
 - **Per-feature availability = latest over its source series** (a cross-series feature can't be
   used until every leg is public; `test_cross_series_availability_is_latest_of_inputs`).
 
-Phase-1 `DEFAULT_RECIPES` (10): `vix_level`, `vix_z20`, `vix_chg5`, `vixts_ratio`, `vixts_z20`,
-`credit_level`, `credit_z20`, `credit_chg5`, `usd_ret5`, `usd_z20`. (Factor-reduction/PCA deferred.)
+`DEFAULT_RECIPES` (18): `vix_level`, `vix_z20`, `vix_chg5`, `vixts_ratio`, `vixts_z20`,
+`credit_level`, `credit_z20`, `credit_chg5`, `usd_ret5`, `usd_z20`, `us2y_level`, `us2y_chg5`,
+`us10y_level`, `us10y_chg5`, `curve_2s10s`, `curve_2s10s_z20`, `nfci_level`, `nfci_chg4`.
+(Factor-reduction/PCA deferred.)
 
 ---
 
@@ -104,13 +106,15 @@ non-UTC or unsorted bars → `ValueError`; mixed datetime resolution → normali
 
 ---
 
-## 7. Tests (`tests/test_macro.py` — 22 passing)
+## 7. Tests (`tests/macro/test_macro.py` — 34 passing)
 
 No-lookahead (centerpiece), boundary `<=` at release instant, heterogeneous availability,
 weekend ffill, namespace/shape, empty-features no-op, tz/sort/dtype guards, **mixed datetime
 resolution**, weekly cadence, mixed daily+weekly cadence, irregular `ExplicitRelease`, the three
 availability policies, z-score vs reference + warmup, default-recipe columns, cross-series
-availability = latest-of-inputs, end-to-end attach on synthetic.
+availability = latest-of-inputs, end-to-end attach on synthetic, plus store-integrity regressions
+(revision-absorption order, metastore corrupt-vs-OSError, empty-fetch guard, malformed-CSV guard,
+retry validation).
 
 **Real-data check:** 37,120 EURUSD 5m bars → 10 macro cols, 0% NaN over the slice; spot bar
 2024-04-01 09:55 UTC resolves to VIX(2024-03-28) across the Good-Friday/weekend gap, provably not

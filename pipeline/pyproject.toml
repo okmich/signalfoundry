@@ -19,6 +19,7 @@ dependencies = [
 build-feature-dataset = "okmich_quant_pipeline.features.build_broker:main"
 monitor-streaming-gates = "okmich_quant_pipeline.monitoring.run_monitor:main"
 fetch-macro-data = "okmich_quant_pipeline.macro.update:main"
+build-macro-features = "okmich_quant_pipeline.macro.store:main"
 
 [tool.uv.sources]
 okmich-quant-core = { workspace = true }

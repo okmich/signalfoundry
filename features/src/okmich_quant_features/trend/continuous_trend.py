@@ -2,13 +2,12 @@
 
 Reference: https://www.mdpi.com/1099-4300/22/10/1162
 
-continuous_trend_labeling tracks price extremes and reversals sequentially using a single omega threshold,
-emitting a binary {-1, +1} regime label (0 only during pre-trigger warmup). Omega is caller-supplied; pick it
-from a vol anchor (e.g. ~ k * median ATR / price) rather than fitting.
+continuous_trend_labeling tracks price extremes and reversals sequentially using a single omega threshold, emitting a
+binary {-1, +1} regime label (0 only during pre-trigger warmup). Omega is caller-supplied; pick it from a vol anchor
+(e.g. ~ k * median ATR / price) rather than fitting.
 
-The band-gated 3-class section below converts the binary CTL output to a {-1, 0, +1} ternary by gating with an
-ATR envelope: bars inside the band are forced to 0 (low-confidence / noise zone). See attach_labels and
-apply_3class_labels.
+The band-gated 3-class section below converts the binary CTL output to a {-1, 0, +1} ternary by gating with an ATR
+envelope: bars inside the band are forced to 0 (low-confidence / noise zone). See attach_labels and apply_3class_labels.
 """
 
 import math

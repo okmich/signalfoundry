@@ -13,35 +13,32 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
-import os
 import sys
 from pathlib import Path
 
 import pandas as pd
 
+from okmich_quant_pipeline.macro._io import atomic_write_parquet
 from okmich_quant_pipeline.macro._types import SERIES, MacroSeries
 from okmich_quant_pipeline.macro.fetchers import fred
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STORE = r"D:\data_dump\macro_data\daily"
+DEFAULT_STORE = r"E:\data_dump\macro_data\daily"
 DEFAULT_START = dt.date(2010, 1, 1)
 DEFAULT_OVERLAP_DAYS = 60
 
 
 def _merge(existing: pd.DataFrame | None, new: pd.DataFrame) -> pd.DataFrame:
-    """Concat + dedupe on ``date`` keeping the newest row (absorbs FRED revisions)."""
+    """Concat + dedupe on ``date`` keeping the newest row (absorbs FRED revisions).
+
+    Dedupe BEFORE sort: ``new`` is concatenated after ``existing``, so on the concat row order
+    ``keep="last"`` deterministically keeps the revised row. Sorting first would reorder ties
+    (``sort_values`` is not stable), which could retain the stale ``existing`` value instead.
+    """
     combined = new if existing is None or existing.empty else pd.concat([existing, new], ignore_index=True)
-    return combined.sort_values("date").drop_duplicates(subset="date", keep="last").reset_index(drop=True)
-
-
-def _atomic_write(df: pd.DataFrame, path: Path) -> None:
-    """Write to a temp file then atomically replace (never leave a half-written series)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    df.to_parquet(tmp, index=False)
-    os.replace(tmp, path)
+    return combined.drop_duplicates(subset="date", keep="last").sort_values("date").reset_index(drop=True)
 
 
 def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastore, *,
@@ -59,7 +56,9 @@ def update_series(series: MacroSeries, store_dir: Path, metastore: MacroMetastor
 
     new = fred.fetch(series, cosd, end)
     merged = _merge(None if full else existing, new)
-    _atomic_write(merged, path)
+    if merged.empty:
+        raise ValueError(f"no observations for {series.value} ({spec.fred_id}) in {cosd}..{end}")
+    atomic_write_parquet(merged, path)
 
     dates = pd.to_datetime(merged["date"])
     record = {

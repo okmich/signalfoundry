@@ -1,7 +1,6 @@
 """Shared HTTP session for the macro fetchers.
 
-Mirrors ``utilities.news_calendar.http`` but kept self-contained — the macro package has no
-dependency on the calendar package. A single keep-alive session with a polite research
+Mirrors ``utilities.news_calendar.http`` but kept self-contained — the macro package has no dependency on the calendar package. A single keep-alive session with a polite research
 User-Agent and conservative timeout; no fetcher should construct its own ``requests`` calls.
 ``get`` retries transient failures (connection/timeout/5xx) with linear backoff; client errors
 (4xx, e.g. a bad series id) fail fast.
@@ -37,6 +36,8 @@ def get(url: str, *, timeout: int = _DEFAULT_TIMEOUT_SECONDS, retries: int = _DE
     Retries connection/timeout errors and 5xx responses up to ``retries`` times with linear
     backoff. 4xx responses raise immediately (retrying a bad request is pointless).
     """
+    if retries < 1:
+        raise ValueError(f"retries must be >= 1; got {retries}")
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:

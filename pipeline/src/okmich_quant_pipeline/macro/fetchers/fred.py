@@ -38,7 +38,10 @@ def fetch(series: MacroSeries, start: dt.date, end: dt.date) -> pd.DataFrame:
 def _parse(csv_text: str, series: MacroSeries, spec: SeriesSpec) -> pd.DataFrame:
     """Parse fredgraph CSV text into the long-format macro schema."""
     raw = pd.read_csv(io.StringIO(csv_text), na_values=["."])
-    # fredgraph returns exactly two columns: observation date, then the series id.
+    # fredgraph returns exactly two columns: observation date, then the series id. A 200 with an
+    # unexpected body (maintenance page, empty CSV) would otherwise raise an opaque IndexError below.
+    if raw.shape[1] < 2:
+        raise ValueError(f"unexpected fredgraph response for {spec.fred_id}: columns={list(raw.columns)}")
     date_col, value_col = raw.columns[0], raw.columns[1]
     out = pd.DataFrame({
         "date": pd.to_datetime(raw[date_col]),

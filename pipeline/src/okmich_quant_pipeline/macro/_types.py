@@ -1,15 +1,13 @@
 """Series registry, conditioning channels, and pluggable availability policies.
 
-Each macro series is sourced from FRED (single provider, stable public endpoint,
-no API key). The registry maps a stable canonical name to its FRED id, its
-conditioning channel, and — critically — an **availability policy** describing
+Each macro series is sourced from FRED (single provider, stable public endpoint, no API key). The registry maps a stable
+canonical name to its FRED id, its conditioning channel, and — critically — an **availability policy** describing
 how long after the observation the value actually hits the wire.
 
 Causal convention (no-lookahead)
 --------------------------------
-An observation may only be consumed by intraday bars from its ``available_from_utc``
-onward. *How* that instant is computed differs by series cadence/publisher, so it is
-a pluggable strategy rather than a hard-coded lag:
+An observation may only be consumed by intraday bars from its ``available_from_utc`` onward. *How* that instant is
+computed differs by series cadence/publisher, so it is a pluggable strategy rather than a hard-coded lag:
 
 - ``BusinessDayLag`` — daily series released N business days later at a fixed UTC hour
   (VIX same evening = lag 0; credit/USD next business day = lag 1).
@@ -18,10 +16,9 @@ a pluggable strategy rather than a hard-coded lag:
 - ``ExplicitRelease`` — irregular / event-driven series (rate decisions, CPI prints)
   whose source already carries the exact release timestamp; availability = that column.
 
-The downstream asof-merge (``align.attach_exogenous``) only ever looks at
-``available_from_utc`` + ``value``, so it is cadence-agnostic: daily, weekly, monthly,
-or irregular series all attach through the same path. Adding a new series is data-only:
-a ``SeriesSpec`` with the right policy — no engine change.
+The downstream asof-merge (``align.attach_exogenous``) only ever looks at ``available_from_utc`` + ``value``, so it is
+cadence-agnostic: daily, weekly, monthly, or irregular series all attach through the same path. Adding a new series is
+data-only: a ``SeriesSpec`` with the right policy — no engine change.
 """
 from __future__ import annotations
 

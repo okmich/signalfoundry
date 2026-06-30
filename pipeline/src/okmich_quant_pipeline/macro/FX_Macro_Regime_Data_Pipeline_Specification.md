@@ -106,7 +106,7 @@ macro value), forward-filled within the day.
 All series are sourced from **FRED** (single provider, stable public `fredgraph.csv` endpoint,
 **no API key**) — Yahoo was dropped to avoid a fragile screen-scrape. Implemented as the
 `okmich_quant_pipeline.macro` package (signalfoundry/pipeline); **per-series** parquet + a
-`_metadata.json` metastore under `D:\data_dump\macro_data\daily\`, refreshed with the
+`_metadata.json` metastore under `E:\data_dump\macro_data\daily\`, refreshed with the
 `fetch-macro-data` command (incremental tail refresh; `--full` re-fetches history). The registry
 is data-only: a series is one `SeriesSpec` (FRED id + channel + availability policy); a feature
 is one `FeatureRecipe`. Availability is a pluggable policy — `BusinessDayLag`, `CalendarDayLag`,
@@ -187,7 +187,7 @@ Two consumption paths. Do **Path A** first; graduate to **Path B** only if A sho
 ### Path A — exogenous columns (start here) — **BUILT**
 1. **Fetcher:** `okmich_quant_pipeline.macro` package (`fetchers/`, `http.py`, `_types.py`,
    `metastore.py`, `update.py`, `reader.py`). Per-series parquet + `_metadata.json` metastore at
-   `D:\data_dump\macro_data\daily\`, refreshed via `fetch-macro-data` (incremental) / `--full`.
+   `E:\data_dump\macro_data\daily\`, refreshed via `fetch-macro-data` (incremental) / `--full`.
    *The fetcher code is the deliverable.*
 2. **Daily features:** `features.compute_macro_features` (z-scores, term-structure ratio,
    changes), computed on daily cadence.
@@ -260,7 +260,7 @@ taken up, not part of building the layer.
 
 **Next (data-centric), in rough order — the event/calendar channel is deferred to LAST per direction:**
 1. **Materialize a feature store** — persist engineered features (and macro-joined per-instrument
-   frames) to `D:\data_dump\feature_data\macro\…`, plus coverage / gap / staleness reports.
+   frames) to `E:\data_dump\feature_data\macro\…`, plus coverage / gap / staleness reports.
 2. **Point-in-time vintages** — free FRED API key → true ALFRED vintages + restore real ICE HY-OAS.
 3. **Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. *(Not cleanly
    on FRED — WTI is `DCOILWTICO`, but DXY / Gold spot need another source, reintroducing the Yahoo

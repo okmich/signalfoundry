@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Union, Optional
 
 import MetaTrader5 as mt5
@@ -55,32 +55,74 @@ def reconnect_mt5(login=None, password=None, server=None, sleep_seconds=5) -> bo
         return False
 
 
-def _handle_rates(rates):
-    df = pd.DataFrame(rates)
-    # MT5 returns timestamps in UTC - convert to timezone-aware datetime in UTC
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    # Convert from UTC to local timezone
-    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-    df["time"] = df["time"].dt.tz_convert(local_tz)
+#: The broker server's wall-clock timezone, DECODED ONCE from the live feed and LOCKED for the runtime.
+#: MT5 timestamps are server wall-clock (NOT UTC); we operate the whole run in this single preset frame
+#: rather than round-tripping through UTC per bar. Reset only by restarting the runner (e.g. after a DST flip).
+_broker_tz: Optional[timezone] = None
+
+
+def _resolve_broker_tz(symbol: str) -> timezone:
+    """Decode the broker server's fixed UTC offset ONCE (a single calibration) and cache it for the run.
+
+    MT5 ``copy_rates``/``symbol_info_tick`` ``time`` is the broker SERVER wall-clock as epoch seconds, not
+    UTC. We learn the offset from one comparison of the latest tick's server-epoch against the host's epoch
+    clock, rounded to 15 minutes, then build a fixed-offset tz and reuse it for every bar this run. This is
+    a one-time decode — bars are afterwards merely *stamped* with this offset, never converted.
+    """
+    global _broker_tz
+    if _broker_tz is not None:
+        return _broker_tz
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None or not tick.time:
+        logging.warning(f"Broker tz decode failed (no tick for {symbol}); defaulting to UTC+00:00")
+        return timezone.utc
+    offset_min = round((tick.time - time.time()) / 900.0) * 15  # server-epoch minus host-epoch, nearest 15m
+    if abs(offset_min) > 14 * 60:  # implausible -> stale tick (market closed); don't lock a bad value
+        logging.warning(f"Broker tz decode implausible ({offset_min} min, stale tick?); defaulting to UTC+00:00")
+        return timezone.utc
+    _broker_tz = timezone(timedelta(minutes=offset_min))
+    h, m = divmod(abs(offset_min), 60)
+    logging.info(f"Broker server timezone decoded as UTC{'+' if offset_min >= 0 else '-'}{h:02d}:{m:02d} "
+                 f"(locked for this runtime)")
+    return _broker_tz
+
+
+def _stamp_server_time(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Index `df` by the bar's true instant: naive server wall-clock STAMPED with the decoded broker tz.
+
+    The epoch already IS server wall-clock, so we ``tz_localize`` (attach the offset) — no conversion, no
+    UTC round-trip. Result is tz-aware in the broker's single preset frame that every downstream facility
+    (PriceBuffer, etc.) then adopts and locks.
+    """
+    df["time"] = pd.to_datetime(df["time"], unit="s").dt.tz_localize(_resolve_broker_tz(symbol))
     df.rename(columns={"time": "date"}, inplace=True)
     df.set_index("date", inplace=True)
+    return df
+
+
+def _to_server_naive(dt: datetime, symbol: str) -> datetime:
+    """Express an instant as NAIVE broker-server wall-clock for MT5 query args (the inverse of stamping).
+
+    ``copy_rates_range`` / ``copy_rates_from`` interpret a passed datetime as naive-UTC and match it
+    against bars stored in SERVER wall-clock. So a tz-aware instant must be re-expressed in the decoded
+    broker tz and have its tzinfo dropped, otherwise the query lands ``offset`` hours off and returns
+    nothing (MT5 reports ``(1, 'Success')`` — OK but empty). A naive input is assumed already in server
+    wall-clock and passed through unchanged.
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(_resolve_broker_tz(symbol)).replace(tzinfo=None)
+
+
+def _handle_rates(rates, symbol: str):
+    df = _stamp_server_time(pd.DataFrame(rates), symbol)
     # change type for tick_volume from uint64 to int64
     df["tick_volume"] = df["tick_volume"].astype(np.int64)
     return df[["open", "high", "low", "close", "tick_volume", "spread"]]
 
 
-def _handle_ticks(rates):
-    df = pd.DataFrame(rates)
-    print(df.info())
-    # MT5 returns timestamps in UTC - convert to timezone-aware datetime in UTC
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    # Convert from UTC to local timezone
-    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-    df["time"] = df["time"].dt.tz_convert(local_tz)
-    df.rename(columns={"time": "date"}, inplace=True)
-    df.set_index("date", inplace=True)
-    # change type for tick_volume from uint64 to int64
-    df["tick_volume"] = df["tick_volume"].astype(np.int64)
+def _handle_ticks(rates, symbol: str):
+    df = _stamp_server_time(pd.DataFrame(rates), symbol)
     return df[["bid", "ask", "last", "flags"]]
 
 
@@ -125,7 +167,7 @@ def fetch_data_from_position(
         )
         return []
     if as_dataframe:
-        return _handle_rates(rates)
+        return _handle_rates(rates, symbol)
     else:
         return rates
 
@@ -133,12 +175,13 @@ def fetch_data_from_position(
 def fetch_data_date_range(
     symbol: str, timeframe: Any, start_date: datetime, end_date: datetime
 ) -> Optional[pd.DataFrame]:
-    rates = mt5.copy_rates_range(symbol, timeframe, start_date, end_date)
+    rates = mt5.copy_rates_range(symbol, timeframe, _to_server_naive(start_date, symbol),
+                                 _to_server_naive(end_date, symbol))
     if rates is None or len(rates) == 0:
         msg = f"Failed to retrieve data for {symbol} from server. Cause: {mt5.last_error()}"
         logging.error(msg)
         raise DataFetchError(msg)
-    return _handle_rates(rates)
+    return _handle_rates(rates, symbol)
 
 
 def fetch_recent_data(
@@ -149,12 +192,12 @@ def fetch_recent_data(
     if timeframe not in timeframe_minutes_dict:
         raise ValueError(f"Unsupported timeframe: {timeframe}")
 
-    rates = mt5.copy_rates_from(symbol, timeframe, now_dt, count)
+    rates = mt5.copy_rates_from(symbol, timeframe, _to_server_naive(now_dt, symbol), count)
     if rates is None or len(rates) == 0:
         msg = f"Failed to retrieve data for {symbol} from server. Cause: {mt5.last_error()}"
         logging.error(msg)
         raise DataFetchError(msg)
-    return _handle_rates(rates)
+    return _handle_rates(rates, symbol)
 
 
 def fetch_recent_data(
@@ -165,12 +208,12 @@ def fetch_recent_data(
     if timeframe not in timeframe_minutes_dict:
         raise ValueError(f"Unsupported timeframe: {timeframe}")
 
-    rates = mt5.copy_rates_from(symbol, timeframe, now_dt, count)
+    rates = mt5.copy_rates_from(symbol, timeframe, _to_server_naive(now_dt, symbol), count)
     if rates is None or len(rates) == 0:
         msg = f"Failed to retrieve data for {symbol} from server. Cause: {mt5.last_error()}"
         logging.error(msg)
         raise DataFetchError(msg)
-    return _handle_rates(rates)
+    return _handle_rates(rates, symbol)
 
 
 def fetch_tick_data_date_range(
@@ -187,7 +230,7 @@ def fetch_tick_data_date_range(
         msg = f"Failed to retrieve tick data for {symbol} from server. Cause: {mt5.last_error()}"
         logging.error(msg)
         raise DataFetchError(msg)
-    return _handle_ticks(ticks)
+    return _handle_ticks(ticks, symbol)
 
 
 def get_positions(symbol, magic) -> List[Dict[str, Any]]:
