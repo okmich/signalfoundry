@@ -2,7 +2,8 @@
 
 > **STATUS (2026-06-30): DATA-ASSET LAYER COMPLETE — workstream closed.** See [Status](#status--data-asset-layer-complete-closed-2026-06-30).
 > Built: base series, feature store, calendar, event channel (timing + surprise), vintage machinery.
-> Parked: commodity/equity breadth (#3, needs a non-FRED source). Deferred consumer workstream (next):
+> Buildable next: commodity/equity breadth (#3 — sourcing now settled: FRED DTWEX*/DCOILWTICO + own
+> XAUUSD/index feed; DXY skipped). Deferred consumer workstream:
 > validation (per-year net-of-cost), in-fold PCA, Path B. **No macro feature is yet validated as a strategy.**
 
 > **Revision note (2026-06-23).** Reframed from a *supervised regime classifier* to a
@@ -145,16 +146,23 @@ is licence-capped to a rolling ~3y window *even with the key* (the cap is on the
 anonymous CSV); it is added as an **opt-in** `HY_OAS` series (`HY_OAS_RECIPES`, kept out of
 `DEFAULT_RECIPES` so its 2023+-only coverage can't NaN-truncate longer datasets).
 
-### Planned data additions (not yet built)
+### Data additions — sourcing (the breadth that was "#3")
 
-| Series / feature | Source | Purpose |
+**Sourcing rule (learned the hard way):** ICE/IBA-administered benchmarks — ICE DXY, the LBMA gold
+fix, ICE HY-OAS — are licence-capped or pulled on free FRED. Fed/BLS/BEA-native FRED series are fully
+free. So avoid the ICE tax: use Fed-native series + your own broker feed. (Verified 2026-06-30: the
+FRED gold fixings `GOLDAMGBD228NLBM`/`...PM...` now 404; `DTWEXBGS`/`DTWEXAFEGS`/`DTWEXEMEGS` and
+`DCOILWTICO` are free with full history.)
+
+| Series / feature | Source | Status / note |
 |---|---|---|
-| Economic calendar surprise + blackout | *already fetched* (`news_calendar/`) | `surprise=(actual−forecast)/σ`, minutes-to-event, blackout — via the `ExplicitRelease` policy. Highest info-per-bar; no new sourcing. |
-| DXY | Stooq / Yahoo `DX-Y.NYB` | Broad USD strength (redundant-ish with DTWEXBGS; keep one). |
-| S&P 500 | Yahoo `^GSPC` / Stooq | Risk appetite (already on disk as a Deriv instrument). |
-| Gold | Yahoo `GC=F` | Safe-haven / USD relationship (also a traded instrument). |
-| Crude Oil (WTI) | Yahoo `CL=F` | Growth/commodity factor; CAD regimes. |
-| Point-in-time vintages | FRED **API key** (ALFRED) | True vintages for revised series + restore real ICE HY-OAS. |
+| Economic-calendar surprise + blackout | `news_calendar/` (FF-native) | **Built** — `macro_event_surprise` + timing features. |
+| Point-in-time vintages | FRED API key (ALFRED), `FRED_API_KEY` env | **Machinery built** — see Vintage note. |
+| USD breadth (replaces DXY) | FRED `DTWEXBGS` (have) + `DTWEXAFEGS` + `DTWEXEMEGS` | Free, full history, **better USD factor than DXY**. Skip ICE DXY; reconstruct literal DXY from FX majors only if chart-parity is needed. |
+| Crude Oil (WTI) | FRED `DCOILWTICO` | Free, 1986→. Growth/commodity factor; CAD regimes. *(Drop-in `SeriesSpec`.)* |
+| Gold | **own MT5/Deriv `XAUUSD`** (on disk) | FRED gold fixings are ICE-restricted (404); use the first-party feed you already trade & store (resample to daily). |
+| S&P 500 | own Deriv/MT5 feed (on disk) | Risk appetite; already a traded instrument. |
+| BTC perp funding / basis | Binance / Bybit public APIs (free) | The real exogenous driver for BTC. |
 
 ### Other free data worth adding (ranked by marginal value)
 
@@ -292,10 +300,13 @@ from FRED levels is provably ≠ the headline the forecast targets for change/Mo
 `ExplicitRelease` + the backward asof-merge is the *surprise* path (backward-looking); the event-*timing*
 features are forward/symmetric and computed per-bar — two different paths.
 
-### Parked — blocked on a decision (not a task)
-- **(#3) Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. WTI is free on
-  FRED (`DCOILWTICO`), but DXY / Gold spot are not, and the Yahoo screen-scrape was deliberately dropped.
-  **Needs a non-FRED source decision before any build** — parked until taken up.
+### Buildable next — (#3) commodity/equity breadth (sourcing now settled, not yet built)
+The earlier "blocked on sourcing" is **resolved** — no fragile scrape needed (see the sourcing table
++ rule above). Concretely: **USD breadth** = FRED `DTWEXAFEGS` + `DTWEXEMEGS` (free, drop-in, alongside
+the `DTWEXBGS` already in hand); **Oil** = FRED `DCOILWTICO` (free, drop-in); **Gold** & **S&P 500** =
+your own MT5/Deriv `XAUUSD` / index feed already on disk (resample to daily); **BTC funding** =
+Binance/Bybit public API. **DXY itself is skipped** (ICE-capped and redundant with the Fed indexes).
+Remaining work is just `SeriesSpec` entries + a small daily-resample adapter for the own-feed series.
 
 ### Deferred — consumer workstream (NOT part of building the layer; none of this is done)
 The data asset is an *input*; whether it adds edge is unproven. Per this repo's discipline — *"if macro
