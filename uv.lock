@@ -2498,6 +2498,7 @@ dependencies = [
     { name = "okmich-quant-utils" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -2510,6 +2511,7 @@ requires-dist = [
     { name = "okmich-quant-utils", editable = "utils" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pyarrow", specifier = ">=20.0.0" },
+    { name = "requests", specifier = ">=2.31.0" },
 ]
 
 [[package]]
