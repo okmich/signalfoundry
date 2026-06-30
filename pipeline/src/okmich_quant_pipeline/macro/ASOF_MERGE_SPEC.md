@@ -132,6 +132,11 @@ detector, not a system; stop there.
 
 ## 9. Out of scope (this PR)
 
-Economic-calendar surprise/blackout features; factor reduction/PCA; daily macro-HMM posteriors
-(Path B); changes to source `dataset_builder.py`; FRED API key / ALFRED vintages / ICE HY-OAS
-(Phase 2).
+Factor reduction/PCA; daily macro-HMM posteriors (Path B); changes to source `dataset_builder.py`;
+ALFRED vintages / ICE HY-OAS (FRED API key now on disk — that's the next sprint).
+
+**Update:** the event channel's *timing* features (`minutes_to_next` / `minutes_since_last` /
+`blackout`) are now built in `news_calendar/features.py` and attached by
+`attach.attach_events_to_dataset`. They are computed **per-bar** (forward/symmetric in time), so they
+deliberately do **not** use this backward asof-merge — that path remains reserved for the *surprise*
+feature (a backward-looking series), still deferred pending vintaged actuals + consensus.

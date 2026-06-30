@@ -252,22 +252,39 @@ The **no-lookahead backward asof-merge / broadcast layer**. Build it once, test 
 ## Status & roadmap
 
 **Built (data layer):** 7 FRED series → 18 features, leak-free cadence-agnostic attach
-(`okmich_quant_pipeline.macro`), scoped to real instruments (EURUSD / XAUUSD / SP500 / BTC) — never synthetics.
+(`okmich_quant_pipeline.macro`), scoped to real instruments (EURUSD / XAUUSD / SP500 / BTC) — never
+synthetics. Plus: the **feature store** (`store.py` / `build-macro-features` + coverage/gap/staleness
+`report.py`); the **`news_calendar` package** migrated in-package (calendar asset built); and the
+**event-timing features** (`news_calendar/features.compute_event_features` →
+`attach.attach_events_to_dataset`: `minutes_to_next` / `minutes_since_last` / `blackout`).
 
 This workstream is **data-centric**: the goal is a clean, broad, correctly time-aligned exogenous
 data asset. Strategy validation (sizer/gate in `regime_gate_walkforward`, per-year net-of-cost) and
 the daily macro-HMM (Path B) are the eventual *consumers* of this data — deferred until explicitly
 taken up, not part of building the layer.
 
-**Next (data-centric), in rough order — the event/calendar channel is deferred to LAST per direction:**
-1. **Materialize a feature store** — persist engineered features (and macro-joined per-instrument
-   frames) to `E:\data_dump\feature_data\macro\…`, plus coverage / gap / staleness reports.
-2. **Point-in-time vintages** — free FRED API key → true ALFRED vintages + restore real ICE HY-OAS.
+**Done since first draft:** (#1) feature store + coverage reports — **built**. The `news_calendar`
+fetchers — **migrated in-package** (were lab-side). The **event-timing** half of the event channel
+(`minutes_to_next` / `minutes_since_last` / `blackout`) — **built**.
+
+**Remaining (data-centric):**
+2. **Point-in-time vintages** — **unblocked** (free FRED API key now on disk; never commit the value).
+   ALFRED vintages → first-print actuals + restore real ICE HY-OAS. *Now also a prerequisite for the
+   surprise feature below — do this next.*
 3. **Commodity/equity breadth** — DXY / S&P 500 / Gold / Oil; BTC perp funding/basis. *(Not cleanly
    on FRED — WTI is `DCOILWTICO`, but DXY / Gold spot need another source, reintroducing the Yahoo
    dependency we dropped; resolve sourcing before adding.)*
-4. **Event/calendar channel** *(last, per direction)* — wire `news_calendar/` into features via
-   `ExplicitRelease` (surprise, minutes-to-event, blackout). Highest info-per-bar; fetchers exist.
+4. **Event channel — surprise** *(the gated half)* — `surprise = (first-print actual − consensus)/σ`.
+   **Depends on #2** (vintaged actuals) **and** on consensus/forecast sourcing (the open fork — partly
+   free from the ForexFactory blob we already parse for ECB/BoE; US consensus is the hard piece).
+   Architecture: the *actual* lives once as a vintaged macro series via the `ExplicitRelease`
+   availability policy (calendar supplies release timestamps); `surprise` is a derived join, not a
+   stored duplicate.
+
+**Mechanism note:** `ExplicitRelease` + the backward asof-merge is the path for *surprise* (a
+backward-looking series). The event-*timing* features are forward/symmetric, so they are computed
+**per-bar** against the calendar (`compute_event_features`), not via the asof-merge — these are two
+different paths the earlier draft conflated.
 
 **Never:** the supervised 4-probability regime classifier (no ground truth); macro on synthetics.
 
@@ -279,7 +296,8 @@ For a retail intraday FX/metal trader, the highest information-per-unit-effort m
 are, in order:
 
 1. **VIX (level + term structure)** — sizing via the volatility channel. *Built.*
-2. **Economic-calendar surprise + blackout** — the event channel; fetchers built, features pending. *Top remaining data add.*
+2. **Economic-calendar event channel** — *timing features (minutes-to-event / blackout) built*; the
+   higher-value **surprise** add is gated on vintaged actuals (#2) + consensus sourcing.
 3. **Credit spread (`BAA10Y`)** — the cleanest free daily risk-on/off gauge. *Built* (real ICE HY-OAS pending API key).
 4. **Broad trade-weighted USD** — slow directional bias for real FX/metal. *Built.*
 

@@ -1,10 +1,10 @@
-"""Lab-side wrapper — attach macro features onto a DatasetBuilder output.
+"""Wrappers — attach exogenous features onto a DatasetBuilder output.
 
-This is the only IO-touching piece of the consume path; ``features``/``align`` stay pure.
-It runs lab-side (NOT inside source ``dataset_builder``) to preserve the lab -> source
-dependency direction and keep the live pipeline untouched: the attach is a reversible
-``+ columns`` step on the same base dataset, which also makes the macro-vs-no-macro
-ablation trivial.
+The only IO-touching pieces of the consume path; ``features``/``align`` stay pure. Kept as a
+post-step on the dataset (NOT folded into ``dataset_builder``) so each attach is a reversible
+``+ columns`` step on the same base frame — which makes the with-vs-without ablation trivial. The
+macro-series attach and the event-timing attach are deliberately *separate* functions so
+``± macro columns`` and ``± event columns`` ablate independently.
 """
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ import pandas as pd
 from okmich_quant_pipeline.macro.align import attach_exogenous
 from okmich_quant_pipeline.macro.features import DEFAULT_RECIPES, FeatureRecipe
 from okmich_quant_pipeline.macro.reader import load_macro_features
+from okmich_quant_pipeline.news_calendar._types import ImpactTier
+from okmich_quant_pipeline.news_calendar.features import compute_event_features
+from okmich_quant_pipeline.news_calendar.reader import load_calendar
 
 
 def attach_macro_to_dataset(dataset: pd.DataFrame, macro_path: Path, *,
@@ -36,3 +39,20 @@ def attach_macro_to_dataset(dataset: pd.DataFrame, macro_path: Path, *,
         macro_cols = [c for c in out.columns if c.startswith(prefix)]
         out = out.dropna(subset=macro_cols)
     return out
+
+
+def attach_events_to_dataset(dataset: pd.DataFrame, calendar_path: Path, *, prefix: str = "macro_event_",
+                             tiers: tuple[ImpactTier, ...] = (ImpactTier.HIGH,), blackout_bars: int = 3,
+                             bar_seconds: int = 300, horizon_minutes: int = 24 * 60) -> pd.DataFrame:
+    """Attach per-bar event-timing columns (``{prefix}minutes_to_next`` / ``_minutes_since_last`` /
+    ``_blackout``) onto a UTC-indexed dataset.
+
+    Computed directly on ``dataset.index`` against the news calendar (not via the asof-merge), and
+    saturated (no warmup NaN), so there is no ``drop_warmup`` step. Kept separate from
+    ``attach_macro_to_dataset`` so the event channel ablates independently of the macro series.
+    ``bar_seconds`` should match the dataset timeframe (5m → 300) so the blackout radius is correct.
+    """
+    calendar = load_calendar(calendar_path)
+    feats = compute_event_features(dataset.index, calendar, tiers=tiers, blackout_bars=blackout_bars,
+                                   bar_seconds=bar_seconds, horizon_minutes=horizon_minutes).add_prefix(prefix)
+    return pd.concat([dataset, feats], axis=1)

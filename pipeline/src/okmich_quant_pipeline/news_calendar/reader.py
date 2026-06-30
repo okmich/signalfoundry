@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from okmich_quant_pipeline.news_calendar.features import _event_distances_seconds, _events_ns, _to_ns_utc
+
 # Canonical on-disk location of the materialized calendar (mirrors the macro store root).
 DEFAULT_CALENDAR_PATH = Path(r"E:\data_dump\calendars\high_impact_news.parquet")
 
@@ -49,26 +51,8 @@ def is_event_window(bar_timestamps: pd.DatetimeIndex, calendar: pd.DataFrame, wi
     """
     if calendar.empty:
         return pd.Series(False, index=bar_timestamps)
-    radius_td = np.timedelta64(pd.Timedelta(seconds=window_bars * bar_seconds))
-    # Normalize both sides to tz-naive UTC datetime64[ns] arrays. A tz-aware ``.to_numpy()``
-    # returns an *object* array of Timestamps, on which searchsorted/subtraction are slow and
-    # version-fragile; dropping the tz (after converting to UTC) keeps true datetime64 arithmetic.
-    events = (
-        pd.to_datetime(calendar["timestamp_utc"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
-        .sort_values().to_numpy()
-    )
-    if bar_timestamps.tz is None:
-        bars = bar_timestamps.to_numpy()  # already naive — interpreted as UTC
-    else:
-        bars = bar_timestamps.tz_convert("UTC").tz_localize(None).to_numpy()
-    # For each bar, find the nearest event via binary search. searchsorted
-    # gives the insertion index; the nearest event is either at that index or
-    # one before. Take min(|bar - events[idx-1]|, |bar - events[idx]|).
-    idx = np.searchsorted(events, bars)
-    left = np.clip(idx - 1, 0, len(events) - 1)
-    right = np.clip(idx, 0, len(events) - 1)
-    dist_left = np.abs(bars - events[left])
-    dist_right = np.abs(bars - events[right])
-    nearest = np.minimum(dist_left, dist_right)
-    mask = nearest <= radius_td
+    # Nearest event = min(seconds to next, seconds since last); within radius ⇒ in an event window.
+    # Shared with compute_event_features so the two never diverge on the binary-search / tz handling.
+    to_next, since = _event_distances_seconds(_to_ns_utc(bar_timestamps), _events_ns(calendar["timestamp_utc"]))
+    mask = np.minimum(to_next, since) <= window_bars * bar_seconds
     return pd.Series(mask, index=bar_timestamps)
