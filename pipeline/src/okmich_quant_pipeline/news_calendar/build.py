@@ -59,17 +59,24 @@ def _default_years() -> tuple[int, int]:
     return y - 1, y + 1
 
 
-def _validate_coverage(final: pd.DataFrame, year_min: int, year_max: int) -> None:
+def _validate_coverage(final: pd.DataFrame, year_min: int, year_max: int, today_year: int | None = None) -> None:
     """Raise if any tracked event family is below its conservative minimum (partial-scrape guard).
 
     Runs *before* the write so a half-scraped calendar can never replace a good asset on disk.
+    The floor is applied only to **fully-completed** years (strictly before the current year):
+    publication timing makes the current and future years legitimately partial — the Fed posts FOMC
+    dates ~18 months ahead, but BLS/BEA/Census (NFP/CPI) and ForexFactory (ECB/BoE) only publish
+    ~1 year out, and the current year is itself only part-elapsed. Those years still contribute
+    their (bonus) rows; they're just not *required*, so the guard never false-trips on the window
+    boundary while still catching a genuine partial scrape of the settled history.
     """
-    n_years = year_max - year_min + 1
+    today_year = today_year if today_year is not None else dt.date.today().year
+    n_complete_years = max(1, min(year_max, today_year - 1) - year_min + 1)
     counts = final["event_name"].value_counts()
     shortfalls = [
-        f"{event.value}: {int(counts.get(event.value, 0))} < {per_year * n_years} expected"
+        f"{event.value}: {int(counts.get(event.value, 0))} < {per_year * n_complete_years} expected"
         for event, per_year in _MIN_EVENTS_PER_YEAR.items()
-        if int(counts.get(event.value, 0)) < per_year * n_years
+        if int(counts.get(event.value, 0)) < per_year * n_complete_years
     ]
     if shortfalls:
         raise ValueError(

@@ -25,6 +25,7 @@ a Summary of Economic Projections) — NOT press-conference meetings.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import re
 
 import pandas as pd
@@ -32,6 +33,8 @@ from bs4 import BeautifulSoup
 
 from okmich_quant_pipeline.http import get
 from okmich_quant_pipeline.news_calendar._types import EventName, ImpactTier, Source
+
+logger = logging.getLogger(__name__)
 
 _CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 
@@ -103,6 +106,7 @@ def _parse_calendar_html(html: str, year_min: int, year_max: int) -> list[tuple[
     soup = BeautifulSoup(html, "html.parser")
     out: list[tuple[dt.date, bool, int]] = []
     errors: list[str] = []
+    skipped: list[str] = []
 
     for panel in soup.select("div.panel.panel-default"):
         header = panel.find("h4")
@@ -124,9 +128,17 @@ def _parse_calendar_html(html: str, year_min: int, year_max: int) -> list[tuple[
             date_cell = date_el.get_text(" ", strip=True)
             if not month_cell or not date_cell or not re.search(r"\d", date_cell):
                 continue
-            # This row passed the meeting-like pre-filter (has month + numeric date cells), so a
-            # parse failure here means the Fed changed a row format. Don't silently drop a
-            # high-impact event — collect the failure and fail the whole fetch below.
+            # A parenthetical annotation (e.g. "22 (notation vote)", "(unscheduled)",
+            # "(conference call)") marks a non-standard inter-meeting action, NOT a scheduled
+            # meeting with a 14:00 ET statement + press conference. A real meeting cell is only a
+            # day range, optionally with a SEP "*". Skip annotated rows (and report the count) —
+            # minting a bogus statement/press-conf event would be wrong.
+            if "(" in date_cell:
+                skipped.append(f"{year} {month_cell} {date_cell!r}")
+                continue
+            # The row is now meeting-shaped (day range + optional "*"), so a parse failure here
+            # means the Fed changed a meeting-row format — fail the fetch rather than silently
+            # dropping a high-impact event.
             try:
                 stmt_date = _parse_meeting_row(year, month_cell, date_cell)
             except ValueError as exc:
@@ -143,6 +155,8 @@ def _parse_calendar_html(html: str, year_min: int, year_max: int) -> list[tuple[
                 )
             out.append((stmt_date, has_press_conf, year))
 
+    if skipped:
+        logger.info(f"FOMC fetcher: skipped {len(skipped)} annotated non-meeting row(s): {skipped}")
     if errors:
         raise RuntimeError(
             "FOMC fetcher: meeting-like rows failed to parse (page format may have changed):\n  "

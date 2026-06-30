@@ -118,6 +118,26 @@ def test_fomc_parse_raises_on_malformed_meeting_row() -> None:
         fomc._parse_calendar_html(html, year_min=2024, year_max=2026)
 
 
+def test_fomc_parse_skips_annotated_non_meeting_rows() -> None:
+    # A "(notation vote)" row is an inter-meeting administrative action, not a scheduled meeting —
+    # it must be skipped (no bogus event, no raise) while the real meeting row is kept.
+    html = """
+    <div class="panel panel-default">
+      <div class="panel-heading"><h4><a>2025 FOMC Meetings</a></h4></div>
+      <div class="row fomc-meeting">
+        <div class="fomc-meeting__month"><strong>January</strong></div>
+        <div class="fomc-meeting__date">28-29</div>
+      </div>
+      <div class="row fomc-meeting">
+        <div class="fomc-meeting__month"><strong>August</strong></div>
+        <div class="fomc-meeting__date">22 (notation vote)</div>
+      </div>
+    </div>
+    """
+    parsed = fomc._parse_calendar_html(html, year_min=2025, year_max=2027)
+    assert [d for d, _pc, _y in parsed] == [dt.date(2025, 1, 29)]  # annotated row dropped, no raise
+
+
 def test_fomc_fetch_builds_statement_and_press_rows(monkeypatch) -> None:
     html = """
     <div class="panel panel-default">
@@ -246,6 +266,15 @@ def test_build_validate_coverage_passes_on_healthy_counts() -> None:
     rows = (["US_FOMC_STATEMENT"] * 8 + ["US_NFP"] * 12 + ["US_CPI"] * 12
             + ["EU_ECB_RATE_DECISION"] * 4 + ["UK_BOE_RATE_DECISION"] * 4)
     build_mod._validate_coverage(pd.DataFrame({"event_name": rows}), 2024, 2024)  # 1 year — must not raise
+
+
+def test_build_validate_coverage_counts_only_completed_years() -> None:
+    # 2025-2027 evaluated in 2026: only 2025 is fully completed, so the floor is one year's worth.
+    # One year of counts clears it even though a naive 3-year floor (e.g. NFP >= 27) would reject —
+    # this is what stops the partial current/future year from false-tripping the guard.
+    rows = (["US_FOMC_STATEMENT"] * 8 + ["US_NFP"] * 10 + ["US_CPI"] * 10
+            + ["EU_ECB_RATE_DECISION"] * 3 + ["UK_BOE_RATE_DECISION"] * 3)
+    build_mod._validate_coverage(pd.DataFrame({"event_name": rows}), 2025, 2027, today_year=2026)
 
 
 def test_default_years_track_today() -> None:
