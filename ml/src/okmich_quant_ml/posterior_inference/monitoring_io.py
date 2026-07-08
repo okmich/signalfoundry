@@ -36,6 +36,7 @@ from okmich_quant_core.logging import LOG_SCHEMA_VERSION, BarOutcome, LogEventTy
 
 _SUPPORTED_MAJOR = int(LOG_SCHEMA_VERSION.split(".")[0])
 
+from .features import _validate_posterior_matrix
 from .monitoring import FeatureHealthBaselines, FeatureHealthReport, LoglikDriftBaselines, LoglikDriftReport,\
     PosteriorHealthBaselines, PosteriorHealthReport, score_feature_health, score_loglik_health,\
     score_posterior_health
@@ -146,10 +147,13 @@ def read_inference_log(paths: str | Path | Iterable[str | Path],
 
     **Quarantine-and-continue (LOGGING_CONTRACT §13).** A line that fails to parse, carries an
     unknown major ``log_schema_version``, or is a structurally invalid ``bar`` (bad ``extras`` /
-    ``features`` type, feature-name drift, ``n_states`` drift) is **rejected, recorded, and an
-    alert-worthy warning raised — then parsing continues**. One corrupt line never blinds the
-    consumer to the healthy heartbeats after it. ``on_quarantine(path, line_no, reason)`` is invoked
-    per offending line (a side channel for the supervisor); a ``RuntimeWarning`` is always raised.
+    ``features`` type, feature-name drift, ``n_states`` drift, non-finite feature/loglik values, or
+    an invalid posterior — wrong ``K``, non-finite, negative, or non-simplex row sum) is **rejected,
+    recorded, and an alert-worthy warning raised — then parsing continues**. One corrupt line never
+    blinds the consumer to the healthy heartbeats after it, and never poisons the whole gate cycle
+    the way a bad row surviving to ``score_posterior_health`` would. ``on_quarantine(path, line_no,
+    reason)`` is invoked per offending line (a side channel for the supervisor); a ``RuntimeWarning``
+    is always raised.
 
     Raises only for whole-input problems: empty ``paths``, a missing file, or no fully-populated
     ``bar`` rows across all files (every line empty / non-bar / warmup / quarantined).
@@ -246,12 +250,6 @@ def read_inference_log(paths: str | Path | Iterable[str | Path],
                 if not isinstance(probs, list):
                     _quarantine(line_no, f"extras['probs'] must be a list, got {type(probs).__name__}")
                     continue
-                if n_states is None:
-                    n_states = len(probs)
-                elif len(probs) != n_states:
-                    _quarantine(line_no, f"posterior length changed: expected {n_states}, got {len(probs)} "
-                                         f"(rotate to a new file on n_states change)")
-                    continue
 
                 try:
                     row_features = [float(features[name]) for name in feature_names]
@@ -261,6 +259,32 @@ def read_inference_log(paths: str | Path | Iterable[str | Path],
                 except (KeyError, TypeError, ValueError) as exc:
                     _quarantine(line_no, f"non-numeric gate values: {exc}")
                     continue
+
+                # Content-validate before this row can influence the file's n_states baseline —
+                # otherwise a single malformed first row (e.g. K=1, non-finite, or non-simplex)
+                # poisons every subsequent well-formed row via the length-consistency check below,
+                # and a bad row anywhere else would otherwise sail through read_inference_log only
+                # to blow up the *entire* gate cycle later inside score_posterior_health, defeating
+                # the quarantine-and-continue contract this reader promises (§13).
+                if not np.isfinite(row_features).all():
+                    _quarantine(line_no, f"non-finite feature value(s): {row_features!r}")
+                    continue
+                if not np.isfinite(row_loglik):
+                    _quarantine(line_no, f"extras['loglik'] is not finite: {row_loglik!r}")
+                    continue
+                try:
+                    _validate_posterior_matrix(np.asarray([row_probs], dtype=float), "read_inference_log")
+                except ValueError as exc:
+                    _quarantine(line_no, f"invalid posterior: {exc}")
+                    continue
+
+                if n_states is None:
+                    n_states = len(row_probs)
+                elif len(row_probs) != n_states:
+                    _quarantine(line_no, f"posterior length changed: expected {n_states}, got {len(row_probs)} "
+                                         f"(rotate to a new file on n_states change)")
+                    continue
+
                 label_ts.append(row_label)
                 feature_rows.append(row_features)
                 posterior_rows.append(row_probs)

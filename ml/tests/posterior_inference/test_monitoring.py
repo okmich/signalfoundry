@@ -67,8 +67,16 @@ def test_entropy_staleness_window_one_emits_no_warmup() -> None:
 
 def test_entropy_staleness_rejects_non_positive_baseline_std() -> None:
     e = np.ones(10, dtype=float)
-    with pytest.raises(ValueError, match="baseline_std must be positive"):
+    with pytest.raises(ValueError, match="baseline_std must be finite and positive"):
         entropy_staleness(e, baseline_mean=1.0, baseline_std=0.0, window=3)
+
+
+def test_entropy_staleness_rejects_nan_baseline_std() -> None:
+    # NaN slipping through a naive `<= 0.0` guard would silently poison every z-score
+    # downstream instead of failing at the API boundary.
+    e = np.ones(10, dtype=float)
+    with pytest.raises(ValueError, match="baseline_std must be finite and positive"):
+        entropy_staleness(e, baseline_mean=1.0, baseline_std=float("nan"), window=3)
 
 
 def test_entropy_staleness_rejects_non_1d_series() -> None:
@@ -323,6 +331,21 @@ def test_score_posterior_health_rejects_too_few_rows() -> None:
 
     with pytest.raises(ValueError, match="at least window=20"):
         score_posterior_health(too_short, b)
+
+
+def test_score_posterior_health_rejects_invalid_thresholds() -> None:
+    # These thresholds previously had no validation at all: a NaN or non-positive value would
+    # make every comparison silently False (fail-closed, but with no clear diagnostic) instead of
+    # raising a clear error at the API boundary.
+    probs = _random_simplex(200, 3, seed=7)
+    b = fit_posterior_health_baselines(probs, window=20)
+
+    with pytest.raises(ValueError, match="max_entropy_abs_z must be finite and > 0"):
+        score_posterior_health(probs, b, max_entropy_abs_z=float("nan"))
+    with pytest.raises(ValueError, match="max_occupancy_drift_l1 must be finite and > 0"):
+        score_posterior_health(probs, b, max_occupancy_drift_l1=0.0)
+    with pytest.raises(ValueError, match="max_flip_rate_drift_abs must be finite and > 0"):
+        score_posterior_health(probs, b, max_flip_rate_drift_abs=float("nan"))
 
 
 def test_score_posterior_health_overall_ok_is_and_of_components() -> None:
@@ -649,8 +672,14 @@ def test_log_likelihood_drift_accepts_positive_values_for_continuous_densities()
 
 def test_log_likelihood_drift_rejects_non_positive_baseline_std() -> None:
     s = np.ones(10, dtype=float)
-    with pytest.raises(ValueError, match="baseline_std must be positive"):
+    with pytest.raises(ValueError, match="baseline_std must be finite and positive"):
         log_likelihood_drift(s, baseline_mean=1.0, baseline_std=0.0, window=3)
+
+
+def test_log_likelihood_drift_rejects_nan_baseline_std() -> None:
+    s = np.ones(10, dtype=float)
+    with pytest.raises(ValueError, match="baseline_std must be finite and positive"):
+        log_likelihood_drift(s, baseline_mean=1.0, baseline_std=float("nan"), window=3)
 
 
 def test_log_likelihood_drift_rejects_non_1d_series() -> None:
@@ -801,6 +830,16 @@ def test_score_loglik_health_rejects_too_few_rows() -> None:
 
     with pytest.raises(ValueError, match="at least window=30"):
         score_loglik_health(too_short, b)
+
+
+def test_score_loglik_health_rejects_invalid_max_abs_z() -> None:
+    s = _gaussian_loglik(500, seed=250)
+    b = fit_loglik_drift_baselines(s, window=30)
+
+    with pytest.raises(ValueError, match="max_abs_z must be finite and > 0"):
+        score_loglik_health(s, b, max_abs_z=float("nan"))
+    with pytest.raises(ValueError, match="max_abs_z must be finite and > 0"):
+        score_loglik_health(s, b, max_abs_z=0.0)
 
 
 def test_score_loglik_health_uses_final_row_of_input() -> None:

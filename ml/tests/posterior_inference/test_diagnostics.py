@@ -269,6 +269,18 @@ def test_calibration_rejects_too_few_bins() -> None:
         posterior_calibration_report(probs, y, n_bins=1)
 
 
+def test_calibration_rejects_bool_and_non_integral_n_bins() -> None:
+    rng = np.random.default_rng(0)
+    probs = rng.dirichlet(np.ones(3), size=20)
+    y = rng.integers(0, 3, size=20)
+
+    # n_bins=2.5 must fail at the API boundary rather than deep inside np.linspace/np.digitize.
+    with pytest.raises(ValueError, match="must be an integer value"):
+        posterior_calibration_report(probs, y, n_bins=2.5)
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        posterior_calibration_report(probs, y, n_bins=True)
+
+
 # --- recommend_smoothing ------------------------------------------------------
 
 def test_recommend_smoothing_unknown_without_transmat() -> None:
@@ -318,6 +330,17 @@ def test_recommend_smoothing_rejects_non_positive_thresholds() -> None:
         recommend_smoothing(report, flip_rate_excess_threshold=0.0)
     with pytest.raises(ValueError, match="dwell_ratio_threshold"):
         recommend_smoothing(report, dwell_ratio_threshold=0.0)
+
+
+def test_recommend_smoothing_rejects_nan_thresholds() -> None:
+    probs = _sticky_probs(50, K=2, run_length=10)
+    a = np.array([[0.9, 0.1], [0.1, 0.9]], dtype=float)
+    report = summarize_posterior_dynamics(probs, window=5, transmat=a)
+
+    with pytest.raises(ValueError, match="flip_rate_excess_threshold must be finite and > 0"):
+        recommend_smoothing(report, flip_rate_excess_threshold=float("nan"))
+    with pytest.raises(ValueError, match="dwell_ratio_threshold must be finite and > 0"):
+        recommend_smoothing(report, dwell_ratio_threshold=float("nan"))
 
 
 # --- recommend_calibration ----------------------------------------------------
@@ -377,6 +400,18 @@ def test_recommend_calibration_rejects_non_positive_thresholds() -> None:
         recommend_calibration(report, ece_threshold=0.0)
     with pytest.raises(ValueError, match="dispersion_threshold"):
         recommend_calibration(report, dispersion_threshold=0.0)
+
+
+def test_recommend_calibration_rejects_nan_thresholds() -> None:
+    rng = np.random.default_rng(0)
+    probs = rng.dirichlet(np.ones(3), size=30)
+    y = rng.integers(0, 3, size=30)
+    report = posterior_calibration_report(probs, y, n_bins=5)
+
+    with pytest.raises(ValueError, match="ece_threshold must be finite and > 0"):
+        recommend_calibration(report, ece_threshold=float("nan"))
+    with pytest.raises(ValueError, match="dispersion_threshold must be finite and > 0"):
+        recommend_calibration(report, dispersion_threshold=float("nan"))
 
 
 # --- Review fixes -------------------------------------------------------------

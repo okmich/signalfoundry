@@ -110,6 +110,16 @@ class HmmModelWrapper:
         Posterior pipeline:
         - optional transformer chain
         - inferer defaults to ArgmaxInferer
+
+        validate_posterior_invariants / posterior_sum_tolerance:
+        - Gates this wrapper's own pre-check (_validate_probability_matrix), which lets the
+          tolerance be tuned independently of the posterior_inference pipeline's default. Setting
+          validate_posterior_invariants=False skips only this wrapper-level check — it does NOT
+          bypass the pipeline's own validation. The default posterior_inferer (ArgmaxInferer) and
+          every other posterior_inference component still refuse NaN/Inf, K<2, or non-simplex rows
+          unconditionally; a raw model output that fails those checks was never a meaningful
+          posterior to decode, and no wrapper-level flag can make it one. The flag remains useful
+          for configuring a tolerance tighter or looser than the pipeline's fixed 1e-6 default.
         """
         self.model_type = model_dict.get("type", "hmm")
         if self.model_type != "hmm":

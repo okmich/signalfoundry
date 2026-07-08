@@ -53,6 +53,28 @@ def test_ema_transformer_alpha_one_is_identity() -> None:
     np.testing.assert_allclose(transformed, probs, atol=1e-12)
 
 
+def test_normalize_rejects_all_zero_row_instead_of_uniforming_it() -> None:
+    # An all-zero row is upstream corruption (e.g. a dropped/uninitialized posterior), not a
+    # legitimate uniform belief. clip(p, eps, None) would otherwise turn [0, 0, 0] into
+    # [eps, eps, eps] and normalize it into a valid-looking [1/3, 1/3, 1/3] before this row-sum
+    # check ever saw the original (corrupted) values.
+    probs = np.array([[0.5, 0.3, 0.2], [0.0, 0.0, 0.0]], dtype=float)
+    with pytest.raises(ValueError, match="strictly positive sums"):
+        EmaPosteriorTransformer().transform(probs)
+
+
+def test_ema_transformer_rejects_nan_eps() -> None:
+    # A naive `eps <= 0.0` guard lets NaN through (NaN comparisons are always False); eps then
+    # silently NaN-poisons every clip/divide downstream.
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        EmaPosteriorTransformer(eps=float("nan"))
+
+
+def test_rolling_mean_rejects_nan_eps() -> None:
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        RollingMeanPosteriorTransformer(eps=float("nan"))
+
+
 def test_temperature_scaling_t_one_is_identity() -> None:
     probs = np.array(
         [
@@ -190,6 +212,15 @@ def test_rolling_mean_rejects_invalid_params() -> None:
         RollingMeanPosteriorTransformer(window=3, eps=0.0)
 
 
+def test_rolling_mean_rejects_bool_and_non_integral_window() -> None:
+    # bool is an int subclass in Python; window=True must not silently become window=1.
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        RollingMeanPosteriorTransformer(window=True)
+    # window=3.5 must not silently truncate to 3 via int().
+    with pytest.raises(ValueError, match="must be an integer value"):
+        RollingMeanPosteriorTransformer(window=3.5)
+
+
 def test_rolling_mean_handles_empty_input() -> None:
     empty = np.zeros((0, 3), dtype=float)
     transformer = RollingMeanPosteriorTransformer(window=5)
@@ -262,6 +293,20 @@ def test_platt_scaling_rejects_invalid_params() -> None:
         PlattScalingTransformer(max_iter=0)
     with pytest.raises(ValueError, match="tol"):
         PlattScalingTransformer(tol=0.0)
+
+
+def test_platt_scaling_rejects_nan_eps_and_tol() -> None:
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        PlattScalingTransformer(eps=float("nan"))
+    with pytest.raises(ValueError, match="tol must be finite and > 0"):
+        PlattScalingTransformer(tol=float("nan"))
+
+
+def test_platt_scaling_rejects_bool_and_non_integral_max_iter() -> None:
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        PlattScalingTransformer(max_iter=True)
+    with pytest.raises(ValueError, match="must be an integer value"):
+        PlattScalingTransformer(max_iter=150.5)
 
 
 def test_platt_scaling_rejects_malformed_y_idx() -> None:
@@ -391,6 +436,15 @@ def test_maturation_align_rejects_negative_lag() -> None:
         MaturationAlignTransformer(lag=-1)
 
 
+def test_maturation_align_rejects_bool_and_non_integral_lag() -> None:
+    # bool is an int subclass in Python; lag=True must not silently become lag=1.
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        MaturationAlignTransformer(lag=True)
+    # lag=2.9 must not silently truncate to 2 via int().
+    with pytest.raises(ValueError, match="must be an integer value"):
+        MaturationAlignTransformer(lag=2.9)
+
+
 def test_maturation_align_rejects_malformed_input() -> None:
     transformer = MaturationAlignTransformer(lag=1)
     with pytest.raises(ValueError, match="shape"):
@@ -461,6 +515,15 @@ def test_platt_scaling_raises_on_optimizer_failure(monkeypatch: pytest.MonkeyPat
     assert transformer.a_ is None and transformer.b_ is None
 
 
+def test_temperature_scaling_rejects_nan_hyperparams() -> None:
+    with pytest.raises(ValueError, match="temperature must be finite and > 0"):
+        TemperatureScalingTransformer(temperature=float("nan"))
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        TemperatureScalingTransformer(eps=float("nan"))
+    with pytest.raises(ValueError, match="search_min and search_max must be finite and > 0"):
+        TemperatureScalingTransformer(search_min=float("nan"))
+
+
 def test_temperature_scaling_rejects_empty_calibration_set() -> None:
     probs = np.zeros((0, 3), dtype=float)
     y_idx = np.array([], dtype=np.int64)
@@ -486,4 +549,20 @@ def test_platt_scaling_rejects_single_class_calibration_set() -> None:
     probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
     y_idx = np.array([0, 0, 0], dtype=np.int64)
     with pytest.raises(ValueError, match="only one class"):
+        PlattScalingTransformer().fit(probs, y_idx)
+
+
+def test_temperature_scaling_rejects_float_labels() -> None:
+    # A float y_idx like [0.9, 1.1] would silently truncate to [0, 1] via int() casting,
+    # fitting temperature against corrupted targets. Must be rejected loudly instead.
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([0.9, 1.1, 2.0], dtype=float)
+    with pytest.raises(ValueError, match="must be an integer array"):
+        TemperatureScalingTransformer().fit(probs, y_idx)
+
+
+def test_platt_scaling_rejects_float_labels() -> None:
+    probs = np.array([[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.05, 0.05, 0.9]], dtype=float)
+    y_idx = np.array([0.9, 1.1, 2.0], dtype=float)
+    with pytest.raises(ValueError, match="must be an integer array"):
         PlattScalingTransformer().fit(probs, y_idx)

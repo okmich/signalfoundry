@@ -297,6 +297,16 @@ def test_rolling_flip_rate_rejects_bad_window() -> None:
         rolling_flip_rate(probs, window=0)
 
 
+def test_rolling_flip_rate_rejects_bool_and_non_integral_window() -> None:
+    # window=2.5 must fail at the API boundary (a clear ValueError) rather than deep inside a
+    # slice/range call; window=True must not silently become window=1.
+    probs = np.tile(np.array([0.5, 0.5], dtype=float), (5, 1))
+    with pytest.raises(ValueError, match="must be an integer value"):
+        rolling_flip_rate(probs, window=2.5)
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        rolling_flip_rate(probs, window=True)
+
+
 def test_rolling_max_prob_std_is_zero_on_constant_top_prob() -> None:
     probs = np.tile(np.array([0.7, 0.3], dtype=float), (10, 1))
     out = rolling_max_prob_std(probs, window=4)
@@ -416,6 +426,18 @@ def test_validator_rejects_corruption_level_negative_values() -> None:
     with pytest.raises(ValueError, match="negative values below"):
         top_prob(bad)
     with pytest.raises(ValueError, match="negative values below"):
+        margin(bad)
+
+
+def test_validator_rejects_non_simplex_row_sums() -> None:
+    # Rows sum to 1.5 — non-negative and finite, but not a valid simplex point. Silently accepting
+    # this would let entropy / top-prob / margin be computed on a corrupted, unnormalized posterior.
+    bad = np.array([[0.75, 0.75]], dtype=float)
+    with pytest.raises(ValueError, match="must sum to 1"):
+        entropy(bad)
+    with pytest.raises(ValueError, match="must sum to 1"):
+        top_prob(bad)
+    with pytest.raises(ValueError, match="must sum to 1"):
         margin(bad)
 
 

@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize, minimize_scalar
 from scipy.special import logsumexp
 
-from .features import _validate_posterior_matrix
+from .features import _require_integral, _validate_posterior_matrix
 
 
 @njit(cache=True)
@@ -46,8 +46,8 @@ class EmaPosteriorTransformer:
         self.eps = float(eps)
         if not 0.0 < self.alpha <= 1.0:
             raise ValueError(f"alpha must be in (0, 1], got {self.alpha}")
-        if self.eps <= 0.0:
-            raise ValueError(f"eps must be > 0, got {self.eps}")
+        if not (np.isfinite(self.eps) and self.eps > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {self.eps}")
 
     def transform(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "EmaPosteriorTransformer", eps=self.eps, normalize=True)
@@ -68,12 +68,12 @@ class RollingMeanPosteriorTransformer:
     """
 
     def __init__(self, window: int = 5, eps: float = 1e-12) -> None:
-        self.window = int(window)
+        self.window = _require_integral(window, "window")
         self.eps = float(eps)
         if self.window < 1:
             raise ValueError(f"window must be >= 1, got {self.window}")
-        if self.eps <= 0.0:
-            raise ValueError(f"eps must be > 0, got {self.eps}")
+        if not (np.isfinite(self.eps) and self.eps > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {self.eps}")
 
     def transform(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "RollingMeanPosteriorTransformer", eps=self.eps, normalize=True)
@@ -124,7 +124,13 @@ class TemperatureScalingTransformer:
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> TemperatureScalingTransformer:
         p = _validate_posterior_matrix(probs, "TemperatureScalingTransformer", eps=self.eps, normalize=True)
-        y = np.asarray(y_idx, dtype=np.int64)
+        y_raw = np.asarray(y_idx)
+        if not np.issubdtype(y_raw.dtype, np.integer):
+            raise ValueError(
+                f"TemperatureScalingTransformer.fit: y_idx must be an integer array (got dtype {y_raw.dtype}); "
+                f"silent float-to-int truncation would corrupt the calibration targets."
+            )
+        y = y_raw.astype(np.int64)
         if y.ndim != 1:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
         if len(y) != len(p):
@@ -163,8 +169,8 @@ class TemperatureScalingTransformer:
         return self._apply_temperature(p, t)
 
     def _apply_temperature(self, probs: NDArray, temperature: float) -> NDArray:
-        if temperature <= 0.0:
-            raise ValueError(f"temperature must be > 0, got {temperature}")
+        if not (np.isfinite(temperature) and temperature > 0.0):
+            raise ValueError(f"temperature must be finite and > 0, got {temperature}")
         logits = np.log(np.clip(probs, self.eps, 1.0)) / temperature
         logits -= logsumexp(logits, axis=1, keepdims=True)
         out = np.exp(logits)
@@ -173,12 +179,14 @@ class TemperatureScalingTransformer:
         return out
 
     def _validate_configuration(self) -> None:
-        if self.temperature <= 0.0:
-            raise ValueError(f"temperature must be > 0, got {self.temperature}")
-        if self.eps <= 0.0:
-            raise ValueError(f"eps must be > 0, got {self.eps}")
-        if self.search_min <= 0.0 or self.search_max <= 0.0:
-            raise ValueError("search_min and search_max must be > 0.")
+        if not (np.isfinite(self.temperature) and self.temperature > 0.0):
+            raise ValueError(f"temperature must be finite and > 0, got {self.temperature}")
+        if not (np.isfinite(self.eps) and self.eps > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {self.eps}")
+        search_min_ok = np.isfinite(self.search_min) and self.search_min > 0.0
+        search_max_ok = np.isfinite(self.search_max) and self.search_max > 0.0
+        if not search_min_ok or not search_max_ok:
+            raise ValueError("search_min and search_max must be finite and > 0.")
         if self.search_min >= self.search_max:
             raise ValueError(f"search_min must be < search_max, got {self.search_min} >= {self.search_max}")
 
@@ -201,7 +209,7 @@ class PlattScalingTransformer:
 
     def __init__(self, eps: float = 1e-12, max_iter: int = 200, tol: float = 1e-8) -> None:
         self.eps = float(eps)
-        self.max_iter = int(max_iter)
+        self.max_iter = _require_integral(max_iter, "max_iter")
         self.tol = float(tol)
         self.a_: np.ndarray | None = None
         self.b_: np.ndarray | None = None
@@ -211,7 +219,13 @@ class PlattScalingTransformer:
 
     def fit(self, probs: NDArray, y_idx: NDArray) -> PlattScalingTransformer:
         p = _validate_posterior_matrix(probs, "PlattScalingTransformer", eps=self.eps, normalize=True)
-        y = np.asarray(y_idx, dtype=np.int64)
+        y_raw = np.asarray(y_idx)
+        if not np.issubdtype(y_raw.dtype, np.integer):
+            raise ValueError(
+                f"PlattScalingTransformer.fit: y_idx must be an integer array (got dtype {y_raw.dtype}); "
+                f"silent float-to-int truncation would corrupt the calibration targets."
+            )
+        y = y_raw.astype(np.int64)
         if y.ndim != 1:
             raise ValueError(f"y_idx must be 1D, got shape {y.shape}")
         if len(y) != len(p):
@@ -282,12 +296,12 @@ class PlattScalingTransformer:
         return out
 
     def _validate_configuration(self) -> None:
-        if self.eps <= 0.0:
-            raise ValueError(f"eps must be > 0, got {self.eps}")
+        if not (np.isfinite(self.eps) and self.eps > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {self.eps}")
         if self.max_iter < 1:
             raise ValueError(f"max_iter must be >= 1, got {self.max_iter}")
-        if self.tol <= 0.0:
-            raise ValueError(f"tol must be > 0, got {self.tol}")
+        if not (np.isfinite(self.tol) and self.tol > 0.0):
+            raise ValueError(f"tol must be finite and > 0, got {self.tol}")
 
 
 class MaturationAlignTransformer:
@@ -309,7 +323,7 @@ class MaturationAlignTransformer:
     """
 
     def __init__(self, lag: int) -> None:
-        self.lag = int(lag)
+        self.lag = _require_integral(lag, "lag")
         if self.lag < 0:
             raise ValueError(f"lag must be >= 0, got {self.lag}")
 
@@ -468,18 +482,18 @@ class KalmanPosteriorTransformer:
         self.process_noise = float(process_noise)
         self.measurement_noise = float(measurement_noise)
         self.adaptation_rate = float(adaptation_rate)
-        self.error_window = int(error_window)
+        self.error_window = _require_integral(error_window, "error_window")
         self.eps = float(eps)
         if not 0.0 <= self.process_noise <= 1.0:
             raise ValueError(f"process_noise must be in [0, 1], got {self.process_noise}")
-        if self.measurement_noise <= 0.0:
-            raise ValueError(f"measurement_noise must be > 0, got {self.measurement_noise}")
+        if not (np.isfinite(self.measurement_noise) and self.measurement_noise > 0.0):
+            raise ValueError(f"measurement_noise must be finite and > 0, got {self.measurement_noise}")
         if not 0.0 <= self.adaptation_rate < 1.0:
             raise ValueError(f"adaptation_rate must be in [0, 1), got {self.adaptation_rate}")
         if self.error_window < 1:
             raise ValueError(f"error_window must be >= 1, got {self.error_window}")
-        if self.eps <= 0.0:
-            raise ValueError(f"eps must be > 0, got {self.eps}")
+        if not (np.isfinite(self.eps) and self.eps > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {self.eps}")
 
     def transform(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "KalmanPosteriorTransformer", eps=self.eps, normalize=True)

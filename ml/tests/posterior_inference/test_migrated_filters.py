@@ -86,6 +86,13 @@ def test_viterbi_inferer_rejects_bad_observation_weight() -> None:
         ViterbiInferer(transition_cost=np.zeros((3, 3)), observation_weight=0.0)
 
 
+def test_viterbi_inferer_rejects_nan_observation_weight_and_eps() -> None:
+    with pytest.raises(ValueError, match="observation_weight must be finite and > 0"):
+        ViterbiInferer(transition_cost=np.zeros((3, 3)), observation_weight=float("nan"))
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        ViterbiInferer(transition_cost=np.zeros((3, 3)), eps=float("nan"))
+
+
 def test_viterbi_from_transition_probabilities_rejects_non_stochastic_rows() -> None:
     # Row sums are 0.8 and 0.9 — not stochastic. Method name promises probabilities, so it must reject.
     bad_transmat = np.array([[0.7, 0.1], [0.3, 0.6]], dtype=float)
@@ -107,6 +114,60 @@ def test_viterbi_from_transition_probabilities_accepts_valid_stochastic_matrix()
 
     # cost = -log(transmat); confirm round-trip.
     np.testing.assert_allclose(inferer.transition_cost, -np.log(transmat), atol=1e-6)
+
+
+def test_viterbi_from_transition_probabilities_maps_zero_to_inf_cost() -> None:
+    transmat = np.array([[1.0, 0.0], [0.5, 0.5]], dtype=float)
+    inferer = ViterbiInferer.from_transition_probabilities(transmat)
+
+    assert inferer.transition_cost[0, 1] == np.inf
+    assert inferer.transition_cost[0, 0] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_viterbi_inferer_never_crosses_a_forbidden_transition() -> None:
+    # State 0 -> 1 has zero model probability (transmat[0, 1] == 0): that specific transition must
+    # never appear in the decoded path, no matter how the unary evidence swings bar-to-bar. An
+    # eps-clipped finite cost for the zero transition would let strong-enough evidence buy a
+    # crossing anyway; +inf cannot be outbid regardless of the evidence sequence, so this checks
+    # the invariant directly rather than hand-predicting one specific globally-optimal path.
+    transmat = np.array([[1.0, 0.0], [0.5, 0.5]], dtype=float)
+    inferer = ViterbiInferer.from_transition_probabilities(transmat)
+    rng = np.random.default_rng(7)
+    probs = rng.dirichlet(alpha=[1.0, 1.0], size=30)
+    probs[5] = [0.99, 0.01]   # strong state-0 evidence immediately followed by...
+    probs[6] = [0.01, 0.99]   # ...strong state-1 evidence: exactly the pattern that would buy a
+    #                           crossing under a merely-expensive (eps-clipped) forbidden transition.
+
+    labels = inferer.infer(probs)
+
+    forbidden = (labels[:-1] == 0) & (labels[1:] == 1)
+    assert not forbidden.any()
+
+
+def test_viterbi_inferer_constructor_accepts_inf_transition_cost() -> None:
+    cost = np.array([[0.0, np.inf], [1.0, 0.0]], dtype=float)
+    inferer = ViterbiInferer(transition_cost=cost)
+
+    assert inferer.transition_cost[0, 1] == np.inf
+
+
+def test_viterbi_inferer_constructor_rejects_nan_and_neg_inf_transition_cost() -> None:
+    with pytest.raises(ValueError, match="NaN or -Inf"):
+        ViterbiInferer(transition_cost=np.array([[0.0, np.nan], [1.0, 0.0]], dtype=float))
+    with pytest.raises(ValueError, match="NaN or -Inf"):
+        ViterbiInferer(transition_cost=np.array([[0.0, -np.inf], [1.0, 0.0]], dtype=float))
+
+
+def test_viterbi_inferer_raises_when_no_finite_path_exists() -> None:
+    # Every transition is forbidden — for T >= 2 there is no finite-cost label sequence at all.
+    # The all-inf DP frontier must not silently resolve via np.argmin's index-0 tie-break; the
+    # decoder must signal infeasibility instead of returning a bogus, infinite-cost path.
+    cost = np.full((2, 2), np.inf, dtype=float)
+    inferer = ViterbiInferer(transition_cost=cost)
+    probs = np.array([[0.6, 0.4], [0.5, 0.5]], dtype=float)
+
+    with pytest.raises(ValueError, match="no finite-cost"):
+        inferer.infer(probs)
 
 
 # --- KalmanPosteriorTransformer -----------------------------------------------
@@ -179,6 +240,20 @@ def test_kalman_posterior_transformer_rejects_invalid_hyperparams() -> None:
         KalmanPosteriorTransformer(error_window=0)
 
 
+def test_kalman_posterior_transformer_rejects_bool_and_non_integral_error_window() -> None:
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        KalmanPosteriorTransformer(error_window=True)
+    with pytest.raises(ValueError, match="must be an integer value"):
+        KalmanPosteriorTransformer(error_window=5.5)
+
+
+def test_kalman_posterior_transformer_rejects_nan_measurement_noise_and_eps() -> None:
+    with pytest.raises(ValueError, match="measurement_noise must be finite and > 0"):
+        KalmanPosteriorTransformer(measurement_noise=float("nan"))
+    with pytest.raises(ValueError, match="eps must be finite and > 0"):
+        KalmanPosteriorTransformer(eps=float("nan"))
+
+
 # --- ConfidenceWeightedModeInferer --------------------------------------------
 
 def test_confidence_weighted_mode_inferer_returns_int64_labels() -> None:
@@ -227,6 +302,59 @@ def test_confidence_weighted_mode_inferer_metadata_reports_gate_rate() -> None:
 def test_confidence_weighted_mode_inferer_rejects_bad_window() -> None:
     with pytest.raises(ValueError, match="window"):
         ConfidenceWeightedModeInferer(window=0)
+
+
+def test_confidence_weighted_mode_inferer_rejects_bool_and_non_integral_window() -> None:
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        ConfidenceWeightedModeInferer(window=True)
+    with pytest.raises(ValueError, match="must be an integer value"):
+        ConfidenceWeightedModeInferer(window=3.5)
+
+
+def test_confidence_weighted_mode_inferer_rejects_nan_confidence_weight_and_threshold() -> None:
+    with pytest.raises(ValueError, match="confidence_weight must be finite and >= 0"):
+        ConfidenceWeightedModeInferer(confidence_weight=float("nan"))
+    with pytest.raises(ValueError, match="min_score_threshold must be finite and >= 0"):
+        ConfidenceWeightedModeInferer(min_score_threshold=float("nan"))
+
+
+def test_confidence_weighted_mode_inferer_matches_brute_force_reference() -> None:
+    """Cross-checks the O(T*K) rolling-window scorer (running per-state count/prob-sum, added and
+    removed once per bar) against a brute-force O(T*K*window) reference computed directly from the
+    definition, across several window/K/confidence_weight combinations — catches any off-by-one in
+    the incremental add/remove bookkeeping that unit tests on hand-built sequences might miss."""
+    rng = np.random.default_rng(99)
+    T, K = 40, 4
+    probs = rng.dirichlet(np.ones(K), size=T)
+    argmax = np.argmax(probs, axis=1)
+
+    for window in (1, 2, 5, 7, 15, 100):
+        for confidence_weight in (0.0, 1.0, 2.5):
+            inferer = ConfidenceWeightedModeInferer(window=window, confidence_weight=confidence_weight,
+                                                    min_score_threshold=0.0)
+            labels = inferer.infer(probs)
+
+            expected = np.zeros(T, dtype=np.int64)
+            for t in range(T):
+                start = max(0, t - window + 1)
+                best_score, best_label = -1.0, 0
+                for k in range(K):
+                    mask = argmax[start:t + 1] == k
+                    count = int(mask.sum())
+                    if count == 0:
+                        continue
+                    if confidence_weight == 0.0:
+                        score = float(count)
+                    else:
+                        mean_prob = probs[start:t + 1, k][mask].mean()
+                        score = float(count) * (mean_prob ** confidence_weight)
+                    if score > best_score:
+                        best_score, best_label = score, k
+                expected[t] = best_label
+
+            np.testing.assert_array_equal(
+                labels, expected, err_msg=f"mismatch at window={window}, confidence_weight={confidence_weight}"
+            )
 
 
 # --- ConfidenceHysteresisInferer ----------------------------------------------
@@ -278,3 +406,10 @@ def test_confidence_hysteresis_inferer_rejects_non_positive_thresholds() -> None
         ConfidenceHysteresisInferer(entry_threshold=0.0, exit_threshold=1.0)
     with pytest.raises(ValueError, match="exit_threshold"):
         ConfidenceHysteresisInferer(entry_threshold=1.0, exit_threshold=-0.5)
+
+
+def test_confidence_hysteresis_inferer_rejects_nan_thresholds() -> None:
+    with pytest.raises(ValueError, match="entry_threshold must be finite and > 0"):
+        ConfidenceHysteresisInferer(entry_threshold=float("nan"), exit_threshold=1.0)
+    with pytest.raises(ValueError, match="exit_threshold must be finite and > 0"):
+        ConfidenceHysteresisInferer(entry_threshold=1.0, exit_threshold=float("nan"))

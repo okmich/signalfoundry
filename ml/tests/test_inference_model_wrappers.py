@@ -376,7 +376,15 @@ class TestHmmModelWrapperPredict:
         with pytest.raises(ValueError, match="Posterior contains NaN or Inf values"):
             wrapper.predict(X)
 
-    def test_posterior_invariant_can_be_disabled(self, tmp_path):
+    def test_posterior_invariant_disable_skips_wrapper_precheck_not_pipeline_validation(self, tmp_path):
+        """validate_posterior_invariants=False skips only the wrapper's own redundant pre-check
+        (_validate_probability_matrix). It cannot make a genuinely invalid posterior — a
+        non-simplex row like [0.5, 0.5, 0.5] was never a meaningful thing to decode — sail through
+        the posterior_inference pipeline's own ArgmaxInferer, which enforces its data-integrity
+        floor unconditionally. The two checks have distinct message phrasing ("within tolerance ..."
+        for the wrapper vs. "must sum to 1 (max deviation ..." for the pipeline); asserting on the
+        pipeline's phrasing here confirms the wrapper's own check was indeed bypassed and this
+        specific rejection came from downstream."""
         artifact_dir = _make_hmm_artifact_dir(tmp_path)
         wrapper = HmmModelWrapper(
             {"type": "hmm", "model_path": str(artifact_dir)},
@@ -389,8 +397,31 @@ class TestHmmModelWrapperPredict:
         wrapper.model.predict_proba = _bad_predict_proba
 
         X = np.random.default_rng(17).standard_normal((10, 2))
-        probs, labels = wrapper.predict(X)
-        assert probs.shape == (1, 3)
+        with pytest.raises(ValueError, match="posterior rows must sum to 1"):
+            wrapper.predict(X)
+
+    def test_posterior_invariant_disable_still_bypasses_the_wrappers_own_tighter_tolerance(self, tmp_path):
+        """The flag retains a real, narrower purpose: a row within the pipeline's default 1e-6
+        row-sum tolerance but outside the wrapper's own (explicitly tighter) configured tolerance
+        is rejected when validate_posterior_invariants=True, and accepted once disabled."""
+        artifact_dir = _make_hmm_artifact_dir(tmp_path)
+        row = np.array([[0.5 + 5e-8, 0.5]], dtype=float)  # deviates 5e-8: outside 1e-9, inside 1e-6
+        X = np.random.default_rng(18).standard_normal((10, 2))
+
+        strict_wrapper = HmmModelWrapper(
+            {"type": "hmm", "model_path": str(artifact_dir)}, posterior_sum_tolerance=1e-9,
+        )
+        strict_wrapper.model.predict_proba = lambda data: row
+        with pytest.raises(ValueError, match="Posterior rows must sum to 1 within tolerance"):
+            strict_wrapper.predict(X)
+
+        lenient_wrapper = HmmModelWrapper(
+            {"type": "hmm", "model_path": str(artifact_dir)}, posterior_sum_tolerance=1e-9,
+            validate_posterior_invariants=False,
+        )
+        lenient_wrapper.model.predict_proba = lambda data: row
+        probs, labels = lenient_wrapper.predict(X)
+        assert probs.shape == (1, 2)
         assert labels.shape == (1,)
 
     def test_fixed_lag_alignment_validation_passes(self, tmp_path):

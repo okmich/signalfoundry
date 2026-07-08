@@ -267,6 +267,24 @@ def test_stability_gate_inferer_rejects_invalid_config() -> None:
         StabilityGateInferer(window=0)
 
 
+def test_stability_gate_inferer_rejects_bool_window() -> None:
+    # bool is an int subclass in Python; window=True must not silently become window=1.
+    with pytest.raises(ValueError, match="must be an int, not bool"):
+        StabilityGateInferer(window=True)
+
+
+def test_stability_gate_inferer_rejects_non_integral_window() -> None:
+    # window=4.5 must not silently truncate to 4 via int().
+    with pytest.raises(ValueError, match="must be an integer value"):
+        StabilityGateInferer(window=4.5)
+
+
+def test_stability_gate_inferer_accepts_integral_float_window() -> None:
+    inferer = StabilityGateInferer(window=4.0)
+    assert inferer.window == 4
+    assert isinstance(inferer.window, int)
+
+
 def test_stability_gate_inferer_handles_empty_input() -> None:
     labels = StabilityGateInferer().infer(np.zeros((0, 3), dtype=float))
 
@@ -292,3 +310,12 @@ def test_argmax_inferer_returns_int64_and_rejects_nan() -> None:
         ArgmaxInferer().infer(np.array([[0.5, np.nan]], dtype=float))
     with pytest.raises(ValueError, match="shape"):
         ArgmaxInferer().infer(np.array([0.5, 0.5], dtype=float))
+
+
+def test_argmax_inferer_rejects_non_simplex_rows() -> None:
+    # Row sums to 1.5 — non-negative and finite but not a valid posterior. Silently accepting this
+    # would let the gate inferers threshold un-normalized values (e.g. 0.75 read as top-prob 0.75
+    # instead of the true 0.5 for an equal-probability row).
+    bad = np.array([[0.75, 0.75]], dtype=float)
+    with pytest.raises(ValueError, match="must sum to 1"):
+        ArgmaxInferer().infer(bad)
