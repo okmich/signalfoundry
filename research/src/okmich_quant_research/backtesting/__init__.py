@@ -6,3 +6,10 @@ from .utils import generate_seq_feature_func_for_training, generate_seq_features
 from .vectorbt_backtester import VectorBtBacktester
 from .regime_performance_analyzer import RegimePerformanceAnalyzer
 from .vbt_export import QuantframeExportMixin, FileFormat
+from .timing_significance import (
+    net_bar_returns,
+    circular_shift_null,
+    CircularShiftNull,
+    beta_timing_decomposition,
+    BetaTimingDecomposition,
+)
