@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import time
 import traceback
+import warnings
 from itertools import combinations
 from typing import Callable
 
@@ -45,6 +46,7 @@ from ..screener._stage0 import stage0_variance_filter
 from ..screener._result import StageReport
 from ._config import HmmScreenerConfig, ScreenStrategy, build_hmm
 from ._evaluators import get_evaluator
+from ._persistence import stage0b_persistence_filter
 from ._pareto import ParetoStatus, classify_pareto
 from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
 
@@ -120,7 +122,28 @@ class HmmFeatureScreener:
         # Stage 0: variance pre-filter on the candidate columns. Re-use the ML screener's helper.
         candidate_df = df[list(candidate_features)].dropna(how="all")
         filtered_X, stage0_report = stage0_variance_filter(candidate_df, verbose=False)
+        # Stage 0b: marginal-persistence diagnostic (removal opt-in via config.min_persistence, default
+        # 0.0 = report-only). Variance asks "does it move?"; persistence asks "does its movement have
+        # structure?". When enabled it runs BEFORE subset generation so a memoryless feature never
+        # reaches a fit. It is per-feature and marginal, so it cannot see covariance or tail-shape
+        # regimes the joint emission can use -- which is why it does not remove by default.
+        filtered_X, persistence_report = stage0b_persistence_filter(
+            filtered_X, min_persistence=self.config.min_persistence, verbose=False)
         surviving = list(filtered_X.columns)
+
+        # A hand-supplied baseline is privileged: under ABLATION every add-one subset is
+        # ``baseline + candidate``, so a bad baseline feature contaminates almost the whole search
+        # space. ``_generate_subsets`` intersects the baseline with ``surviving``, so a rejected
+        # feature cannot sneak back in that way -- but the caller asserted it was baseline-worthy and
+        # the data disagreed, which they should hear about rather than have silently corrected.
+        if baseline is not None:
+            dropped = [c for c in baseline if c in candidate_features and c not in surviving]
+            if dropped:
+                warnings.warn(
+                    f"Baseline features removed by the stage-0 pre-filters and excluded from every "
+                    f"subset: {dropped}. They did not earn their place (near-constant, or no persistent "
+                    f"structure in any moment). See result.stage_reports for which filter rejected them.",
+                    UserWarning, stacklevel=2)
 
         subsets = self._generate_subsets(surviving, strategy, baseline, max_subset_size)
         if not subsets:
@@ -138,7 +161,7 @@ class HmmFeatureScreener:
         return HmmScreenerResult(
             evaluations=evaluations,
             results_=results_df,
-            stage_reports=[stage0_report],
+            stage_reports=[stage0_report, persistence_report],
         )
 
     # -------------------------------------------------------- subset generation

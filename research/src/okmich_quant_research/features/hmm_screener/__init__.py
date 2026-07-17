@@ -33,6 +33,7 @@ from ._evaluators import (
     get_evaluator,
 )
 from ._pareto import ParetoStatus, classify_pareto
+from ._persistence import adjacent_pair_count, persistence_score, stage0b_persistence_filter
 from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
 from .screener import HmmFeatureScreener
 
@@ -54,5 +55,8 @@ __all__ = [
     "evaluate_path_structure",
     "evaluate_liquidity",
     "build_hmm",
-    "HMM_ALGO_REGISTRY"
+    "HMM_ALGO_REGISTRY",
+    "stage0b_persistence_filter",
+    "persistence_score",
+    "adjacent_pair_count",
 ]
