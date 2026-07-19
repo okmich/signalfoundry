@@ -47,6 +47,7 @@ from ..screener._result import StageReport
 from ._config import HmmScreenerConfig, ScreenStrategy, build_hmm
 from ._evaluators import get_evaluator
 from ._persistence import stage0b_persistence_filter
+from ._collinearity import stage0c_collinearity_filter
 from ._pareto import ParetoStatus, classify_pareto
 from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
 
@@ -129,6 +130,14 @@ class HmmFeatureScreener:
         # regimes the joint emission can use -- which is why it does not remove by default.
         filtered_X, persistence_report = stage0b_persistence_filter(
             filtered_X, min_persistence=self.config.min_persistence, verbose=False)
+        # Stage 0c: set-wise collinearity (removal opt-in via config.max_vif, default inf = report-only).
+        # Variance asks "does it move?"; persistence "does its movement have structure?"; collinearity
+        # "does its structure duplicate another's?". Runs BEFORE subset generation so a near-duplicate
+        # never ill-conditions a fit -- and so every subset ablation builds is non-redundant by
+        # construction. Like 0b it is opt-in: VIF is static and linear, blind to regime-switching
+        # covariance the joint emission uses, so it must stay a high near-duplicate floor (see _collinearity.py).
+        filtered_X, collinearity_report = stage0c_collinearity_filter(
+            filtered_X, max_vif=self.config.max_vif, verbose=False)
         surviving = list(filtered_X.columns)
 
         # A hand-supplied baseline is privileged: under ABLATION every add-one subset is
@@ -161,7 +170,7 @@ class HmmFeatureScreener:
         return HmmScreenerResult(
             evaluations=evaluations,
             results_=results_df,
-            stage_reports=[stage0_report, persistence_report],
+            stage_reports=[stage0_report, persistence_report, collinearity_report],
         )
 
     # -------------------------------------------------------- subset generation

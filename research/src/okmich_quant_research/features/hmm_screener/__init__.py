@@ -32,6 +32,7 @@ from ._evaluators import (
     evaluate_liquidity,
     get_evaluator,
 )
+from ._collinearity import nearest_duplicate_vif, stage0c_collinearity_filter
 from ._pareto import ParetoStatus, classify_pareto
 from ._persistence import adjacent_pair_count, persistence_score, stage0b_persistence_filter
 from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
@@ -59,4 +60,6 @@ __all__ = [
     "stage0b_persistence_filter",
     "persistence_score",
     "adjacent_pair_count",
+    "stage0c_collinearity_filter",
+    "nearest_duplicate_vif",
 ]

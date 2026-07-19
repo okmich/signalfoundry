@@ -31,7 +31,8 @@ class PomegranateHMM(BasePomegranateHMM):
         for k in n_states_range:
             for inst_kwargs in self._iter_train_dist_kwargs():
                 inst = self.__class__(self.distribution_type, n_states=k, random_state=self.random_state,
-                                      max_iter=self.max_iter, inference_mode=self.inference_mode, **inst_kwargs)
+                                      max_iter=self.max_iter, n_restarts=self.n_restarts,
+                                      inference_mode=self.inference_mode, **inst_kwargs)
                 inst.fit(X, lengths)
                 aic, bic = inst.get_aic_bic(X)
                 score = aic if criterion == "aic" else bic

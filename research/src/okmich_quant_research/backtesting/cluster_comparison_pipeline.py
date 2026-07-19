@@ -117,7 +117,7 @@ class ClusteringComparisonPipelineConfig:
                  columns_scaling_exclude: List[str] = None, timeframe: str = "15min", symbols: List[str] = None,
                  label_column_prefix="lbl_", posterior_column_prefix="post_", mm_n_components: int = 2, data_size: int = -1,
                  training_set_pct: float = 0.75, append_excluded_col_in_result: bool = False, clustering_algos: List[str] = None,
-                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None):
+                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None, hmm_n_restarts: int = 1):
         self.should_dim_reduce = should_dim_reduce
         self.should_scale = should_scale
         self.should_resample = should_resample
@@ -143,6 +143,9 @@ class ClusteringComparisonPipelineConfig:
             CLUSTERING_ALGOS if clustering_algos is None else clustering_algos
         )
         self.offline_labelling_mode = offline_labelling_mode
+        # >1 makes the pomegranate HMM fits robust: fit N times, keep the max-log-likelihood restart.
+        # Cures the knife-edge basin sensitivity where a tiny data change flips the regime partition.
+        self.hmm_n_restarts = max(1, int(hmm_n_restarts))
         if inference_mode is None:
             self.inference_mode = InferenceMode.SMOOTHING if offline_labelling_mode else InferenceMode.FILTERING
         else:
@@ -254,6 +257,7 @@ class ClusteringComparisonPipeline:
                 self.cluster_algorithms[algo_key] = PomegranateHMM(
                     distribution_type=dist_type, n_states=default_cluster,
                     inference_mode=inference_mode, random_state=self.random_seed,
+                    n_restarts=self.pipeline_config.hmm_n_restarts,
                 )
         hmm_mixture = {
             "hmm_mm_pmgnt": DistType.NORMAL, "hmm_mm_expnt": DistType.EXPONENTIAL,
@@ -265,6 +269,7 @@ class ClusteringComparisonPipeline:
                 self.cluster_algorithms[algo_key] = PomegranateMixtureHMM(
                     distribution_type=dist_type, n_states=default_cluster, inference_mode=inference_mode,
                     n_components=self.pipeline_config.mm_n_components, random_state=self.random_seed,
+                    n_restarts=self.pipeline_config.hmm_n_restarts,
                 )
     def get_supported_clustering_algos(self):
         return CLUSTERING_ALGOS

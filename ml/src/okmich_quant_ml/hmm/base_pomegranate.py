@@ -25,7 +25,8 @@ class BasePomegranateHMM(ABC):
     _REMOVED_HSMM_KWARGS: frozenset = frozenset({"duration_model", "duration_type", "max_duration"})
 
     def __init__(self, distribution_type: DistType, n_states: int = 2, *, random_state: int = 100,
-                 max_iter: int = 100, inference_mode: Optional[InferenceMode] = None, **dist_kwargs):
+                 max_iter: int = 100, n_restarts: int = 1, inference_mode: Optional[InferenceMode] = None,
+                 **dist_kwargs):
         """
         Parameters
         ----------
@@ -34,6 +35,12 @@ class BasePomegranateHMM(ABC):
             Initial / fixed number of hidden states.
         max_iter : int
             Maximum number of iterations for EM algorithm (default: 100)
+        n_restarts : int, default 1
+            Number of independent EM restarts, each from a distinct k-means seed; the fit with the
+            highest training log-likelihood is kept. 1 preserves the historical single-fit behaviour.
+            Use >1 when the fit sits on a knife-edge between local optima (a tiny data change flips the
+            basin) — selecting the max-LL restart lands consistently in the dominant basin. (The
+            categorical HHMM has its own best-of-N via ``n_init``; this governs the continuous EM path.)
         inference_mode : InferenceMode, default=InferenceMode.FILTERING
             Inference algorithm to use for predictions:
             - FILTERING: Forward algorithm only (no look-ahead bias)
@@ -53,6 +60,7 @@ class BasePomegranateHMM(ABC):
         self.n_states = n_states
         self.random_state = random_state
         self.max_iter = max_iter
+        self.n_restarts = max(1, int(n_restarts))
         self.inference_mode = inference_mode if inference_mode is not None else InferenceMode.FILTERING
         self.dist_kwargs = dist_kwargs
         self._model: Optional[DenseHMM] = None
@@ -105,34 +113,69 @@ class BasePomegranateHMM(ABC):
         if not np.all(np.isfinite(X_all)):
             raise ValueError("X contains NaN or Inf values. Clean input data before fitting.")
 
+        # Invalidate any prior fit up front. Otherwise a refit that fails on every restart raises but
+        # leaves the PREVIOUS window's model live in self._model -- a caught failure in a rolling backtest
+        # would then serve stale predictions from the old window instead of erroring.
+        self._model = None
+
         original_seed = self.random_state
+        best_ll, best_model, last_error = -np.inf, None, None
+        try:
+            # Each restart is a distinct initialisation; +1000 spacing keeps a restart's seed clear of
+            # the +attempt covariance-retry seeds used inside a single start. n_restarts=1 reproduces the
+            # historical single-fit path exactly (one start, same seeds).
+            for restart in range(self.n_restarts):
+                model, err = self._fit_single_start(X_list, X_all, original_seed + 1000 * restart)
+                if model is None:
+                    last_error = err
+                    continue
+                ll = self._fitted_log_prob(model, X_list)
+                if np.isfinite(ll) and ll > best_ll:
+                    best_ll, best_model = ll, model
+        finally:
+            self.random_state = original_seed  # never leak a perturbed seed to the caller
+
+        if best_model is None:
+            raise RuntimeError(
+                f"EM fitting failed across {self.n_restarts} restart(s), each retried "
+                f"{self._FIT_MAX_RETRIES}x, due to covariance/Cholesky errors. "
+                f"Last error: {type(last_error).__name__}: {last_error}"
+            ) from last_error
+        self._model = best_model
+        return self
+
+    def _fit_single_start(self, X_list, X_all, start_seed: int):
+        """One initialisation: k-means init + build + EM, with covariance-error retries.
+
+        Returns ``(fitted_model, None)`` on success, or ``(None, last_error)`` when every covariance
+        retry for this start was exhausted. Non-covariance errors propagate — they are bugs, not the
+        near-singular-covariance condition the retries exist to absorb.
+        """
         last_error = None
         for attempt in range(self._FIT_MAX_RETRIES):
-            self.random_state = original_seed + attempt
+            self.random_state = start_seed + attempt
             self._kmeans_stats = self._compute_kmeans_init(X_all)
-            self._model = self._build_model()
-
+            model = self._build_model()
             try:
-                self._model.fit(X_list)
-                # Success — restore original seed for reproducibility and return
-                self.random_state = original_seed
+                model.fit(X_list)
                 del self._kmeans_stats
-                return self
+                return model, None
             except (np.linalg.LinAlgError, AttributeError, RuntimeError) as e:
+                del self._kmeans_stats
                 if not self._is_covariance_error(e):
-                    self.random_state = original_seed
-                    del self._kmeans_stats
                     raise
                 last_error = e
-                self._model = None
+        return None, last_error
 
-        # All retries exhausted — restore original seed and raise
-        self.random_state = original_seed
-        del self._kmeans_stats
-        raise RuntimeError(
-            f"EM fitting failed after {self._FIT_MAX_RETRIES} attempts due to covariance/Cholesky errors. "
-            f"Last error: {type(last_error).__name__}: {last_error}"
-        ) from last_error
+    @staticmethod
+    def _fitted_log_prob(model, X_list) -> float:
+        """Total training log-likelihood of a fitted DenseHMM over the sequence list (restart score)."""
+        lp = model.log_probability(X_list)
+        if hasattr(lp, "sum"):
+            lp = lp.sum()
+        if hasattr(lp, "item"):
+            lp = lp.item()
+        return float(lp)
 
     @staticmethod
     def _is_covariance_error(e: Exception) -> bool:
