@@ -1,15 +1,21 @@
 """
-VbtTradeAnalytics - A vectorbt trade dimensions analyzer
-Derives time/context insights that vectorbt doesn't provide out of the box.
+TemporalPerformanceAnalyzer - conditional strategy performance sliced by the TIME axis.
 
-Usage:
-    from okmich_quant_research.backtesting.vectorbt_analytics import VbtTradeAnalytics
+The time/session sibling of ``RegimePerformanceAnalyzer``: both partition strategy performance into conditional cells
+and report per-cell diagnostics, differing only in the conditioning axis. Here the condition is *intrinsic* to the data
+— session, hour, day-of-week, month, quarter, duration and direction all fall out of the trade timestamps, so nothing
+extra is supplied. (``RegimePerformanceAnalyzer`` takes an *extrinsic* regime label instead.) It derives time/context
+insights vectorbt does not provide out of the box.
 
-    # From a vectorbt portfolio
-    ta = VbtTradeAnalytics(pf.trades.records_readable)
+Dual-mode, like its sibling:
+    from okmich_quant_research.backtesting.temporal_performance_analyzer import TemporalPerformanceAnalyzer
+
+    # Backtest mode — from a vectorbt portfolio / its trades
+    ta = TemporalPerformanceAnalyzer(pf.trades.records_readable)   # or .from_portfolio(pf)
     ta.show_dashboard()
 
-    # Or save to HTML
+    # Alpha-hunting mode — from a values DataFrame + a signal function (no backtest needed)
+    ta = TemporalPerformanceAnalyzer.from_signal(df, signal_fn, close_col="close")
     ta.show_dashboard(output_html="dashboard.html")
 """
 
@@ -65,10 +71,10 @@ def _get_duration_bucket(minutes: float) -> str:
 # Core class
 # ---------------------------------------------------------------------------
 
-class VbtTradeAnalytics:
+class TemporalPerformanceAnalyzer:
     """
     Accepts pf.trades.records_readable (a pandas DataFrame) and produces time/context dimensional analysis with a single
-    Plotly dashboard.
+    Plotly dashboard. See ``from_signal`` / ``from_portfolio`` for the other input modes.
 
     The dashboard has an Entry / Exit perspective toggle — letting you ask:
       - Entry view : "When I enter during X, how do I perform?"
@@ -113,6 +119,30 @@ class VbtTradeAnalytics:
         self.raw = trades_df.copy()
         self._source_tz = source_tz
         self._entry_df, self._exit_df = self._prepare(trades_df)
+
+    # ------------------------------------------------------------------
+    # Alternate constructors (dual-mode ingestion)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_portfolio(cls, portfolio, source_tz: str = "UTC") -> "TemporalPerformanceAnalyzer":
+        """Backtest mode: build from a vectorbt ``Portfolio`` via ``portfolio.trades.records_readable``."""
+        return cls(portfolio.trades.records_readable, source_tz=source_tz)
+
+    @classmethod
+    def from_signal(cls, data: pd.DataFrame, signal_fn, source_tz: str = "UTC", close_col: str = "close",
+                    **vbt_kwargs) -> "TemporalPerformanceAnalyzer":
+        """Alpha-hunting mode: build trades from a values DataFrame and a signal function.
+
+        ``signal_fn(data)`` returns a signed position series ({-1, 0, +1}); it is run through
+        vectorbt (see ``signal_adapter.signal_to_portfolio``) and the resulting trades are
+        analysed. Extra ``vbt_kwargs`` (``fees``, ``slippage``, ``init_cash``, ``freq`` ...)
+        pass through to the portfolio build. The time condition (session/hour/...) is intrinsic
+        to the trade timestamps, so no label is supplied.
+        """
+        from .signal_adapter import signal_to_portfolio
+        pf = signal_to_portfolio(data, signal_fn, close_col=close_col, **vbt_kwargs)
+        return cls.from_portfolio(pf, source_tz=source_tz)
 
     # ------------------------------------------------------------------
     # Data preparation — returns (entry_df, exit_df)
@@ -432,7 +462,7 @@ class VbtTradeAnalytics:
 
     @staticmethod
     def _bar_colors(values):
-        return [VbtTradeAnalytics._GREEN if v >= 0 else VbtTradeAnalytics._RED for v in values]
+        return [TemporalPerformanceAnalyzer._GREEN if v >= 0 else TemporalPerformanceAnalyzer._RED for v in values]
 
     # ------------------------------------------------------------------
     # Build one full set of traces for a given perspective df
@@ -695,7 +725,7 @@ class VbtTradeAnalytics:
 
         if output_html:
             fig.write_html(output_html)
-            print(f"Dashboard saved → {output_html}")
+            print(f"Dashboard saved -> {output_html}")
         else:
             fig.show()
 
