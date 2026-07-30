@@ -604,7 +604,7 @@ _MOMENTUM = [
 # ─────────────────────────────────────────────────────────────────────────────
 _TREND = [
     _fe("core_trend_features", "trend", "composite",
-        "Core trend feature bundle: Bollinger bands, CTL, persistence, and continuous z-score features",
+        "Core trend feature bundle: Bollinger bands, CTL trend features, persistence, and continuous z-score features",
         rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
     # Causal labeling functions (produce 1/-1/0 signals)
     _fe("continuous_trend_labeling", "trend", "trend",
@@ -614,6 +614,10 @@ _TREND = [
         rr=H, ret=H, dr=M, hor=S, wbi=[RA, VO], ot="dataframe"),
     _fe("trend_persistence_labeling",   "trend", "trend",
         "Volatility-adjusted directional drift label", rr=H, ret=H, dr=H, hor=ME, dir_=True),
+    _fe("ctl_trend_features", "trend.continuous_trend", "trend",
+        "Causal per-bar features from the CTL state machine: direction, trend age, retrace-to-flip, leg return, flip count",
+        rr=H, ret=H, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="dataframe",
+        notes="No look-ahead. Distills the +/-1 CTL label into trend maturity, proximity-to-reversal, leg magnitude, and choppiness."),
     # Supplementary indicators
     _fe("bollinger_band", "trend", "price_structure", "Bollinger Bands: upper/mid/lower/%B/width",
         rr=H, ret=M, dr=M, hor=S, wbi=[RA], ot="dataframe", notes="Returns 5 columns: upper, mid, lower, pct_b, width"),
@@ -621,22 +625,6 @@ _TREND = [
         "ATR envelope: SMA(close) ± k_atr · ATR — Bollinger analog with ATR-based bands",
         rr=H, ret=M, dr=M, hor=S, wbi=[TR, RA], ot="dataframe",
         notes="Returns (upper, middle, lower, percent_e, env_width). Scale-equivariant; more robust to gaps than Bollinger."),
-    _fe("compute_band_state", "trend.continuous_trend", "regime",
-        "Ternary band state from close vs envelope bands: +1 above upper, -1 below lower, 0 inside",
-        rr=H, ret=M, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="array",
-        notes="Building block for 3-class label construction with envelope-gated CTL."),
-    _fe("emit_three_class", "trend.continuous_trend", "trend",
-        "Quasi-posterior 3-class label: CTL label where band has signal, else 0",
-        rr=H, ret=M, dr=H, hor=S, dir_=True, ot="array",
-        notes="Gating combinator: zeros out CTL labels when band_state==0 (inside envelope)."),
-    _fe("attach_labels", "trend.continuous_trend", "trend",
-        "Compute envelope + binary CTL + 3-class labels and attach to DataFrame",
-        rr=M, ret=M, dr=H, hor=S, dir_=True, ot="dataframe",
-        notes="Convenience wrapper combining envelope, continuous_trend_labeling, compute_band_state, and emit_three_class."),
-    _fe("apply_3class_labels", "trend.continuous_trend", "trend",
-        "Attach binary CTL + 3-class labels using pre-resolved (omega, band) config with cross-TF rescaling",
-        rr=H, ret=H, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="dataframe",
-        notes="Production entry point for HTF CTL 3-class labels. Scales ma_period/atr_period by (persisted_tf/df_tf); omega does NOT scale."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
