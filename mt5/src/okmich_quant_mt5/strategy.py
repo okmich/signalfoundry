@@ -2,7 +2,7 @@ import json
 import logging
 from abc import abstractmethod
 from datetime import datetime
-from typing import Union
+from typing import Optional, Union
 
 from . import number_of_minutes_in_timeframe, is_timeframe_match, timeframe_minutes_dict
 from .functions import (
@@ -179,6 +179,24 @@ class BaseMt5Strategy(BaseStrategy):
         if tick_info is None:
             return None
         return tick_info
+
+    def current_spread_points(self, tick_info=None) -> Optional[float]:
+        """Live spread in POINTS, derived from the quote.
+
+        MT5's tick struct carries no ``spread`` field — ``symbol_info_tick()._asdict()`` yields
+        ``{time, bid, ask, last, volume, time_msc, flags, volume_real}`` — so a ``tick.get("spread", 0)``
+        silently evaluates to 0 and every SpreadFilter threshold passes unconditionally. Compute it from
+        the quote instead: (ask - bid) / point. Returns None when the quote or the point size is
+        unavailable, which SpreadFilter treats as "block" rather than "allow".
+        """
+        tick_info = tick_info or self.fetch_latest_tick_info()
+        point = float(self.symbol_info_dict.get("point", 0.0) or 0.0)
+        if not tick_info or point <= 0:
+            return None
+        bid, ask = tick_info.get("bid"), tick_info.get("ask")
+        if not bid or not ask:
+            return None
+        return (ask - bid) / point
 
     def _notify_trade_failed(self, direction: str, reason: str, retcode: int = None) -> None:
         if not self.notifier:
@@ -440,7 +458,7 @@ class GenericBasicStrategy(BaseMt5Strategy):
                     "symbol_info": self.symbol_info_dict,
                     "tick_info": tick,
                     "open_positions": len(positions),
-                    "spread": tick.get("spread", 0),
+                    "spread": self.current_spread_points(tick),
                     "signal_type": "long" if entries_long != 0 else "short",
                 }
 
