@@ -5,12 +5,14 @@ tests prove the merge is generic across daily / weekly / irregular release sched
 """
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from okmich_quant_pipeline.macro import update as update_mod
 from okmich_quant_pipeline.macro._types import (
     SERIES,
     BusinessDayLag,
@@ -23,11 +25,14 @@ from okmich_quant_pipeline.macro.features import (
     DEFAULT_RECIPES,
     FeatureRecipe,
     compute_macro_features,
+    log_return,
     zscore,
 )
+from okmich_quant_pipeline.http import get
+from okmich_quant_pipeline.macro.fetchers.fred import _parse
 from okmich_quant_pipeline.macro.metastore import MacroMetastore
 from okmich_quant_pipeline.macro.reader import load_macro
-from okmich_quant_pipeline.macro.update import _merge
+from okmich_quant_pipeline.macro.update import _merge, update_series
 
 
 # --------------------------------------------------------------------------- #
@@ -50,12 +55,20 @@ def make_features(rows: list[tuple[str, float, str]]) -> pd.DataFrame:
     )
 
 
+def _fetched(series: MacroSeries, dates: list[str], values: list[float]) -> pd.DataFrame:
+    """Build a stamped long frame shaped exactly like ``fred.fetch`` output (test double)."""
+    df = pd.DataFrame({"date": pd.to_datetime(dates), "series": series.value, "value": values})
+    df["available_from_utc"] = SERIES[series].availability.stamp(df)
+    return df
+
+
 def synth_raw(periods: int = 40) -> pd.DataFrame:
-    """Synthetic raw long frame for all four series, stamped via real policies."""
+    """Synthetic raw long frame for every registered series, stamped via real policies."""
     dates = pd.bdate_range("2024-01-01", periods=periods)
     base = {MacroSeries.VIX: 15.0, MacroSeries.VIX_3M: 17.0,
-            MacroSeries.CREDIT_SPREAD: 1.5, MacroSeries.USD_BROAD: 120.0,
-            MacroSeries.US_2Y: 1.0, MacroSeries.US_10Y: 3.0, MacroSeries.NFCI: -0.2}
+            MacroSeries.CREDIT_SPREAD: 1.5, MacroSeries.HY_OAS: 3.5, MacroSeries.USD_BROAD: 120.0,
+            MacroSeries.USD_AFE: 115.0, MacroSeries.USD_EME: 125.0, MacroSeries.US_2Y: 1.0,
+            MacroSeries.US_10Y: 3.0, MacroSeries.NFCI: -0.2, MacroSeries.WTI: 70.0}
     frames = []
     for s in MacroSeries:
         df = pd.DataFrame({"date": dates, "series": s.value,
@@ -347,3 +360,104 @@ def test_load_macro_reads_and_concats_per_series(tmp_path: Path) -> None:
 def test_load_macro_empty_dir_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_macro(tmp_path)
+
+
+def test_log_return_nonpositive_is_nan_not_error() -> None:
+    # A non-positive price (the 2020-04-20 negative WTI print) must yield NaN, not a domain warning.
+    s = pd.Series([50.0, 40.0, -37.0, 20.0, 25.0, 30.0])
+    out = log_return(s, periods=1)
+    assert np.isnan(out.iloc[2]) and np.isnan(out.iloc[3])  # ratios into/out of the negative -> NaN
+    assert out.iloc[5] == pytest.approx(np.log(30.0 / 25.0))  # clean elsewhere
+    assert np.isfinite(log_return(pd.Series([100.0, 101.0, 102.0]), periods=1).iloc[1:]).all()  # no-op when positive
+
+
+# --------------------------------------------------------------------------- #
+# regression — store-integrity fixes (revision absorption, clobber guard, robustness)
+# --------------------------------------------------------------------------- #
+
+def test_merge_revision_absorption_is_order_stable() -> None:
+    # Every date is revised, so for EVERY date the new value must win. The old code sorted before
+    # deduping; sort_values is not stable, so ties (existing vs new on the same date) could reorder
+    # and keep="last" could retain the stale existing value. With many duplicate dates this stresses
+    # that path: a single scrambled tie fails the assert.
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    existing = pd.DataFrame({"date": dates, "series": "X", "value": np.arange(n, dtype=float)})
+    new = pd.DataFrame({"date": dates, "series": "X", "value": np.arange(n, dtype=float) + 1000.0})
+    merged = _merge(existing, new)
+    assert len(merged) == n
+    assert merged["date"].is_monotonic_increasing
+    assert (merged["value"].to_numpy() == np.arange(n) + 1000.0).all()  # newest wins for all
+
+
+def test_metastore_read_recovers_from_corrupt_json(tmp_path: Path) -> None:
+    (tmp_path / "_metadata.json").write_text("{ this is not valid json")
+    assert MacroMetastore(tmp_path).read() == {}  # corrupt -> rebuildable empty
+
+
+def test_metastore_read_does_not_swallow_oserror(tmp_path: Path) -> None:
+    # An existing-but-unreadable metadata path must NOT read as {} — a read-modify-write off {} would
+    # rewrite the store with only the current series, clobbering every other series' record. Simulate
+    # an OSError on read by placing a directory at the metadata path.
+    (tmp_path / "_metadata.json").mkdir()
+    with pytest.raises(OSError):
+        MacroMetastore(tmp_path).read()
+
+
+def test_update_series_raises_on_empty_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, [], []))
+    ms = MacroMetastore(tmp_path)
+    with pytest.raises(ValueError):
+        update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                      start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 10), overlap_days=60)
+    assert not (tmp_path / "VIX.parquet").exists()  # no empty parquet committed
+
+
+def test_update_series_incremental_absorbs_revision_without_growing(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    ms = MacroMetastore(tmp_path)
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03"]
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, dates, [10.0, 11.0, 12.0]))
+    rec1 = update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                         start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 3), overlap_days=60)
+    assert rec1["n_obs"] == 3
+
+    # Incremental tail re-fetch returns only the last date, with a revised value: no new row, value updated.
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, ["2024-01-03"], [12.5]))
+    rec2 = update_series(MacroSeries.VIX, tmp_path, ms, full=False,
+                         start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 3), overlap_days=60)
+    assert rec2["n_obs"] == 3  # count unchanged — the date already existed
+    out = pd.read_parquet(tmp_path / "VIX.parquet").set_index("date")["value"]
+    assert out.loc["2024-01-03"] == 12.5  # revision absorbed end-to-end
+
+
+def test_update_full_refetch_shrink_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ms = MacroMetastore(tmp_path)
+    full_dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, full_dates, [1.0] * 5))
+    update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                  start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 5), overlap_days=60)
+
+    # A full re-fetch that returns a truncated span (later start) must be refused, asset preserved.
+    monkeypatch.setattr(update_mod.fred, "fetch", lambda s, start, end: _fetched(s, ["2024-01-04", "2024-01-05"], [9.0, 9.0]))
+    with pytest.raises(ValueError, match="shrink"):
+        update_series(MacroSeries.VIX, tmp_path, ms, full=True,
+                      start=dt.date(2024, 1, 1), end=dt.date(2024, 1, 5), overlap_days=60)
+    assert len(pd.read_parquet(tmp_path / "VIX.parquet")) == 5  # untouched on disk
+
+    # Explicit opt-in overrides the guard.
+    rec = update_series(MacroSeries.VIX, tmp_path, ms, full=True, start=dt.date(2024, 1, 1),
+                        end=dt.date(2024, 1, 5), overlap_days=60, allow_shrink=True)
+    assert rec["n_obs"] == 2
+
+
+def test_fred_parse_rejects_malformed_single_column_response() -> None:
+    spec = SERIES[MacroSeries.VIX]
+    with pytest.raises(ValueError):
+        _parse("observation_date\n2024-01-01\n2024-01-02\n", MacroSeries.VIX, spec)
+
+
+def test_http_get_rejects_nonpositive_retries() -> None:
+    # Guard fires before any network call, so this is offline-safe.
+    with pytest.raises(ValueError):
+        get("https://fred.stlouisfed.org/", retries=0)

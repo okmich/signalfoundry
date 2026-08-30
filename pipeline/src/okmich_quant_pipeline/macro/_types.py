@@ -1,15 +1,13 @@
 """Series registry, conditioning channels, and pluggable availability policies.
 
-Each macro series is sourced from FRED (single provider, stable public endpoint,
-no API key). The registry maps a stable canonical name to its FRED id, its
-conditioning channel, and — critically — an **availability policy** describing
+Each macro series is sourced from FRED (single provider, stable public endpoint, no API key). The registry maps a stable
+canonical name to its FRED id, its conditioning channel, and — critically — an **availability policy** describing
 how long after the observation the value actually hits the wire.
 
 Causal convention (no-lookahead)
 --------------------------------
-An observation may only be consumed by intraday bars from its ``available_from_utc``
-onward. *How* that instant is computed differs by series cadence/publisher, so it is
-a pluggable strategy rather than a hard-coded lag:
+An observation may only be consumed by intraday bars from its ``available_from_utc`` onward. *How* that instant is
+computed differs by series cadence/publisher, so it is a pluggable strategy rather than a hard-coded lag:
 
 - ``BusinessDayLag`` — daily series released N business days later at a fixed UTC hour
   (VIX same evening = lag 0; credit/USD next business day = lag 1).
@@ -18,10 +16,9 @@ a pluggable strategy rather than a hard-coded lag:
 - ``ExplicitRelease`` — irregular / event-driven series (rate decisions, CPI prints)
   whose source already carries the exact release timestamp; availability = that column.
 
-The downstream asof-merge (``align.attach_exogenous``) only ever looks at
-``available_from_utc`` + ``value``, so it is cadence-agnostic: daily, weekly, monthly,
-or irregular series all attach through the same path. Adding a new series is data-only:
-a ``SeriesSpec`` with the right policy — no engine change.
+The downstream asof-merge (``align.attach_exogenous``) only ever looks at ``available_from_utc`` + ``value``, so it is
+cadence-agnostic: daily, weekly, monthly, or irregular series all attach through the same path. Adding a new series is
+data-only: a ``SeriesSpec`` with the right policy — no engine change.
 """
 from __future__ import annotations
 
@@ -43,6 +40,20 @@ class Channel(enum.StrEnum):
     RISK = "risk"
     USD = "usd"
     RATES = "rates"  # reserved for Phase-2 yields / policy-rate series
+    COMMODITY = "commodity"  # growth / commodity factor (WTI, ...)
+
+
+class FredSource(enum.StrEnum):
+    """Which FRED endpoint a series is fetched from.
+
+    ``CSV`` — anonymous ``fredgraph.csv`` (no key): latest vintage, fine for never/minor-revised
+    series. ``API`` — keyed JSON: needed for point-in-time first-print vintages (revision-sensitive
+    series, paired with ``vintage=True``) and for full-history series the anonymous CSV caps
+    (ICE HY-OAS, ``vintage=False``).
+    """
+
+    CSV = "fredgraph_csv"
+    API = "fred_api"
 
 
 # --------------------------------------------------------------------------- #
@@ -119,20 +130,31 @@ class MacroSeries(enum.StrEnum):
     VIX = "VIX"
     VIX_3M = "VIX_3M"
     CREDIT_SPREAD = "CREDIT_SPREAD"
+    HY_OAS = "HY_OAS"
     USD_BROAD = "USD_BROAD"
+    USD_AFE = "USD_AFE"
+    USD_EME = "USD_EME"
     US_2Y = "US_2Y"
     US_10Y = "US_10Y"
     NFCI = "NFCI"
+    WTI = "WTI"
 
 
 @dataclass(frozen=True)
 class SeriesSpec:
-    """FRED id + conditioning channel + availability policy for one macro series."""
+    """FRED id + conditioning channel + availability policy for one macro series.
+
+    ``source``/``vintage`` select the fetch path: ``CSV`` (default, latest vintage) for never/minor-
+    revised series; ``API`` for keyed access, with ``vintage=True`` requesting point-in-time
+    first-print observations (availability then comes from the real release date, not the lag policy).
+    """
 
     fred_id: str
     channel: Channel
     availability: AvailabilityPolicy
     description: str
+    source: FredSource = FredSource.CSV
+    vintage: bool = False
 
 
 SERIES: dict[MacroSeries, SeriesSpec] = {
@@ -144,14 +166,30 @@ SERIES: dict[MacroSeries, SeriesSpec] = {
     # credit spread with full history; ~0.9 corr with HY OAS in stress. Restore true HY
     # OAS in Phase 2 via the keyed FRED API.
     MacroSeries.CREDIT_SPREAD: SeriesSpec("BAA10Y", Channel.RISK, BusinessDayLag(1), "Moody's Baa Corporate Yield minus 10Y Treasury (credit risk premium)"),
+    # The genuine high-yield credit gauge, restored via the keyed API (the anonymous CSV caps it to a
+    # rolling 3y window). Never revised, so latest vintage (vintage=False); kept alongside BAA10Y
+    # rather than replacing it — they're ~0.9 correlated but HY-OAS leads in stress.
+    MacroSeries.HY_OAS: SeriesSpec("BAMLH0A0HYM2", Channel.RISK, BusinessDayLag(1), "ICE BofA US High Yield Index Option-Adjusted Spread", source=FredSource.API, vintage=False),
     MacroSeries.USD_BROAD: SeriesSpec("DTWEXBGS", Channel.USD, BusinessDayLag(1), "Nominal Broad US Dollar Index (Fed H.10)"),
+    # USD sub-baskets (Fed H.10): Advanced Foreign Economies + Emerging Market Economies. Both are
+    # ~collinear with the broad index at the *level*, so we do NOT add their levels as features — the
+    # orthogonal signal is their *divergence* (EME-USD strengthening vs AFE-USD = EM-specific stress),
+    # carried by the single `usd_eme_div` recipe. Free, full history.
+    MacroSeries.USD_AFE: SeriesSpec("DTWEXAFEGS", Channel.USD, BusinessDayLag(1), "Nominal Advanced Foreign Economies US Dollar Index (Fed H.10)"),
+    MacroSeries.USD_EME: SeriesSpec("DTWEXEMEGS", Channel.USD, BusinessDayLag(1), "Nominal Emerging Market Economies US Dollar Index (Fed H.10)"),
     # Treasury yields (Fed H.15). H.15 posts ~16:15 ET same day; lag 1 is the conservative,
     # consistent choice (a day of staleness is immaterial for a slow rates conditioner — tighten
     # to 0 only if timeliness ever matters). The 2s10s curve is derived as a feature (US_10Y − US_2Y).
     MacroSeries.US_2Y: SeriesSpec("DGS2", Channel.RATES, BusinessDayLag(1), "US 2-Year Treasury Constant Maturity Yield (H.15)"),
     MacroSeries.US_10Y: SeriesSpec("DGS10", Channel.RATES, BusinessDayLag(1), "US 10-Year Treasury Constant Maturity Yield (H.15)"),
-    # NFCI: weekly, dated by week-ending Friday, released the following Wednesday 08:30 ET.
-    # +6 calendar days lands on Thursday — a one-day cushion past the nominal Wednesday release to
-    # stay leak-safe across occasional holiday-shifted releases.
+    # NFCI: weekly, dated by week-ending Friday, released the following Wednesday 08:30 ET; +6 calendar
+    # days lands on Thursday (a one-day cushion past the nominal release). NFCI is *re-estimated*, so
+    # the latest-vintage CSV does leak revisions onto historical bars — but ALFRED first-print vintages
+    # only begin 2011-05-27, which would drop ~2010-2011 of history. Full coverage was preferred over
+    # point-in-time here, so NFCI stays on the CSV path (the keyed-vintage machinery exists for the
+    # surprise-channel actuals, where first-print is mandatory).
     MacroSeries.NFCI: SeriesSpec("NFCI", Channel.RISK, CalendarDayLag(6), "Chicago Fed National Financial Conditions Index (weekly)"),
+    # WTI crude (EIA, via FRED). Daily, free, full history (1986+). Growth/commodity factor; a clean
+    # exogenous axis (oil moves on supply + global growth, not the USD/rates block). Published next day.
+    MacroSeries.WTI: SeriesSpec("DCOILWTICO", Channel.COMMODITY, BusinessDayLag(1), "Crude Oil WTI spot price (EIA, $/bbl)"),
 }

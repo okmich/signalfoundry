@@ -1,20 +1,17 @@
 """No-lookahead asof-merge — broadcast availability-stamped features onto bars.
 
-Pure, IO-free. ``attach_exogenous`` is **cadence-agnostic**: it only ever reads
-``available_from_utc`` + ``value`` from the feature frame, so daily, weekly, monthly, or
-irregular event-driven series all attach through the same path. There is no assumption that
-features share a cadence or a release schedule — a single forward-fill reconciles whatever
-mix is present.
+Pure, IO-free. ``attach_exogenous`` is **cadence-agnostic**: it only ever reads ``available_from_utc`` + ``value`` from
+the feature frame, so daily, weekly, monthly, or irregular event-driven series all attach through the same path. There
+is no assumption that features share a cadence or a release schedule — a single forward-fill reconciles whatever mix is present.
 
 Algorithm
 ---------
 1. Validate ``bars`` index is a sorted, UTC-tz-aware ``DatetimeIndex``.
-2. Pivot the long feature frame to wide, **indexed by ``available_from_utc``** (one column per
-   feature). Heterogeneous release times produce interleaved NaNs across rows — exactly what
-   the next step reconciles.
-3. ``ffill`` down the columns: each feature carries its last-known value forward to every
-   later release instant. This is causal — forward-fill propagates *past* values forward in
-   time only — and it is what lets a single merge serve features of different cadence.
+2. Pivot the long feature frame to wide, **indexed by ``available_from_utc``** (one column per feature). Heterogeneous
+   release times produce interleaved NaNs across rows — exactly what the next step reconciles.
+3. ``ffill`` down the columns: each feature carries its last-known value forward to every later release instant. This is
+   causal — forward-fill propagates *past* values forward in time only — and it is what lets a single merge serve
+   features of different cadence.
 4. One ``merge_asof(direction="backward")``: every bar gets, per feature, the most recent value
    whose ``available_from_utc <= bar_timestamp``. Never a future observation.
 
