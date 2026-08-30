@@ -234,16 +234,21 @@ def fetch_tick_data_date_range(
 
 
 def get_positions(symbol, magic) -> List[Dict[str, Any]]:
+    """Open positions for (symbol, magic).
+
+    RAISES on a query failure instead of returning []. ``mt5.positions_get`` returns None when the query itself
+    fails and an empty tuple when the account is genuinely flat; collapsing both to [] told every caller "no
+    positions" during a terminal hiccup. That is fail-OPEN: strategies gate entries on len(get_positions(...)),
+    so a transient failure would bypass max_number_of_open_positions and stack a second position on top of a live
+    one. Unknown broker state must block trading, not permit it, so the failure is raised and the caller's bar
+    fails loudly (LOGGING_CONTRACT outcome=error) rather than silently trading on a false flat.
+    """
     positions = mt5.positions_get(symbol=symbol)
-    if not positions:
-        return []
-
-    # Filter by magic number
-    positions = [pos for pos in positions if pos.magic == magic]
-    if not positions:
-        return []
-
-    return [p._asdict() for p in positions]
+    if positions is None:
+        msg = f"Failed to query open positions for {symbol}. Cause: {mt5.last_error()}"
+        logging.error(msg)
+        raise DataFetchError(msg)
+    return [p._asdict() for p in positions if p.magic == magic]
 
 
 @with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0)
