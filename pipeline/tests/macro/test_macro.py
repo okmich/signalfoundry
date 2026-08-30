@@ -25,6 +25,7 @@ from okmich_quant_pipeline.macro.features import (
     DEFAULT_RECIPES,
     FeatureRecipe,
     compute_macro_features,
+    log_return,
     zscore,
 )
 from okmich_quant_pipeline.http import get
@@ -66,7 +67,8 @@ def synth_raw(periods: int = 40) -> pd.DataFrame:
     dates = pd.bdate_range("2024-01-01", periods=periods)
     base = {MacroSeries.VIX: 15.0, MacroSeries.VIX_3M: 17.0,
             MacroSeries.CREDIT_SPREAD: 1.5, MacroSeries.HY_OAS: 3.5, MacroSeries.USD_BROAD: 120.0,
-            MacroSeries.US_2Y: 1.0, MacroSeries.US_10Y: 3.0, MacroSeries.NFCI: -0.2}
+            MacroSeries.USD_AFE: 115.0, MacroSeries.USD_EME: 125.0, MacroSeries.US_2Y: 1.0,
+            MacroSeries.US_10Y: 3.0, MacroSeries.NFCI: -0.2, MacroSeries.WTI: 70.0}
     frames = []
     for s in MacroSeries:
         df = pd.DataFrame({"date": dates, "series": s.value,
@@ -358,6 +360,15 @@ def test_load_macro_reads_and_concats_per_series(tmp_path: Path) -> None:
 def test_load_macro_empty_dir_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_macro(tmp_path)
+
+
+def test_log_return_nonpositive_is_nan_not_error() -> None:
+    # A non-positive price (the 2020-04-20 negative WTI print) must yield NaN, not a domain warning.
+    s = pd.Series([50.0, 40.0, -37.0, 20.0, 25.0, 30.0])
+    out = log_return(s, periods=1)
+    assert np.isnan(out.iloc[2]) and np.isnan(out.iloc[3])  # ratios into/out of the negative -> NaN
+    assert out.iloc[5] == pytest.approx(np.log(30.0 / 25.0))  # clean elsewhere
+    assert np.isfinite(log_return(pd.Series([100.0, 101.0, 102.0]), periods=1).iloc[1:]).all()  # no-op when positive
 
 
 # --------------------------------------------------------------------------- #

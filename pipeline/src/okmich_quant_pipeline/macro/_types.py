@@ -40,6 +40,7 @@ class Channel(enum.StrEnum):
     RISK = "risk"
     USD = "usd"
     RATES = "rates"  # reserved for Phase-2 yields / policy-rate series
+    COMMODITY = "commodity"  # growth / commodity factor (WTI, ...)
 
 
 class FredSource(enum.StrEnum):
@@ -131,9 +132,12 @@ class MacroSeries(enum.StrEnum):
     CREDIT_SPREAD = "CREDIT_SPREAD"
     HY_OAS = "HY_OAS"
     USD_BROAD = "USD_BROAD"
+    USD_AFE = "USD_AFE"
+    USD_EME = "USD_EME"
     US_2Y = "US_2Y"
     US_10Y = "US_10Y"
     NFCI = "NFCI"
+    WTI = "WTI"
 
 
 @dataclass(frozen=True)
@@ -167,6 +171,12 @@ SERIES: dict[MacroSeries, SeriesSpec] = {
     # rather than replacing it — they're ~0.9 correlated but HY-OAS leads in stress.
     MacroSeries.HY_OAS: SeriesSpec("BAMLH0A0HYM2", Channel.RISK, BusinessDayLag(1), "ICE BofA US High Yield Index Option-Adjusted Spread", source=FredSource.API, vintage=False),
     MacroSeries.USD_BROAD: SeriesSpec("DTWEXBGS", Channel.USD, BusinessDayLag(1), "Nominal Broad US Dollar Index (Fed H.10)"),
+    # USD sub-baskets (Fed H.10): Advanced Foreign Economies + Emerging Market Economies. Both are
+    # ~collinear with the broad index at the *level*, so we do NOT add their levels as features — the
+    # orthogonal signal is their *divergence* (EME-USD strengthening vs AFE-USD = EM-specific stress),
+    # carried by the single `usd_eme_div` recipe. Free, full history.
+    MacroSeries.USD_AFE: SeriesSpec("DTWEXAFEGS", Channel.USD, BusinessDayLag(1), "Nominal Advanced Foreign Economies US Dollar Index (Fed H.10)"),
+    MacroSeries.USD_EME: SeriesSpec("DTWEXEMEGS", Channel.USD, BusinessDayLag(1), "Nominal Emerging Market Economies US Dollar Index (Fed H.10)"),
     # Treasury yields (Fed H.15). H.15 posts ~16:15 ET same day; lag 1 is the conservative,
     # consistent choice (a day of staleness is immaterial for a slow rates conditioner — tighten
     # to 0 only if timeliness ever matters). The 2s10s curve is derived as a feature (US_10Y − US_2Y).
@@ -179,4 +189,7 @@ SERIES: dict[MacroSeries, SeriesSpec] = {
     # point-in-time here, so NFCI stays on the CSV path (the keyed-vintage machinery exists for the
     # surprise-channel actuals, where first-print is mandatory).
     MacroSeries.NFCI: SeriesSpec("NFCI", Channel.RISK, CalendarDayLag(6), "Chicago Fed National Financial Conditions Index (weekly)"),
+    # WTI crude (EIA, via FRED). Daily, free, full history (1986+). Growth/commodity factor; a clean
+    # exogenous axis (oil moves on supply + global growth, not the USD/rates block). Published next day.
+    MacroSeries.WTI: SeriesSpec("DCOILWTICO", Channel.COMMODITY, BusinessDayLag(1), "Crude Oil WTI spot price (EIA, $/bbl)"),
 }
