@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -117,7 +117,7 @@ class ClusteringComparisonPipelineConfig:
                  columns_scaling_exclude: List[str] = None, timeframe: str = "15min", symbols: List[str] = None,
                  label_column_prefix="lbl_", posterior_column_prefix="post_", mm_n_components: int = 2, data_size: int = -1,
                  training_set_pct: float = 0.75, append_excluded_col_in_result: bool = False, clustering_algos: List[str] = None,
-                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None):
+                 offline_labelling_mode: bool = False, inference_mode: InferenceMode = None, hmm_n_restarts: int = 1):
         self.should_dim_reduce = should_dim_reduce
         self.should_scale = should_scale
         self.should_resample = should_resample
@@ -143,6 +143,9 @@ class ClusteringComparisonPipelineConfig:
             CLUSTERING_ALGOS if clustering_algos is None else clustering_algos
         )
         self.offline_labelling_mode = offline_labelling_mode
+        # >1 makes the pomegranate HMM fits robust: fit N times, keep the max-log-likelihood restart.
+        # Cures the knife-edge basin sensitivity where a tiny data change flips the regime partition.
+        self.hmm_n_restarts = max(1, int(hmm_n_restarts))
         if inference_mode is None:
             self.inference_mode = InferenceMode.SMOOTHING if offline_labelling_mode else InferenceMode.FILTERING
         else:
@@ -187,6 +190,12 @@ class ClusteringComparisonPipeline:
         self.random_seed = 1
         self.algo_silhouette_scores = {}
         self.cluster_algorithms = {}
+        # Labelled blocks captured during run(), keyed by symbol. `run()` returns the TEST block
+        # joined onto the full-length frame, so its train rows are NaN; a state->sign map fitted on
+        # that output is therefore fitted on the evaluation window. These handles expose the train
+        # block, which is what a causal (deployable) mapping must be derived from.
+        self.train_output_dfs: Dict[str, pd.DataFrame] = {}
+        self.test_output_dfs: Dict[str, pd.DataFrame] = {}
         inference_mode = self.pipeline_config.inference_mode
         if not self.pipeline_config.offline_labelling_mode:
             if not (0.0 < self.pipeline_config.training_set_pct < 1.0):
@@ -254,6 +263,7 @@ class ClusteringComparisonPipeline:
                 self.cluster_algorithms[algo_key] = PomegranateHMM(
                     distribution_type=dist_type, n_states=default_cluster,
                     inference_mode=inference_mode, random_state=self.random_seed,
+                    n_restarts=self.pipeline_config.hmm_n_restarts,
                 )
         hmm_mixture = {
             "hmm_mm_pmgnt": DistType.NORMAL, "hmm_mm_expnt": DistType.EXPONENTIAL,
@@ -265,6 +275,7 @@ class ClusteringComparisonPipeline:
                 self.cluster_algorithms[algo_key] = PomegranateMixtureHMM(
                     distribution_type=dist_type, n_states=default_cluster, inference_mode=inference_mode,
                     n_components=self.pipeline_config.mm_n_components, random_state=self.random_seed,
+                    n_restarts=self.pipeline_config.hmm_n_restarts,
                 )
     def get_supported_clustering_algos(self):
         return CLUSTERING_ALGOS
@@ -385,7 +396,7 @@ class ClusteringComparisonPipeline:
                 silhouette_features = X
             elif model_key.startswith("hmm"):
                 labels = model.predict(X.values).astype(np.int32)
-                if model.inference_mode != InferenceMode.VITERBI:
+                if model.inference_mode in [InferenceMode.FILTERING, InferenceMode.SMOOTHING]:
                     probs = model.predict_proba(X.values)
                 silhouette_features = X
             else:
@@ -408,6 +419,53 @@ class ClusteringComparisonPipeline:
         except Exception as e:
             print(f"\t❌ {model_key} failed on {sym}: {e}")
         return df, probs
+
+    def _attach_excluded_columns(self, df, block):
+        """Join the excluded OHLC/volume columns onto `block`, keeping ONLY the block's own rows.
+
+        Deliberately a right join, unlike the full-length left join `run()` applies to its return
+        value: a caller asking for the train block wants the train rows, not the whole series with
+        most of it NaN.
+        """
+        if block is None:
+            return None
+        if not self.pipeline_config.append_excluded_col_in_result:
+            return block.copy()
+        excluded = [c for c in (self.pipeline_config.columns_scaling_exclude or []) if c in df.columns]
+        if not excluded:
+            return block.copy()
+        return df[excluded].join(block, how="right")
+
+    def _select_symbol_frame(self, store, sym, what):
+        if not store:
+            raise RuntimeError(f"No {what} labels available - call run() with should_fit_cluster=True first.")
+        if sym is not None:
+            if sym not in store:
+                raise KeyError(f"No {what} labels for {sym!r}. Available: {sorted(store)}")
+            return store[sym]
+        if len(store) == 1:
+            return next(iter(store.values()))
+        return dict(store)
+
+    def get_train_labels(self, sym: str = None):
+        """The LABELLED training block — fit a state->sign map on this, never on the test output.
+
+        `run()` returns test-block labels joined onto the full-length frame, so its train rows are
+        NaN. `map_label_to_trend_direction` drops NaN states on entry, which means a map derived
+        from `run()`'s output is fitted on the evaluation window and carries look-ahead. Use::
+
+            output_df = pipeline.run()                       # test block, for evaluation
+            train_df  = pipeline.get_train_labels()          # for fitting the map
+            mapping   = map_label_to_trend_direction(train_df, state_col=col, return_col="returns")
+            evaluate_all_labels_regime_returns_potentials(output_df, [col], label_sign_mapping=mapping)
+
+        Returns one frame for a single symbol, or {symbol: frame} for several.
+        """
+        return self._select_symbol_frame(self.train_output_dfs, sym, "train")
+
+    def get_test_labels(self, sym: str = None):
+        """The labelled TEST block, without the full-length NaN padding `run()` adds."""
+        return self._select_symbol_frame(self.test_output_dfs, sym, "test")
 
     def run(self):
         def do_feature_engineering(df):
@@ -448,6 +506,11 @@ class ClusteringComparisonPipeline:
                     if self.pipeline_config.should_fit_cluster
                     else df_features
                 )
+                # Offline mode fits and labels the whole series, so there is no held-out block:
+                # the fitting set IS the labelled set. Recorded under both handles so callers get a
+                # frame either way, but note a sign map fitted here is NOT out-of-sample.
+                self.train_output_dfs[sym] = self._attach_excluded_columns(df, output_df)
+                self.test_output_dfs[sym] = self.train_output_dfs[sym]
             else:
                 # Original train/test split mode
                 # Split data into train and test sets based on training_set_pct
@@ -465,6 +528,10 @@ class ClusteringComparisonPipeline:
                 if self.pipeline_config.should_fit_cluster:
                     print(f"\t => Training models on training set...")
                     df_features_train = self.fit_and_predict_cluster(sym, train_features, df_features_train)
+                    # Keep the LABELLED train block. `fit_and_predict_cluster` already wrote the
+                    # label columns into it; without this handle the only labels a caller can reach
+                    # are the test block's, which is what silently makes an in-window sign map.
+                    self.train_output_dfs[sym] = self._attach_excluded_columns(df, df_features_train)
 
                     # Now run inference on test set
                     print(f"\t => Running inference on test set...")
@@ -506,6 +573,10 @@ class ClusteringComparisonPipeline:
                         )
                 else:
                     output_df = self.feature_engineering(df_test)
+
+                # Test block WITHOUT the full-length join below, so callers have a frame whose rows
+                # are exactly the labelled ones.
+                self.test_output_dfs[sym] = self._attach_excluded_columns(df, output_df)
 
             # Append excluded columns from the entire dataset
             if self.pipeline_config.append_excluded_col_in_result:

@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import matplotlib
 import numpy as np
@@ -12,7 +12,15 @@ import matplotlib.pyplot as plt
 
 
 class RegimePerformanceAnalyzer:
-    """Analyse a VectorBT portfolio split by market regime labels.
+    """Conditional strategy performance sliced by the REGIME-LABEL axis.
+
+    The regime sibling of ``TemporalPerformanceAnalyzer``: both partition strategy performance into conditional cells and
+    report per-cell diagnostics, differing only in the conditioning axis. Here the condition is *extrinsic* — you supply
+    the regime label (and, in alpha-hunting mode, how values become trades). The time sibling instead derives
+    its condition intrinsically from the trade timestamps.
+
+    Dual-mode: pass a ready ``vbt.Portfolio`` (backtest mode, below), or use ``from_signal``
+    to build one from a values DataFrame + a signal function (alpha-hunting mode).
 
     Parameters
     ----------
@@ -52,13 +60,8 @@ class RegimePerformanceAnalyzer:
         "#8AC926",
     ]
 
-    def __init__(
-        self,
-        portfolio: vbt.Portfolio,
-        regime_labels: pd.Series,
-        regime_names: Optional[Dict[int, str]] = None,
-        annualization_factor: int = 252,
-    ) -> None:
+    def __init__(self, portfolio: vbt.Portfolio, regime_labels: pd.Series, regime_names: Optional[Dict[int, str]] = None,
+                 annualization_factor: int = 252) -> None:
         self.portfolio = portfolio
         self.regime_names = regime_names or {}
         self.annualization_factor = annualization_factor
@@ -86,6 +89,29 @@ class RegimePerformanceAnalyzer:
                 or (len(duration_series) > 0 and isinstance(duration_series.iloc[0], pd.Timedelta))
             )
         )
+
+    # ------------------------------------------------------------------
+    # Alternate constructor (alpha-hunting mode)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_signal(cls, data: pd.DataFrame, signal_fn: Callable[[pd.DataFrame], pd.Series],
+                    regime_labels: Union[pd.Series, Callable[[pd.DataFrame], pd.Series]], *,
+                    regime_names: Optional[Dict[int, str]] = None, annualization_factor: int = 252,
+                    close_col: str = "close", **vbt_kwargs) -> "RegimePerformanceAnalyzer":
+        """Alpha-hunting mode: build a portfolio from a values DataFrame + signal function, then
+        analyse it by regime — no prior backtest required.
+
+        ``signal_fn(data)`` returns a signed position series ({-1, 0, +1}); it is run through vectorbt
+        (see ``signal_adapter.signal_to_portfolio``) so every return/exposure metric stays vbt-native. ``regime_labels``
+        is either a ready ``pd.Series`` of regime IDs or a callable ``regime_fn(data) -> pd.Series`` — you supply both
+        the label definition and how values become trades. Extra ``vbt_kwargs`` (``fees``, ``slippage``, ``init_cash``,
+        ``freq`` ...) pass through to the portfolio build.
+        """
+        from .signal_adapter import signal_to_portfolio
+        labels = regime_labels(data) if callable(regime_labels) else regime_labels
+        portfolio = signal_to_portfolio(data, signal_fn, close_col=close_col, **vbt_kwargs)
+        return cls(portfolio, labels, regime_names, annualization_factor)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -232,9 +258,8 @@ class RegimePerformanceAnalyzer:
             penalty -= 0.3
         return f"{regime_name}|{score + penalty:.6f}|{int(t['n_trades']) if pd.notna(t['n_trades']) else 0}"
 
-    def _recommendation_lines(
-        self, return_stats: pd.DataFrame, trade_stats: pd.DataFrame, exposure: pd.DataFrame
-    ) -> List[str]:
+    def _recommendation_lines(self, return_stats: pd.DataFrame, trade_stats: pd.DataFrame,
+                              exposure: pd.DataFrame) -> List[str]:
         if len(return_stats) == 0:
             return ["No regimes available after alignment."]
 

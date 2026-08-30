@@ -6,11 +6,14 @@ from scipy.special import rel_entr, xlogy
 
 
 def validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12,
-                              normalize: bool = False, negativity_tol: float = 1e-9) -> NDArray:
+                              normalize: bool = False, negativity_tol: float = 1e-9,
+                              row_sum_tol: float = 1e-6) -> NDArray:
     """Validate a posterior matrix and optionally normalize rows onto the simplex.
 
     With ``normalize=False`` (default), the returned array is the input cast to ``float`` with no value-side mutation —
-    use this for pure validation and for rearrangement transformers that must not silently alter probabilities.
+    use this for pure validation and for rearrangement transformers that must not silently alter probabilities. Rows must
+    already sum to 1 within ``row_sum_tol``: a non-simplex row (e.g. ``[0.75, 0.75]``) would otherwise silently corrupt
+    every downstream consumer of this validator — entropy, KL, top-prob, gate thresholds — since none of them renormalize.
 
     With ``normalize=True``, values are clipped to ``eps`` and each row is rescaled to sum to 1. Use this for calibration /
     smoothing transformers that need log-safe input.
@@ -34,13 +37,31 @@ def validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12
         # them to 0 silently so downstream log-based math (entropy, KL) is safe.
         # No-op when the input is already strictly non-negative.
         if p.size > 0 and p.min() < 0.0:
-            return np.maximum(p, 0.0)
+            p = np.maximum(p, 0.0)
+        if p.size > 0:
+            row_sums = p.sum(axis=1)
+            max_dev = float(np.abs(row_sums - 1.0).max())
+            if max_dev > row_sum_tol:
+                raise ValueError(
+                    f"{func_name}: posterior rows must sum to 1 (max deviation {max_dev:.3e} > {row_sum_tol}); "
+                    f"a non-simplex row would silently corrupt every downstream consumer (entropy, KL, "
+                    f"top-prob, gate thresholds), none of which renormalize."
+                )
         return p
 
+    if p.size > 0:
+        # Checked on the pre-clip row sums deliberately: clip(p, eps, None) floors every entry to
+        # at least eps, so a post-clip row sum is always >= K*eps > 0 and this guard would never
+        # fire — silently turning a corrupted all-zero (or otherwise non-positive) row into a
+        # valid-looking uniform posterior downstream.
+        pre_clip_row_sums = p.sum(axis=1)
+        if pre_clip_row_sums.min() <= 0.0:
+            raise ValueError(
+                f"{func_name}: posterior rows must have strictly positive sums (min={pre_clip_row_sums.min():.3e}); "
+                f"an all-zero or non-positive row is upstream corruption, not a value clip() should paper over."
+            )
     clipped = np.clip(p, eps, None)
     row_sums = clipped.sum(axis=1, keepdims=True)
-    if row_sums.size > 0 and row_sums.min() <= 0.0:
-        raise ValueError(f"{func_name}: posterior rows must have strictly positive sums.")
     clipped /= row_sums
     return clipped
 
@@ -49,9 +70,33 @@ def validate_posterior_matrix(probs: NDArray, func_name: str, eps: float = 1e-12
 _validate_posterior_matrix = validate_posterior_matrix
 
 
-def _validate_window(window: int, func_name: str) -> None:
+def _validate_window(window: int, func_name: str) -> int:
+    """Validate ``window`` at the API boundary and return it coerced to ``int``.
+
+    Rejects bools and non-integral floats (via ``_require_integral``) before the ``>= 1`` check, so
+    e.g. ``window=2.5`` fails here with a clear message instead of later inside a slice/range call.
+    """
+    window = _require_integral(window, f"{func_name}: window")
     if window < 1:
         raise ValueError(f"{func_name}: window must be >= 1, got {window}")
+    return window
+
+
+def _require_integral(value, name: str) -> int:
+    """Coerce ``value`` to ``int``, rejecting bools and non-integral floats.
+
+    ``bool`` is an ``int`` subclass in Python, so a hyperparameter like ``window=True`` would
+    otherwise silently become ``window=1`` under a naive ``int(value)`` cast. A non-integral
+    float (e.g. ``lag=2.9``) would otherwise silently truncate to ``2``, changing causal-alignment
+    or stability behavior with no signal to the caller. Integral floats (``lag=2.0``) are accepted.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an int, not bool (got {value!r})")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError(f"{name} must be an integer value, got {value!r}")
 
 
 def margin(probs: NDArray) -> NDArray:
@@ -127,7 +172,7 @@ def rolling_flip_rate(probs: NDArray, window: int) -> NDArray:
     (no prior row to compare against), so the rolling rate starts at 0.
     """
     p = _validate_posterior_matrix(probs, "rolling_flip_rate")
-    _validate_window(window, "rolling_flip_rate")
+    window = _validate_window(window, "rolling_flip_rate")
     T = p.shape[0]
     if T == 0:
         return np.zeros(0, dtype=float)
@@ -146,14 +191,14 @@ def rolling_max_prob_std(probs: NDArray, window: int) -> NDArray:
     regardless of its level.
     """
     p = _validate_posterior_matrix(probs, "rolling_max_prob_std")
-    _validate_window(window, "rolling_max_prob_std")
+    window = _validate_window(window, "rolling_max_prob_std")
     return _rolling_std_1d(np.max(p, axis=1), window)
 
 
 def rolling_entropy_std(probs: NDArray, window: int) -> NDArray:
     """Trailing rolling stdev of Shannon entropy over ``window`` steps, shape ``(T,)``."""
     p = _validate_posterior_matrix(probs, "rolling_entropy_std")
-    _validate_window(window, "rolling_entropy_std")
+    window = _validate_window(window, "rolling_entropy_std")
     return _rolling_std_1d(entropy(p), window)
 
 

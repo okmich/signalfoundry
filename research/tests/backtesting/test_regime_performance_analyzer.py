@@ -269,6 +269,54 @@ class _SimpleMACrossSignal:
         return entries, exits, short_entries, short_exits
 
 
+class TestFromSignal:
+    """Alpha-hunting constructor: values DataFrame + signal function -> regime analysis."""
+
+    @staticmethod
+    def _ma_signal(data: pd.DataFrame) -> pd.Series:
+        close = data["close"]
+        fa = close.rolling(5).mean()
+        sl = close.rolling(20).mean()
+        pos = np.where(fa > sl, 1, np.where(fa < sl, -1, 0))
+        return pd.Series(pos, index=close.index, dtype=float)
+
+    def test_builds_from_values_and_signal_fn(
+        self,
+        sample_price_data: pd.DataFrame,
+        sample_regime_labels: pd.Series,
+    ):
+        rpa = RegimePerformanceAnalyzer.from_signal(
+            sample_price_data, self._ma_signal, sample_regime_labels, freq="D"
+        )
+        assert isinstance(rpa, RegimePerformanceAnalyzer)
+        assert len(rpa._regimes) == 3
+        # metrics are vbt-native (came from the built portfolio), all bars accounted for
+        assert rpa.regime_return_stats()["n_bars"].sum() == len(sample_price_data)
+
+    def test_accepts_callable_regime_definition(self, sample_price_data: pd.DataFrame):
+        def regime_fn(data: pd.DataFrame) -> pd.Series:
+            n = len(data)
+            labels = np.tile([0, 1, 2], n // 3 + 1)[:n]
+            return pd.Series(labels, index=data.index, dtype=int)
+
+        rpa = RegimePerformanceAnalyzer.from_signal(
+            sample_price_data, self._ma_signal, regime_fn, freq="D"
+        )
+        assert isinstance(rpa, RegimePerformanceAnalyzer)
+        assert len(rpa._regimes) == 3
+
+    def test_regime_names_forwarded(
+        self,
+        sample_price_data: pd.DataFrame,
+        sample_regime_labels: pd.Series,
+    ):
+        names = {0: "trending", 1: "ranging", 2: "volatile"}
+        rpa = RegimePerformanceAnalyzer.from_signal(
+            sample_price_data, self._ma_signal, sample_regime_labels, regime_names=names, freq="D"
+        )
+        assert "trending" in rpa.regime_return_stats().index
+
+
 class TestVectorBtBacktesterAnalyzeByRegime:
     def test_returns_analyzer(
         self,

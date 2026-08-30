@@ -41,9 +41,9 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
     """
 
     def __init__(self, distribution_type: DistType, n_states: int = 2, n_components: int = 2, *, random_state: int = 100,
-                 max_iter: int = 100, inference_mode: Optional[InferenceMode] = None, **dist_kwargs):
+                 max_iter: int = 100, n_restarts: int = 1, inference_mode: Optional[InferenceMode] = None, **dist_kwargs):
         super().__init__(distribution_type, n_states, random_state=random_state, max_iter=max_iter,
-                         inference_mode=inference_mode, **dist_kwargs)
+                         n_restarts=n_restarts, inference_mode=inference_mode, **dist_kwargs)
         self.n_components = n_components
 
     # ------------------------------------------------------------------
@@ -61,7 +61,8 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
                 for inst_kwargs in self._iter_train_dist_kwargs():
                     inst = self.__class__(self.distribution_type, n_states=k, n_components=j,
                                           random_state=self.random_state, max_iter=self.max_iter,
-                                          inference_mode=self.inference_mode, **inst_kwargs)
+                                          n_restarts=self.n_restarts, inference_mode=self.inference_mode,
+                                          **inst_kwargs)
                     inst.fit(X, lengths)
                     aic, bic = inst.get_aic_bic(X)
                     score = aic if criterion == "aic" else bic

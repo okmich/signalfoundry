@@ -62,6 +62,22 @@ class HmmScreenerConfig:
     # existing screens are unchanged until they opt in. Requires a DatetimeIndex on
     # ``raw_data``; silently a no-op otherwise.
     respect_session_boundaries: bool = False
+    # Stage-0b marginal-persistence floor: max(|acf1|) over x, |x|, x^2. HMM-specific (a tree screener
+    # may legitimately use white-noise features, hence not in the shared stage-0).
+    # Default 0.0 = DIAGNOSTIC ONLY (scored and reported, nothing removed), which also preserves existing
+    # screens unchanged until they opt in -- matching the convention used by respect_session_boundaries.
+    # Removal is opt-in because the test is per-feature and MARGINAL while the emission is joint and
+    # shape-aware: it is provably blind to covariance regimes (marginals white, correlation switches) and
+    # to tail-shape regimes (equal variance, different kurtosis) that the model can use. 0.15 is the
+    # FXPIG-M5 calibration only -- not validated cross-instrument or out-of-sample. See _persistence.py.
+    min_persistence: float = 0.0
+    # Stage-0c collinearity ceiling: VIF = 1/(1-R^2) of each feature on the others. HMM-specific -- a
+    # near-duplicate pair ill-conditions the joint emission covariance and makes the multi-restart max-LL
+    # pick a coin flip. Default inf = DIAGNOSTIC ONLY (scored and reported, nothing removed), preserving
+    # existing screens until they opt in. Removal is opt-in and the threshold must stay HIGH: VIF sees
+    # only static linear redundancy and is blind to regime-switching covariance the emission can use, so
+    # this is a near-duplicate remover, NOT an orthogonaliser. 10 is the FXPIG-M5 setting. See _collinearity.py.
+    max_vif: float = float("inf")
     honesty_threshold: float = 0.99
     honesty_trap_rate: float = 0.40
     # Phase-A structural quality gate (run before Pareto). Subsets failing either
@@ -85,6 +101,12 @@ class HmmScreenerConfig:
             unknown = set(self.allowed_signal_types) - set(SIGNAL_TYPES)
             if unknown:
                 raise ValueError(f"allowed_signal_types contains unknown values: {unknown}")
+        if not 0.0 <= self.min_persistence <= 1.0:
+            raise ValueError(f"min_persistence must be in [0, 1], got {self.min_persistence}")
+        if self.max_vif != self.max_vif:  # NaN
+            raise ValueError("max_vif must be a number (or inf), got NaN")
+        if self.max_vif < 1.0:
+            raise ValueError(f"max_vif must be >= 1.0 (VIF's floor for an orthogonal feature), got {self.max_vif}")
         if not 0.0 <= self.honesty_threshold <= 1.0:
             raise ValueError(f"honesty_threshold must be in [0, 1], got {self.honesty_threshold}")
         if not 0.0 <= self.honesty_trap_rate <= 1.0:

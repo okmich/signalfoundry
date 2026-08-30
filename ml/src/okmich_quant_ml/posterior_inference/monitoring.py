@@ -92,9 +92,9 @@ def entropy_staleness(entropy_series: NDArray, baseline_mean: float, baseline_st
 
     ``entropy_series`` is the ``(T,)`` output of ``features.entropy(probs)``.
     """
-    _validate_window(window, "entropy_staleness")
-    if baseline_std <= 0.0:
-        raise ValueError(f"entropy_staleness: baseline_std must be positive, got {baseline_std}")
+    window = _validate_window(window, "entropy_staleness")
+    if not (np.isfinite(baseline_std) and baseline_std > 0.0):
+        raise ValueError(f"entropy_staleness: baseline_std must be finite and positive, got {baseline_std}")
     e = np.asarray(entropy_series, dtype=float)
     if e.ndim != 1:
         raise ValueError(f"entropy_staleness: entropy_series must be 1-D, got shape={e.shape}")
@@ -116,7 +116,7 @@ def state_occupancy_drift(probs: NDArray, baseline_occupancy: NDArray, window: i
     trailing window is under-populated).
     """
     p = _validate_posterior_matrix(probs, "state_occupancy_drift")
-    _validate_window(window, "state_occupancy_drift")
+    window = _validate_window(window, "state_occupancy_drift")
     b = np.asarray(baseline_occupancy, dtype=float)
     if b.shape != (p.shape[1],):
         raise ValueError(
@@ -218,7 +218,7 @@ def fit_posterior_health_baselines(probs: NDArray, window: int) -> PosteriorHeal
     more for statistically stable baselines.
     """
     p = _validate_posterior_matrix(probs, "fit_posterior_health_baselines")
-    _validate_window(window, "fit_posterior_health_baselines")
+    window = _validate_window(window, "fit_posterior_health_baselines")
     if p.shape[0] < window + 2:
         raise ValueError(
             f"fit_posterior_health_baselines: probs must have at least window+2={window + 2} rows for the "
@@ -279,6 +279,16 @@ def score_posterior_health(probs: NDArray, baselines: PosteriorHealthBaselines, 
     baselines' own training-time spread before production use.
     """
     p = _validate_posterior_matrix(probs, "score_posterior_health")
+    if not (np.isfinite(max_entropy_abs_z) and max_entropy_abs_z > 0.0):
+        raise ValueError(f"score_posterior_health: max_entropy_abs_z must be finite and > 0, got {max_entropy_abs_z}")
+    if not (np.isfinite(max_occupancy_drift_l1) and max_occupancy_drift_l1 > 0.0):
+        raise ValueError(
+            f"score_posterior_health: max_occupancy_drift_l1 must be finite and > 0, got {max_occupancy_drift_l1}"
+        )
+    if not (np.isfinite(max_flip_rate_drift_abs) and max_flip_rate_drift_abs > 0.0):
+        raise ValueError(
+            f"score_posterior_health: max_flip_rate_drift_abs must be finite and > 0, got {max_flip_rate_drift_abs}"
+        )
     if p.shape[0] < baselines.window:
         raise ValueError(
             f"score_posterior_health: probs must have at least window={baselines.window} rows for the final row "
@@ -484,9 +494,9 @@ def log_likelihood_drift(loglik_series: NDArray, baseline_mean: float, baseline_
     than training showed (classical drift); positive: model fits better
     (possible over-fit, mode collapse, or pathological distribution narrowing).
     """
-    _validate_window(window, "log_likelihood_drift")
-    if baseline_std <= 0.0:
-        raise ValueError(f"log_likelihood_drift: baseline_std must be positive, got {baseline_std}")
+    window = _validate_window(window, "log_likelihood_drift")
+    if not (np.isfinite(baseline_std) and baseline_std > 0.0):
+        raise ValueError(f"log_likelihood_drift: baseline_std must be finite and positive, got {baseline_std}")
     s = _validate_loglik_series(loglik_series, "log_likelihood_drift")
     rolling_mean = _rolling_mean_1d(s, window)
     out = (rolling_mean - baseline_mean) / baseline_std
@@ -548,7 +558,7 @@ def fit_loglik_drift_baselines(loglik_series: NDArray, window: int) -> LoglikDri
     z-scores later at the first ``score_loglik_health`` call.
     """
     s = _validate_loglik_series(loglik_series, "fit_loglik_drift_baselines")
-    _validate_window(window, "fit_loglik_drift_baselines")
+    window = _validate_window(window, "fit_loglik_drift_baselines")
     if s.shape[0] < window + 2:
         raise ValueError(
             f"fit_loglik_drift_baselines: loglik_series must have at least window+2={window + 2} rows for the "
@@ -606,6 +616,8 @@ def score_loglik_health(loglik_series: NDArray, baselines: LoglikDriftBaselines,
     the baseline's own training-time spread before live use.
     """
     s = _validate_loglik_series(loglik_series, "score_loglik_health")
+    if not (np.isfinite(max_abs_z) and max_abs_z > 0.0):
+        raise ValueError(f"score_loglik_health: max_abs_z must be finite and > 0, got {max_abs_z}")
     if s.shape[0] < baselines.window:
         raise ValueError(
             f"score_loglik_health: loglik_series must have at least window={baselines.window} rows for the "

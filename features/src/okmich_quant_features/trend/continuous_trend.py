@@ -1,23 +1,24 @@
-"""Continuous Trend Labeling (price-action state machine) and the band-gated 3-class derivation.
+"""Continuous Trend Labeling (price-action state machine) and its causal per-bar feature bundle.
 
 Reference: https://www.mdpi.com/1099-4300/22/10/1162
 
-continuous_trend_labeling tracks price extremes and reversals sequentially using a single omega threshold, emitting a
-binary {-1, +1} regime label (0 only during pre-trigger warmup). Omega is caller-supplied; pick it from a vol anchor
-(e.g. ~ k * median ATR / price) rather than fitting.
+continuous_trend_labeling tracks price extremes and reversals sequentially using a single omega threshold,
+emitting a binary {-1, +1} regime label (0 only during pre-trigger warmup). Omega is caller-supplied; pick it
+from a vol anchor (e.g. ~ k * median ATR / price) rather than fitting.
 
-The band-gated 3-class section below converts the binary CTL output to a {-1, 0, +1} ternary by gating with an ATR
-envelope: bars inside the band are forced to 0 (low-confidence / noise zone). See attach_labels and apply_3class_labels.
+The raw +/-1 label is a thin summary of a machine that knows far more. ctl_trend_features (bottom of the file)
+replays the same FSM once and projects its running state into a causal, no-look-ahead feature DataFrame — trend
+age, retracement toward a flip, realised leg return, and recent flip count — the actually-useful signal the
+state machine carries. See ctl_trend_features.
 """
 
 import math
-from dataclasses import dataclass
-from typing import Optional, Union
+from collections import deque
+from dataclasses import dataclass, field
+from typing import NamedTuple, Union
 
 import numpy as np
 import pandas as pd
-
-from .channels import envelope
 
 
 _NONFINITE_PRICE_MSG = "prices contains NaN or infinite values; clean the data before labeling."
@@ -126,14 +127,36 @@ def continuous_trend_labeling(prices: Union[pd.Series, np.ndarray], omega: float
 # ctl_warm_up / ctl_streaming_replay, then advance with ctl_step.
 
 
+class CTLFeatures(NamedTuple):
+    """One bar of the causal CTL feature bundle — the streaming twin of a ctl_trend_features DataFrame row.
+
+    Field names match ctl_trend_features' columns exactly, so a live per-bar vector and a backtest row are
+    directly comparable (bar-for-bar identical by construction — the batch function replays this same stepper).
+    Use `._asdict()` for a dict or `list(feats)` for a raw ordered vector.
+    """
+    ctl_direction: float
+    ctl_trend_age: float
+    ctl_retrace_frac: float
+    ctl_leg_return: float
+    ctl_flip_count: float
+
+
+# Pre-trigger bar: no confirmed leg (direction/age/retrace/leg-return unknown) and no flips counted yet. Shared
+# immutable default for every CTLState's held vector; mirrors the warmup rows of ctl_trend_features.
+_WARMUP_FEATURES = CTLFeatures(np.nan, np.nan, np.nan, np.nan, 0.0)
+
+
 @dataclass
 class CTLState:
     """O(1) streaming state for continuous_trend_labeling — a faithful per-bar projection of the batch machine.
 
-    Warm up once (ctl_warm_up / ctl_streaming_replay), then advance one bar at a time with ctl_step. Field names
-    mirror the batch function's locals; paper symbols are noted in comments.
+    Warm up once, then advance one bar at a time — with ctl_step for the label only, or step_features for the full
+    causal feature bundle (CTLFeatures). Field names mirror the batch function's locals; paper symbols are noted in
+    comments. The leading fields are the label FSM; the `_`-prefixed fields are step_features bookkeeping (untouched
+    by ctl_step) and are excluded from repr/eq.
     """
     omega: float
+    flip_window: int = 20        # trailing bars for ctl_flip_count (step_features only)
     direction: int = 0           # paper: Cid — 0 pre-trigger, +1 up, -1 down
     first_price: float = 0.0     # paper: FP — anchor for the initial trigger
     x_high: float = 0.0          # running max (paper: xH)
@@ -141,10 +164,62 @@ class CTLState:
     x_low: float = 0.0           # running min (paper: xL)
     t_low: int = 0               # index of running min (paper: LT)
     initialized: bool = False
+    # --- step_features bookkeeping (populated per bar; ignored by ctl_step / the label FSM) ---
+    _i: int = field(default=-1, init=False, repr=False, compare=False)               # last processed bar index
+    _prev_direction: int = field(default=0, init=False, repr=False, compare=False)   # direction before this bar
+    _leg_start_idx: int = field(default=0, init=False, repr=False, compare=False)    # index the current leg began
+    _flip_indices: deque = field(default_factory=deque, init=False, repr=False, compare=False)  # recent flip bars
+    _last_features: CTLFeatures = field(default=_WARMUP_FEATURES, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if not math.isfinite(self.omega) or self.omega <= 0:
             raise ValueError(f"omega must be > 0, got {self.omega}")
+        if self.flip_window < 1:
+            raise ValueError(f"flip_window must be >= 1, got {self.flip_window}")
+
+    def step_features(self, price: float) -> CTLFeatures:
+        """Advance one bar and return that bar's full causal feature bundle (live/online use).
+
+        The streaming twin of a ctl_trend_features row: identical values bar-for-bar. The instance owns a monotonic
+        bar counter, so live code just calls this once per bar in order — warm up by stepping over enough history
+        first (this primes the leg origin and the trailing flip window, the same burn-in the label needs).
+
+        Non-finite price (NaN/inf): the last emitted bundle is returned unchanged and neither the FSM state nor the
+        bar counter advances — the same hold-on-bad-tick contract as ctl_step. Feed clean data during warm-up.
+
+        Pre-trigger warmup returns CTLFeatures(nan, nan, nan, nan, 0.0): no confirmed leg, no flips counted.
+        """
+        if not math.isfinite(price):
+            return self._last_features  # hold: FSM + counter untouched, mirroring ctl_step's bad-tick behaviour
+
+        self._i += 1
+        i = self._i
+        prev_dir = self._prev_direction
+        cur_dir = ctl_step(self, price, i)  # advances direction + running extremes in place; returns 0/-1/+1
+
+        if cur_dir == 0:
+            feats = _WARMUP_FEATURES
+        else:
+            if cur_dir != prev_dir:
+                self._leg_start_idx = i
+                if prev_dir != 0:                 # a reversal — the initial 0 -> +/-1 trigger is not a flip
+                    self._flip_indices.append(i)
+            cutoff = i - self.flip_window          # drop flips that have aged out of the trailing window
+            while self._flip_indices and self._flip_indices[0] <= cutoff:
+                self._flip_indices.popleft()
+            if cur_dir == 1:
+                retrace = (self.x_high - price) / self.x_high / self.omega  # pullback below the running high
+                leg_ret = (price - self.x_low) / self.x_low                 # gain from the origin low
+            else:
+                retrace = (price - self.x_low) / self.x_low / self.omega    # bounce above the running low
+                leg_ret = (price - self.x_high) / self.x_high               # drop from the origin high
+            feats = CTLFeatures(ctl_direction=float(cur_dir), ctl_trend_age=float(i - self._leg_start_idx),
+                                ctl_retrace_frac=retrace, ctl_leg_return=leg_ret,
+                                ctl_flip_count=float(len(self._flip_indices)))
+
+        self._prev_direction = cur_dir
+        self._last_features = feats
+        return feats
 
 
 def ctl_step(state: CTLState, price: float, i: int) -> int:
@@ -224,209 +299,56 @@ def ctl_streaming_replay(prices: Union[pd.Series, np.ndarray], omega: float) -> 
 
 
 ##############################################################################################################
-########################## THREE-CLASS LABEL DERIVATION (BAND-GATED CTL) #####################################
+############################### CAUSAL TREND-FEATURE BUNDLE (FROM THE CTL FSM) ###############################
 ##############################################################################################################
 #
-# Turns the binary CTL output into a {-1, 0, +1} ternary label by gating CTL labels with an ATR-based envelope band
-# (MA +/- k*ATR). Class-0 marks bars where price sits inside the band — the noise / low-confidence zone — while +/-1 marks
-# confident directional regimes.
+# The raw +/-1 CTL label discards almost everything the state machine computes. ctl_trend_features replays the SAME
+# per-bar stepper used live (CTLState.step_features, over ctl_step) once — no separate copy of the algorithm — and
+# projects the running state (direction, running extremes, leg origin) into a per-bar feature DataFrame. Every column
+# at bar i depends only on prices[:i+1], so the bundle is fully causal (no look-ahead) and safe as a model input.
 #
-# Calibration of (omega, ma_period, atr_period, k_atr) happens upstream; this module
-# provides:
-#   - compute_band_state — turn an (already-enveloped) close + (upper, lower) into a {-1, 0, +1} ternary state
-#       (envelope itself is sourced from .misc),
-#   - attach_labels for offline / batch use given an explicit (omega, BandParams),
-#   - apply_3class_labels for runtime use that accepts a pre-resolved (omega, band) and rescales bar-count parameters
-#       to the input timeframe. Caller is responsible for sourcing the config (typically from a SymbolMetastore block).
+# A "leg" is the stretch between two confirmed pivots; it starts at the initial trigger or at a reversal. The favourable
+# extreme of an up-leg is its running high (x_high); its origin is the low it rose from (x_low). Down-legs mirror this.
 
 
-@dataclass(frozen=True)
-class BandParams:
-    """ATR envelope band: MA(ma_period) +/- k_atr * ATR(atr_period)."""
-    ma_period: int
-    atr_period: int
-    k_atr: float
+def ctl_trend_features(prices: Union[pd.Series, np.ndarray], omega: float = 0.15, flip_window: int = 20) -> pd.DataFrame:
+    """Causal per-bar trend features projected from the CTL state machine.
 
-    def __post_init__(self):
-        # bool is an int subclass in Python; reject it explicitly so True/False can't pose as a period.
-        if isinstance(self.ma_period, bool) or not isinstance(self.ma_period, (int, np.integer)):
-            raise ValueError(f"ma_period must be an integer, got {self.ma_period!r}")
-        if self.ma_period < 2:
-            raise ValueError("ma_period must be >= 2")
-        if isinstance(self.atr_period, bool) or not isinstance(self.atr_period, (int, np.integer)):
-            raise ValueError(f"atr_period must be an integer, got {self.atr_period!r}")
-        if self.atr_period < 2:
-            raise ValueError("atr_period must be >= 2")
-        if not math.isfinite(self.k_atr) or self.k_atr <= 0:
-            raise ValueError("k_atr must be > 0")
+    Replays the streaming FSM once and returns a float64 DataFrame (index mirrors the input; RangeIndex for arrays).
+    All columns are NaN over the pre-trigger warmup, where the machine has no confirmed leg — except ctl_flip_count,
+    a trailing count that is a meaningful 0 there.
 
+    Backtest/live parity: each row is produced by CTLState.step_features, the same per-bar stepper used live, so a
+    live CTLFeatures vector equals this function's row for the same bar by construction. For online use, hold a
+    CTLState(omega, flip_window) and call state.step_features(price) once per bar.
 
-def compute_band_state(close: pd.Series, upper: pd.Series, lower: pd.Series) -> np.ndarray:
-    """Ternary band state: +1 above upper, -1 below lower, 0 inside (or warmup NaN).
-
-    POSITIONAL: the three inputs are compared element-by-element by position, NOT by pandas index. Pass
-    same-length, same-order inputs (as attach_labels does); index labels are ignored. This prevents a
-    reordered/mismatched index from silently pairing a close with the wrong band level — the previous
-    implementation mixed index-aligned comparisons with a positional validity mask.
-    """
-    if not (len(close) == len(upper) == len(lower)):
-        raise ValueError(
-            f"compute_band_state: length mismatch — "
-            f"close={len(close)}, upper={len(upper)}, lower={len(lower)}"
-        )
-    close_arr = np.asarray(close, dtype=np.float64)
-    upper_arr = np.asarray(upper, dtype=np.float64)
-    lower_arr = np.asarray(lower, dtype=np.float64)
-    state = np.zeros(len(close_arr), dtype=np.int8)
-    valid = np.isfinite(upper_arr) & np.isfinite(lower_arr)
-    state[(close_arr > upper_arr) & valid] = 1
-    state[(close_arr < lower_arr) & valid] = -1
-    return state
-
-
-def emit_three_class(ctl_labels: np.ndarray, band_state: np.ndarray) -> np.ndarray:
-    """Quasi-posterior 3-class label: ctl_label when band has signal, else 0.
-
-    The band acts as a **confidence gate, not a direction check**. The function takes the CTL label as the source of
-    truth for direction and only zeros it out when price sits inside the envelope. This means a CTL label can survive
-    a disagreement with band direction:
-
-        ctl_label = +1, band_state = +1  ->  +1   (agree, above upper band)
-        ctl_label = +1, band_state = -1  ->  +1   (CTL still says up; price just broke lower band but CTL hasn't flipped yet)
-        ctl_label = -1, band_state =  0  ->   0   (price inside band, gated to neutral)
-        ctl_label = NaN, band_state = +1 ->   0   (warmup CTL is treated as no-signal)
-
-    If you want sign-agreement semantics (zero out disagreements), do it at the caller.
-
-    Accepts ctl_labels as float64 (with NaN warmup, as produced by continuous_trend_labeling) or int8. Output is int8;
-    NaN bars map to 0.
-    """
-    if len(ctl_labels) != len(band_state):
-        raise ValueError(
-            f"emit_three_class: length mismatch — "
-            f"ctl_labels={len(ctl_labels)}, band_state={len(band_state)}"
-        )
-    ctl_arr = np.asarray(ctl_labels, dtype=np.float64)
-    ctl_safe = np.where(np.isnan(ctl_arr), 0, ctl_arr)
-    return np.where(band_state != 0, ctl_safe, 0).astype(np.int8)
-
-
-def attach_labels(df: pd.DataFrame, omega: float, band: BandParams,
-                  binary_col: str = "ctl_label",
-                  ternary_col: str = "ctl_label_3class") -> pd.DataFrame:
-    """Compute envelope + binary CTL + 3-class labels and attach to a copy of df.
-
-    Storage convention: the binary CTL label is the source-of-truth staging label; the 3-class column is a derived
-    quasi-posterior used by downstream models that want a 'confidence' interpretation.
-
-    Returns df with: 'ma', 'upper', 'lower', 'band_state', binary_col, ternary_col.
-
-    Note: any pre-existing columns named 'ma', 'upper', 'lower', 'band_state', `binary_col`, or `ternary_col` on the
-    input df are overwritten in the returned copy without warning.
-    """
-    out = df.copy()
-
-    out["upper"], out["ma"], out["lower"], _, _ = envelope(out["close"], out["high"], out["low"],
-        ma_period=band.ma_period, atr_period=band.atr_period, k_atr=band.k_atr)
-    ctl_raw = np.asarray(continuous_trend_labeling(out["close"], omega=omega), dtype=np.float64)
-    bs = compute_band_state(out["close"], out["upper"], out["lower"])
-    out["band_state"] = bs
-    # Persist binary CTL as int8 (warmup NaN -> 0) for stable downstream dtype.
-    out[binary_col] = np.where(np.isnan(ctl_raw), 0, ctl_raw).astype(np.int8)
-    out[ternary_col] = emit_three_class(ctl_raw, bs)
-    return out
-
-
-def _infer_tf_minutes(index: pd.DatetimeIndex) -> Optional[int]:
-    """Best-effort bar duration in minutes from a DatetimeIndex.
-
-    Uses index.freq when set, else median bar spacing — the latter is robust to weekend / holiday gaps in market data.
-    Returns None when there is not enough information (single bar, non-DatetimeIndex) or when the median spacing is below
-    one minute (sub-minute data should pass `tf_minutes` explicitly rather than relying on inference).
-    """
-    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
-        return None
-    if index.freq is not None:
-        try:
-            return int(pd.Timedelta(index.freq).total_seconds() / 60)
-        except (ValueError, TypeError):
-            pass
-    diffs = index.to_series().diff().dt.total_seconds().dropna() / 60
-    if diffs.empty:
-        return None
-    median_min = float(diffs.median())
-    if median_min < 1.0:
-        return None
-    return int(round(median_min))
-
-
-def apply_3class_labels(df: pd.DataFrame, omega: float, band: BandParams,
-                        persisted_tf_minutes: int = 15,
-                        tf_minutes: Optional[int] = None,
-                        binary_col: str = "ctl_label",
-                        ternary_col: str = "ctl_label_3class") -> pd.DataFrame:
-    """Attach binary CTL + 3-class labels using a pre-resolved (omega, band) config.
-
-    The caller is responsible for sourcing `omega`, `band`, and `persisted_tf_minutes` — typically from the
-    SymbolMetastore's `htf_ctl_3class_params` block, but this function has no opinion on the source. It only handles
-    label computation and the cross-TF rescaling of band bar-counts.
-
-    Scaling rule:
-      `ma_period` and `atr_period` are bar counts; they are scaled by `(persisted_tf_minutes / df_tf_minutes)` with
-      `math.ceil()` so the wall-clock window is never shorter than the calibration window. Example:
-      persisted `ma_period=480` at 15min = 7200-min window; on 5m bars that becomes 1440 bars (still 7200 min).
-      Edge case: `ma_period=3` at 15min scaled to 10m bars -> 3 * 1.5 = 4.5 -> ceil to 5 (rather than rounding to 4).
-
-      `omega` is a percentage threshold and does NOT scale. Note: applying the same omega at finer resolution will produce
-      more flips than at the calibration resolution, because finer close-price paths see more intermediate excursions.
-      If you need flip locations that match the calibration timeframe exactly, compute on calibration-TF bars and
-      forward-fill to your trading TF instead.
+    Columns:
+        ctl_direction    +1 up / -1 down / NaN warmup. Bar-for-bar identical to continuous_trend_labeling.
+        ctl_trend_age    Bars since the current leg started (0 on the leg's first bar). Trend persistence / maturity.
+        ctl_retrace_frac Pullback from the leg's favourable extreme as a fraction of omega. ~[0, 1): 0 while price
+                         hugs the extreme, approaching 1 as it nears the omega retrace that flips the leg (the flip
+                         bar resets the new leg to 0). Rarely exceeds 1 only when the pivot-ordering guard in the FSM
+                         defers an otherwise-due reversal. A continuous proximity-to-reversal signal.
+        ctl_leg_return   Signed % move from the leg's origin extreme to the current close — realised leg magnitude.
+        ctl_flip_count   Number of reversals within the trailing flip_window bars — choppiness / whipsaw detector.
 
     Args:
-      df: DataFrame with 'high', 'low', 'close' columns and a DatetimeIndex.
-      omega: CTL threshold (dimensionless percentage), as persisted upstream.
-      band: BandParams expressed at the persisted (calibration) timeframe.
-      persisted_tf_minutes: Bar duration of the calibration venue (e.g., 15
-        for "15min"). Defaults to 15 since that's the convention used by the
-        upstream optimizer.
-      tf_minutes: The bar duration of `df` in minutes. If None, inferred from
-        `df.index` via median spacing.
-      binary_col / ternary_col: Output column names.
-
-    Returns:
-      Copy of df with 'ma', 'upper', 'lower', 'band_state',
-      binary_col, ternary_col columns attached.
+        prices: Strictly-positive close prices (CTL's domain — omega is a % of price). Series or ndarray.
+        omega: CTL threshold (dimensionless percentage); same meaning as in continuous_trend_labeling.
+        flip_window: Trailing window (bars) for ctl_flip_count.
 
     Raises:
-      ValueError: if `tf_minutes` cannot be inferred and was not passed,
-        or if either persisted or input timeframe is non-positive.
-
-    Example caller (with the metastore lookup done outside the function):
-        block = metastore.get_property_value(server, 5, symbol, "htf_ctl_3class_params")
-        band = BandParams(**block["band"])
-        ts_min = int(pd.Timedelta(block["venue_freq"]).total_seconds() / 60)
-        labelled = apply_3class_labels(df_5m, omega=block["omega"], band=band,
-                                       persisted_tf_minutes=ts_min)
+        ValueError: non-finite prices, omega <= 0 (via CTLState), or flip_window < 1.
     """
-    if persisted_tf_minutes <= 0:
-        raise ValueError(f"persisted_tf_minutes must be positive, got {persisted_tf_minutes}")
+    is_series = isinstance(prices, pd.Series)
+    x = _as_finite_price_array(prices)  # strict finite (matches continuous_trend_labeling); only the live step is lenient
+    n = len(x)
+    index = prices.index if is_series else pd.RangeIndex(n)
 
-    if tf_minutes is None:
-        tf_minutes = _infer_tf_minutes(df.index)
-        if tf_minutes is None:
-            raise ValueError("Could not infer tf_minutes from df.index — "
-                             "pass tf_minutes explicitly.")
-    if tf_minutes <= 0:
-        raise ValueError(f"tf_minutes must be positive, got {tf_minutes}")
+    # Replay the SAME per-bar stepper used live, so this DataFrame and a streaming CTLFeatures sequence are identical
+    # by construction. CTLState validates omega (finite, > 0) and flip_window (>= 1).
+    state = CTLState(omega=float(omega), flip_window=flip_window)
+    rows = [state.step_features(float(x[i])) for i in range(n)]
 
-    scale = persisted_tf_minutes / tf_minutes
-    # Use ceil rather than round so the scaled wall-clock window is never shorter than the
-    # calibrated window. Banker's rounding (round-half-to-even) can shorten the lookback
-    # in edge cases (e.g., 4.5 -> 4), which destabilises the band in fine-TF inference.
-    scaled_band = BandParams(
-        ma_period=max(2, math.ceil(band.ma_period * scale)),
-        atr_period=max(2, math.ceil(band.atr_period * scale)),
-        k_atr=band.k_atr,
-    )
-    return attach_labels(df, omega=omega, band=scaled_band,
-                         binary_col=binary_col, ternary_col=ternary_col)
+    mat = np.array(rows, dtype=np.float64) if n else np.empty((0, len(CTLFeatures._fields)), dtype=np.float64)
+    return pd.DataFrame({name: mat[:, k] for k, name in enumerate(CTLFeatures._fields)}, index=index)

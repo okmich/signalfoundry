@@ -6,7 +6,7 @@ import numpy as np
 from numba import njit
 from numpy.typing import NDArray
 
-from .features import _validate_posterior_matrix, entropy, margin, rolling_flip_rate
+from .features import _require_integral, _validate_posterior_matrix, entropy, margin, rolling_flip_rate
 
 
 class AbstainMode(StrEnum):
@@ -145,7 +145,7 @@ class StabilityGateInferer:
     def __init__(self, theta_flip_rate: float = 0.20, window: int = 5,
                  abstain_mode: AbstainMode | str = AbstainMode.HOLD_LAST, abstain_label: int = 0) -> None:
         self.theta_flip_rate = float(theta_flip_rate)
-        self.window = int(window)
+        self.window = _require_integral(window, "window")
         self.abstain_mode = AbstainMode(abstain_mode)
         self.abstain_label = int(abstain_label)
         self._metadata: dict = {}
@@ -269,7 +269,8 @@ class ViterbiInferer:
 
     * ``with_uniform_smoothing(K, off_diagonal_cost)`` — uniform penalty on any label change.
     * ``from_transition_probabilities(transmat)`` — convert a row-stochastic matrix to cost via
-      ``-log(transmat + eps)``. Higher probability ⇒ lower cost.
+      ``-log(transmat)``. Higher probability ⇒ lower cost; exact-zero probability ⇒ ``+inf`` cost
+      (forbidden transition, never overridden by unary evidence).
     """
 
     def __init__(self, transition_cost: NDArray, observation_weight: float = 1.0,
@@ -277,12 +278,15 @@ class ViterbiInferer:
         cost = np.asarray(transition_cost, dtype=float)
         if cost.ndim != 2 or cost.shape[0] != cost.shape[1] or cost.shape[0] < 2:
             raise ValueError(f"transition_cost must be a (K, K) matrix with K >= 2, got shape={cost.shape}")
-        if not np.isfinite(cost).all():
-            raise ValueError("transition_cost contains NaN or Inf values.")
-        if float(observation_weight) <= 0.0:
-            raise ValueError(f"observation_weight must be > 0, got {observation_weight}")
-        if float(eps) <= 0.0:
-            raise ValueError(f"eps must be > 0, got {eps}")
+        if np.isnan(cost).any() or (cost == -np.inf).any():
+            raise ValueError(
+                "transition_cost contains NaN or -Inf values. +Inf is allowed and marks a forbidden "
+                "transition; NaN and -Inf are never valid costs."
+            )
+        if not (np.isfinite(float(observation_weight)) and float(observation_weight) > 0.0):
+            raise ValueError(f"observation_weight must be finite and > 0, got {observation_weight}")
+        if not (np.isfinite(float(eps)) and float(eps) > 0.0):
+            raise ValueError(f"eps must be finite and > 0, got {eps}")
         self.transition_cost = cost
         self.observation_weight = float(observation_weight)
         self.eps = float(eps)
@@ -306,11 +310,24 @@ class ViterbiInferer:
         rows = np.arange(T)
         total_unary = float(unary[rows, path].sum())
         total_trans = float(self.transition_cost[path[:-1], path[1:]].sum()) if T > 1 else 0.0
+        total_path_cost = total_unary + total_trans
+        if not np.isfinite(total_path_cost):
+            # +Inf transition costs are legitimate (forbidden transitions, see
+            # from_transition_probabilities), but if every candidate path is forced to cross at
+            # least one of them, the DP's final-row frontier is entirely +Inf and np.argmin ties
+            # on index 0 — silently returning a path whose true cost is infinite rather than
+            # signaling that no feasible label sequence exists under this transition_cost.
+            raise ValueError(
+                "ViterbiInferer.infer: no finite-cost label sequence exists under this "
+                "transition_cost — every candidate path is forced to cross at least one forbidden "
+                "(+inf-cost) transition. Inspect transition_cost for over-restrictive zeros, or "
+                "verify the posterior evidence is consistent with the model's transition structure."
+            )
         self._metadata = {
             "inferer": "ViterbiInferer", "n_states": int(K), "n_bars": int(T),
             "observation_weight": self.observation_weight,
             "total_unary_cost": total_unary, "total_transition_cost": total_trans,
-            "total_path_cost": total_unary + total_trans,
+            "total_path_cost": total_path_cost,
         }
         return path
 
@@ -332,12 +349,20 @@ class ViterbiInferer:
     @classmethod
     def from_transition_probabilities(cls, transmat: NDArray, observation_weight: float = 1.0,
                                       eps: float = 1e-12, row_sum_tol: float = 1e-6) -> ViterbiInferer:
-        """Build by converting a row-stochastic transmat to cost via ``-log(transmat + eps)``.
+        """Build by converting a row-stochastic transmat to cost via ``-log(transmat)``.
 
         Validates that ``transmat`` is finite, non-negative, and that each row sums to 1 within
         ``row_sum_tol``. Non-stochastic rows silently producing valid-looking transition costs would
         bias the decoded path, so this method is strict — pass an explicit ``transition_cost`` to
         the constructor if you need arbitrary cost matrices.
+
+        Exact-zero entries map to ``+inf`` cost rather than an ``eps``-clipped finite value: this is
+        MAP decoding under the model's own transition matrix, so a transition the model assigns zero
+        probability must stay forbidden regardless of how confident the unary (posterior) evidence
+        is for the destination state. Clipping zero to ``eps`` before taking ``-log`` would instead
+        make the transition merely expensive, letting a strong enough unary term buy its way across
+        a model-impossible edge. A row-stochastic transmat guarantees every row has at least one
+        non-zero entry, so this never produces an all-``inf`` row that would strand the decoder.
         """
         a = np.asarray(transmat, dtype=float)
         if a.ndim != 2 or a.shape[0] != a.shape[1] or a.shape[0] < 2:
@@ -353,7 +378,9 @@ class ViterbiInferer:
                 f"transmat rows must sum to 1 within {row_sum_tol} (max deviation {max_dev:.3e}); "
                 f"non-stochastic rows would silently produce biased transition costs."
             )
-        cost = -np.log(np.clip(a, eps, None))
+        nonzero = a > 0.0
+        cost = np.full(a.shape, np.inf, dtype=float)
+        cost[nonzero] = -np.log(a[nonzero])
         return cls(cost, observation_weight=observation_weight, eps=eps)
 
 
@@ -366,25 +393,34 @@ def _confidence_weighted_mode_scores(probs: np.ndarray, argmax: np.ndarray, wind
     mean(probs[t', k] for t' in window where argmax[t'] == k) ^ ``confidence_weight``.
 
     Causal: the window is ``[max(0, t - window + 1), t]``; warmup uses an expanding effective window.
+
+    O(T*K): maintains a running per-state count and probability-sum over the trailing window,
+    adding the incoming bar and removing the bar that just fell out of the window at each step,
+    rather than rescanning the whole window per (t, k) — equivalent to the O(T*K*window) triple
+    loop this replaces, since each bar is added and removed exactly once per state.
     """
     T, K = probs.shape
     scores = np.zeros((T, K), dtype=np.float64)
+    counts = np.zeros(K, dtype=np.int64)
+    prob_sums = np.zeros(K, dtype=np.float64)
     for t in range(T):
-        start = t - window + 1
-        if start < 0:
-            start = 0
+        k_in = argmax[t]
+        counts[k_in] += 1
+        prob_sums[k_in] += probs[t, k_in]
+
+        out_idx = t - window
+        if out_idx >= 0:
+            k_out = argmax[out_idx]
+            counts[k_out] -= 1
+            prob_sums[k_out] -= probs[out_idx, k_out]
+
         for k in range(K):
-            count = 0
-            prob_sum = 0.0
-            for u in range(start, t + 1):
-                if argmax[u] == k:
-                    count += 1
-                    prob_sum += probs[u, k]
+            count = counts[k]
             if count > 0:
                 if confidence_weight == 0.0:
                     scores[t, k] = float(count)
                 else:
-                    mean_prob = prob_sum / count
+                    mean_prob = prob_sums[k] / count
                     scores[t, k] = float(count) * (mean_prob ** confidence_weight)
     return scores
 
@@ -408,7 +444,7 @@ class ConfidenceWeightedModeInferer:
 
     def __init__(self, window: int = 7, confidence_weight: float = 1.0, min_score_threshold: float = 0.0,
                  abstain_mode: AbstainMode | str = AbstainMode.HOLD_LAST, abstain_label: int = 0) -> None:
-        self.window = int(window)
+        self.window = _require_integral(window, "window")
         self.confidence_weight = float(confidence_weight)
         self.min_score_threshold = float(min_score_threshold)
         self.abstain_mode = AbstainMode(abstain_mode)
@@ -416,10 +452,10 @@ class ConfidenceWeightedModeInferer:
         self._metadata: dict = {}
         if self.window < 1:
             raise ValueError(f"window must be >= 1, got {self.window}")
-        if self.confidence_weight < 0.0:
-            raise ValueError(f"confidence_weight must be >= 0, got {self.confidence_weight}")
-        if self.min_score_threshold < 0.0:
-            raise ValueError(f"min_score_threshold must be >= 0, got {self.min_score_threshold}")
+        if not (np.isfinite(self.confidence_weight) and self.confidence_weight >= 0.0):
+            raise ValueError(f"confidence_weight must be finite and >= 0, got {self.confidence_weight}")
+        if not (np.isfinite(self.min_score_threshold) and self.min_score_threshold >= 0.0):
+            raise ValueError(f"min_score_threshold must be finite and >= 0, got {self.min_score_threshold}")
 
     def infer(self, probs: NDArray) -> NDArray:
         p = _validate_posterior_matrix(probs, "ConfidenceWeightedModeInferer")
@@ -512,10 +548,10 @@ class ConfidenceHysteresisInferer:
     def __init__(self, entry_threshold: float = 1.0, exit_threshold: float = 1.0) -> None:
         self.entry_threshold = float(entry_threshold)
         self.exit_threshold = float(exit_threshold)
-        if self.entry_threshold <= 0.0:
-            raise ValueError(f"entry_threshold must be > 0, got {self.entry_threshold}")
-        if self.exit_threshold <= 0.0:
-            raise ValueError(f"exit_threshold must be > 0, got {self.exit_threshold}")
+        if not (np.isfinite(self.entry_threshold) and self.entry_threshold > 0.0):
+            raise ValueError(f"entry_threshold must be finite and > 0, got {self.entry_threshold}")
+        if not (np.isfinite(self.exit_threshold) and self.exit_threshold > 0.0):
+            raise ValueError(f"exit_threshold must be finite and > 0, got {self.exit_threshold}")
         self._metadata: dict = {}
 
     def infer(self, probs: NDArray) -> NDArray:

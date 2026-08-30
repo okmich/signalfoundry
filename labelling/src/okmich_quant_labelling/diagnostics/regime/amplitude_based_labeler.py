@@ -542,3 +542,62 @@ def optimize_amplitude_base_labeler_parameters(df: pd.DataFrame, price_col: str 
 
     best_params = results_df.iloc[0, :4].to_dict()
     return best_params, results_df
+
+
+_CUMSUM_UNIT = 1e-4   # fixed, NOT data-derived: bounds the exponent and sets minamp's units
+
+
+def vol_normalized_price(close, vol_window: int):
+    """Synthetic price whose returns are normalised by trailing volatility.
+
+    WHY: ``AmplitudeBasedLabeler``'s ``minamp`` is an ABSOLUTE threshold on cumulative log-return. That
+    silently assumes the series is amplitude-stationary -- "a 112 bps move" means the same thing in every
+    year. It does not. Measured on FXPIG 5m over ~3 years (18 symbols, calibrate on one 80k window and
+    apply the SAME parameter to a disjoint 80k window), a fixed-bps minamp drifts badly: 11 of 18 symbols
+    move their q5 duration by more than 65%, XAUUSD by 3.6x. Normalising returns by trailing sigma cuts
+    the mean |log(q5_B/q5_A)| from 0.505 to 0.235 and reduces the badly-drifting set from 11 symbols to 1.
+
+    Feeding the result to ``label(price_col=...)`` turns ``minamp`` into a threshold in CUMULATIVE SIGMA
+    UNITS (x ``scale``), so the yardstick scales with the market instead of against it.
+
+    DELIBERATELY has no reference-sigma constant. An earlier draft used ``sigma_ref = sigma.median()``,
+    which makes the transform depend on WHICH window you pass -- a stored ``minamp`` would then mean
+    different things on different slices, reintroducing the very non-stationarity this removes. Here the
+    output is a pure function of ``(close, vol_window)``, so calibration and generation cannot diverge and
+    only ``vol_window`` needs to be persisted. (Dropping the constant only rescales the ``minamp`` axis;
+    it leaves every stability ratio unchanged.)
+
+    The warm-up rule is part of the contract and must not be "tidied": the first ``vol_window`` bars have
+    no sigma and are back-filled with the first valid one. Change it and labels shift at the head of the
+    series relative to whatever was calibrated.
+
+    NOTE this is volatility-RELATIVE by design. Since a regime substrate carries its own volatility axis,
+    normalising here stops the direction label from implicitly re-encoding volatility level.
+
+    :param close: price series
+    :param vol_window: trailing window (bars) for the volatility estimate -- the ONLY stored parameter
+    :return: synthetic price series, same index
+    """
+    import numpy as _np
+    import pandas as _pd
+
+    close = _pd.Series(close).astype(float)
+    if int(vol_window) < 2:
+        raise ValueError(f"vol_window must be >= 2, got {vol_window}")
+    r = _np.log(close).diff()
+    sigma = r.rolling(int(vol_window), min_periods=int(vol_window)).std()
+    sigma = sigma.bfill()                                   # warm-up: first valid sigma
+    sigma = sigma.replace(0.0, _np.nan).ffill().bfill()      # flat stretches must not divide by zero
+    u = (r / sigma).replace([_np.inf, -_np.inf], _np.nan).fillna(0.0)
+    # Keep the exponent bounded. u is ~unit-variance, so cumsum(u) is a random walk that over ~200k bars
+    # reaches several hundred -- and exp(>709) overflows to inf in float64 (observed: XAUUSD full history
+    # produced a non-finite series and 42% label disagreement). Scaling by a FIXED unit prevents it.
+    # Paired with the labeller's conventional scale=1e4 this also makes `minamp` land directly in
+    # CUMULATIVE SIGMA UNITS. The constant is fixed in code and never derived from the data, so it cannot
+    # reintroduce the window-dependence that removing sigma_ref was meant to eliminate.
+    px = _np.exp(u.cumsum() * _CUMSUM_UNIT)
+    if not _np.isfinite(px.to_numpy()).all():
+        raise FloatingPointError(
+            "vol_normalized_price produced non-finite values -- the cumulative sigma path overflowed. "
+            "Fail loudly rather than hand a silently broken series to the labeller.")
+    return px

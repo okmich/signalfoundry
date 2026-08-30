@@ -229,6 +229,10 @@ def test_screener_passthrough_collision_emits_warning_and_keeps_engineered_value
         out["log_rets_smooth_24"] = log_rets.ewm(span=24, adjust=False).mean()
         return out
 
+    # NB: Stage-0b persistence removal is off by default (min_persistence=0.0), which this test relies on.
+    # The engineered "close" here is a z-score of iid synthetic log-returns (persistence score ~0.013), so
+    # enabling the floor would legitimately drop it before subset generation and the collision could never
+    # occur. This test is about passthrough-name collision, which is orthogonal to persistence.
     config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2,
                                data_size=400, random_state=42)
     screener = HmmFeatureScreener(config, raw, fe)

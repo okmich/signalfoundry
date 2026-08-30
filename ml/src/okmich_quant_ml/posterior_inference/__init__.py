@@ -16,6 +16,8 @@ pattern — ``O(window)`` memory, correct results) or (b) wait for a future ``tr
 API to be added. Single-row calls without trailing context will produce results that materially diverge from batch.
 """
 
+from .adaptive_lag import AdaptiveLagResult, AdaptiveLagInferer, StabilityCriterion, compute_trajectories,\
+    lag_commitment_audit
 from .diagnostics import CalibrationRecommendation, CalibrationReport, DynamicsReport, SmoothingRecommendation,\
     posterior_calibration_report, recommend_calibration, recommend_smoothing, summarize_posterior_dynamics
 from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
@@ -39,6 +41,11 @@ __all__ = [
     "PosteriorTransformer",
     "PosteriorInferer",
     "PosteriorPipeline",
+    "AdaptiveLagInferer",
+    "AdaptiveLagResult",
+    "StabilityCriterion",
+    "compute_trajectories",
+    "lag_commitment_audit",
     "AbstainMode",
     "ArgmaxInferer",
     "MarginGateInferer",

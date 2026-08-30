@@ -22,8 +22,8 @@ from enum import StrEnum
 import numpy as np
 from numpy.typing import NDArray
 
-from .features import _validate_posterior_matrix, _validate_window, dwell_length, rolling_entropy_std,\
-    rolling_max_prob_std, step_kl
+from .features import _require_integral, _validate_posterior_matrix, _validate_window, dwell_length,\
+    rolling_entropy_std, rolling_max_prob_std, step_kl
 
 
 # ---------------------------------------------------------------------------
@@ -89,26 +89,6 @@ def _stationary_distribution(transmat: NDArray) -> NDArray:
             "the chain is numerically ill-conditioned."
         )
     return pi / total
-
-
-def _require_simplex_rows(probs: NDArray, func_name: str, row_sum_tol: float = 1e-6) -> None:
-    """Reject row-sum drift beyond ``row_sum_tol``.
-
-    ``_validate_posterior_matrix`` with ``normalize=False`` enforces non-negativity and finiteness
-    but does NOT check that rows sum to 1. For a diagnostic audit this is the wrong default — silently
-    accepting non-simplex rows would let entropy / KL / top-prob volatility be computed on corrupted
-    upstream output. The audits use this helper after validation to surface the problem instead.
-    """
-    if probs.size == 0:
-        return
-    row_sums = probs.sum(axis=1)
-    max_dev = float(np.abs(row_sums - 1.0).max())
-    if max_dev > row_sum_tol:
-        raise ValueError(
-            f"{func_name}: posterior rows must sum to 1 (max deviation {max_dev:.3e} > {row_sum_tol}); "
-            f"this is a diagnostic audit and silently normalising bad input would mask upstream "
-            f"model corruption."
-        )
 
 
 def _bin_indices(values: NDArray, n_bins: int) -> NDArray:
@@ -184,8 +164,7 @@ def summarize_posterior_dynamics(probs: NDArray, window: int = 20,
     is then infinite.
     """
     p = _validate_posterior_matrix(probs, "summarize_posterior_dynamics")
-    _require_simplex_rows(p, "summarize_posterior_dynamics")
-    _validate_window(window, "summarize_posterior_dynamics")
+    window = _validate_window(window, "summarize_posterior_dynamics")
     T, K = p.shape
     if T < 2:
         raise ValueError(
@@ -322,7 +301,6 @@ def posterior_calibration_report(probs: NDArray, y_idx: NDArray, n_bins: int = 1
     plotting code should treat them as gaps rather than zeros.
     """
     p = _validate_posterior_matrix(probs, "posterior_calibration_report")
-    _require_simplex_rows(p, "posterior_calibration_report")
     T, K = p.shape
     y_raw = np.asarray(y_idx)
     if y_raw.ndim != 1:
@@ -347,6 +325,7 @@ def posterior_calibration_report(probs: NDArray, y_idx: NDArray, n_bins: int = 1
             "posterior_calibration_report: degenerate calibration set — y_idx contains only one class; "
             "calibration is undefined."
         )
+    n_bins = _require_integral(n_bins, "posterior_calibration_report: n_bins")
     if n_bins < 2:
         raise ValueError(f"posterior_calibration_report: n_bins must be >= 2, got {n_bins}.")
 
@@ -468,13 +447,14 @@ def recommend_smoothing(report: DynamicsReport, *, flip_rate_excess_threshold: f
     lacks transmat-conditional fields (``transmat`` was not supplied to
     ``summarize_posterior_dynamics``).
     """
-    if flip_rate_excess_threshold <= 0.0:
+    if not (np.isfinite(flip_rate_excess_threshold) and flip_rate_excess_threshold > 0.0):
         raise ValueError(
-            f"recommend_smoothing: flip_rate_excess_threshold must be > 0, got {flip_rate_excess_threshold}."
+            f"recommend_smoothing: flip_rate_excess_threshold must be finite and > 0, "
+            f"got {flip_rate_excess_threshold}."
         )
-    if dwell_ratio_threshold <= 0.0:
+    if not (np.isfinite(dwell_ratio_threshold) and dwell_ratio_threshold > 0.0):
         raise ValueError(
-            f"recommend_smoothing: dwell_ratio_threshold must be > 0, got {dwell_ratio_threshold}."
+            f"recommend_smoothing: dwell_ratio_threshold must be finite and > 0, got {dwell_ratio_threshold}."
         )
     if report.flip_rate_excess is None or report.dwell_length_ratio is None:
         return SmoothingRecommendation.UNKNOWN
@@ -507,11 +487,11 @@ def recommend_calibration(report: CalibrationReport, *, ece_threshold: float = 0
        1-parameter fix is preferred to avoid overfitting on small calibration
        sets.
     """
-    if ece_threshold <= 0.0:
-        raise ValueError(f"recommend_calibration: ece_threshold must be > 0, got {ece_threshold}.")
-    if dispersion_threshold <= 0.0:
+    if not (np.isfinite(ece_threshold) and ece_threshold > 0.0):
+        raise ValueError(f"recommend_calibration: ece_threshold must be finite and > 0, got {ece_threshold}.")
+    if not (np.isfinite(dispersion_threshold) and dispersion_threshold > 0.0):
         raise ValueError(
-            f"recommend_calibration: dispersion_threshold must be > 0, got {dispersion_threshold}."
+            f"recommend_calibration: dispersion_threshold must be finite and > 0, got {dispersion_threshold}."
         )
     if report.ece <= ece_threshold:
         return CalibrationRecommendation.NONE

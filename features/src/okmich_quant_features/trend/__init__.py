@@ -5,9 +5,15 @@ Directional regime labels
   continuous_trend_labeling      Price-action state machine; +1 / -1 / 0
   trend_persistence_labeling     Vol-normalised drift; +1 / -1 / 0
 
+CTL causal feature bundle (from the price-action state machine)
+---------------------------------------------------------------
+  ctl_trend_features             Per-bar DataFrame: direction, trend age, retrace-to-flip, leg return, flip count
+  CTLFeatures                    NamedTuple row of the bundle (fields == ctl_trend_features columns)
+
 Streaming CTL (O(1) per-bar; live/online use)
 ---------------------------------------------
   CTLState                       Persistent state mirroring continuous_trend_labeling's machine
+  CTLState.step_features         Advance one bar; return the full CTLFeatures bundle (live twin of ctl_trend_features)
   ctl_step                       Advance the state by one bar; returns the bar's label
   ctl_warm_up                    Replay a history once, return the live state for incremental stepping
   ctl_streaming_replay           Replay a series through the FSM (equivalence harness / batch parity)
@@ -46,7 +52,8 @@ import pandas as pd
 import numpy as np
 
 from .channels import bollinger_band, envelope, keltner_channels
-from .continuous_trend import CTLState, continuous_trend_labeling, ctl_step, ctl_streaming_replay, ctl_warm_up
+from .continuous_trend import CTLFeatures, CTLState, continuous_trend_labeling, ctl_step, ctl_streaming_replay, \
+                              ctl_trend_features, ctl_warm_up
 from .normalized_ma import MovingAverageType, ma_slope_norm, norm_dema, norm_ema, norm_lwma, norm_moving_average, \
                             norm_sma, norm_smma, norm_tema, norm_vwap
 from .trend_persistence import trend_persistence_labeling
@@ -55,7 +62,7 @@ from .z_score_trend import zscore_trend_features
 
 def core_trend_features(df: pd.DataFrame,
     bb_window: int = 24, bb_deviation_up: float = 2.0, bb_deviation_down: float = 2.0,
-    continuous_omega: float = 0.15,
+    continuous_omega: float = 0.15, continuous_flip_window: int = 20,
     persistence_window: int = 20, persistence_smooth: int = 5, persistence_zscore_norm: bool = True,
     zscore_window: int = 30, zscore_deriv_window: int = 5, close_col: str = "close") -> pd.DataFrame:
     result = pd.DataFrame(index=df.index)
@@ -72,8 +79,12 @@ def core_trend_features(df: pd.DataFrame,
     result[f"bb_percent_b_{bb_window}"] = bb_percent_b
     result[f"bb_width_{bb_window}"] = bb_width
 
-    result[f"continuous_trend_{continuous_omega}".replace(".", "_")] = \
-        continuous_trend_labeling(close_price, omega=continuous_omega)
+    # Causal CTL feature bundle (direction + trend age/retrace/leg-return/flip-count), omega-tagged per the
+    # per-parameter column-naming convention used by the bb_ / trend_persistence_ / zscore_ groups above/below.
+    ctl_df = ctl_trend_features(close_price, omega=continuous_omega, flip_window=continuous_flip_window)
+    omega_tag = f"{continuous_omega}".replace(".", "_")
+    for col in ctl_df.columns:
+        result[f"{col}_{omega_tag}"] = ctl_df[col]
 
     result[f"trend_persistence_{persistence_window}_{persistence_smooth}"] = (
         trend_persistence_labeling(close_price, window=persistence_window, smooth=persistence_smooth,
@@ -91,6 +102,9 @@ __all__ = [
     # Directional labels
     "continuous_trend_labeling",
     "trend_persistence_labeling",
+    # CTL causal feature bundle
+    "ctl_trend_features",
+    "CTLFeatures",
     # Streaming CTL (live/online)
     "CTLState",
     "ctl_step",

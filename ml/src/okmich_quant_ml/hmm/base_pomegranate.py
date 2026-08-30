@@ -25,7 +25,8 @@ class BasePomegranateHMM(ABC):
     _REMOVED_HSMM_KWARGS: frozenset = frozenset({"duration_model", "duration_type", "max_duration"})
 
     def __init__(self, distribution_type: DistType, n_states: int = 2, *, random_state: int = 100,
-                 max_iter: int = 100, inference_mode: Optional[InferenceMode] = None, **dist_kwargs):
+                 max_iter: int = 100, n_restarts: int = 1, inference_mode: Optional[InferenceMode] = None,
+                 **dist_kwargs):
         """
         Parameters
         ----------
@@ -34,6 +35,12 @@ class BasePomegranateHMM(ABC):
             Initial / fixed number of hidden states.
         max_iter : int
             Maximum number of iterations for EM algorithm (default: 100)
+        n_restarts : int, default 1
+            Number of independent EM restarts, each from a distinct k-means seed; the fit with the
+            highest training log-likelihood is kept. 1 preserves the historical single-fit behaviour.
+            Use >1 when the fit sits on a knife-edge between local optima (a tiny data change flips the
+            basin) — selecting the max-LL restart lands consistently in the dominant basin. (The
+            categorical HHMM has its own best-of-N via ``n_init``; this governs the continuous EM path.)
         inference_mode : InferenceMode, default=InferenceMode.FILTERING
             Inference algorithm to use for predictions:
             - FILTERING: Forward algorithm only (no look-ahead bias)
@@ -53,6 +60,7 @@ class BasePomegranateHMM(ABC):
         self.n_states = n_states
         self.random_state = random_state
         self.max_iter = max_iter
+        self.n_restarts = max(1, int(n_restarts))
         self.inference_mode = inference_mode if inference_mode is not None else InferenceMode.FILTERING
         self.dist_kwargs = dist_kwargs
         self._model: Optional[DenseHMM] = None
@@ -105,34 +113,69 @@ class BasePomegranateHMM(ABC):
         if not np.all(np.isfinite(X_all)):
             raise ValueError("X contains NaN or Inf values. Clean input data before fitting.")
 
+        # Invalidate any prior fit up front. Otherwise a refit that fails on every restart raises but
+        # leaves the PREVIOUS window's model live in self._model -- a caught failure in a rolling backtest
+        # would then serve stale predictions from the old window instead of erroring.
+        self._model = None
+
         original_seed = self.random_state
+        best_ll, best_model, last_error = -np.inf, None, None
+        try:
+            # Each restart is a distinct initialisation; +1000 spacing keeps a restart's seed clear of
+            # the +attempt covariance-retry seeds used inside a single start. n_restarts=1 reproduces the
+            # historical single-fit path exactly (one start, same seeds).
+            for restart in range(self.n_restarts):
+                model, err = self._fit_single_start(X_list, X_all, original_seed + 1000 * restart)
+                if model is None:
+                    last_error = err
+                    continue
+                ll = self._fitted_log_prob(model, X_list)
+                if np.isfinite(ll) and ll > best_ll:
+                    best_ll, best_model = ll, model
+        finally:
+            self.random_state = original_seed  # never leak a perturbed seed to the caller
+
+        if best_model is None:
+            raise RuntimeError(
+                f"EM fitting failed across {self.n_restarts} restart(s), each retried "
+                f"{self._FIT_MAX_RETRIES}x, due to covariance/Cholesky errors. "
+                f"Last error: {type(last_error).__name__}: {last_error}"
+            ) from last_error
+        self._model = best_model
+        return self
+
+    def _fit_single_start(self, X_list, X_all, start_seed: int):
+        """One initialisation: k-means init + build + EM, with covariance-error retries.
+
+        Returns ``(fitted_model, None)`` on success, or ``(None, last_error)`` when every covariance
+        retry for this start was exhausted. Non-covariance errors propagate — they are bugs, not the
+        near-singular-covariance condition the retries exist to absorb.
+        """
         last_error = None
         for attempt in range(self._FIT_MAX_RETRIES):
-            self.random_state = original_seed + attempt
+            self.random_state = start_seed + attempt
             self._kmeans_stats = self._compute_kmeans_init(X_all)
-            self._model = self._build_model()
-
+            model = self._build_model()
             try:
-                self._model.fit(X_list)
-                # Success — restore original seed for reproducibility and return
-                self.random_state = original_seed
+                model.fit(X_list)
                 del self._kmeans_stats
-                return self
+                return model, None
             except (np.linalg.LinAlgError, AttributeError, RuntimeError) as e:
+                del self._kmeans_stats
                 if not self._is_covariance_error(e):
-                    self.random_state = original_seed
-                    del self._kmeans_stats
                     raise
                 last_error = e
-                self._model = None
+        return None, last_error
 
-        # All retries exhausted — restore original seed and raise
-        self.random_state = original_seed
-        del self._kmeans_stats
-        raise RuntimeError(
-            f"EM fitting failed after {self._FIT_MAX_RETRIES} attempts due to covariance/Cholesky errors. "
-            f"Last error: {type(last_error).__name__}: {last_error}"
-        ) from last_error
+    @staticmethod
+    def _fitted_log_prob(model, X_list) -> float:
+        """Total training log-likelihood of a fitted DenseHMM over the sequence list (restart score)."""
+        lp = model.log_probability(X_list)
+        if hasattr(lp, "sum"):
+            lp = lp.sum()
+        if hasattr(lp, "item"):
+            lp = lp.item()
+        return float(lp)
 
     @staticmethod
     def _is_covariance_error(e: Exception) -> bool:
@@ -154,14 +197,17 @@ class BasePomegranateHMM(ABC):
 
         - FILTERING: argmax of filtered probabilities (causal)
         - SMOOTHING: argmax of smoothed probabilities (non-causal)
-        - VITERBI: most likely state sequence (Viterbi algorithm)
+        - VITERBI: most likely state sequence (Viterbi algorithm, non-causal - backward traceback)
+        - CAUSAL_VITERBI: terminal state of the most likely path so far (causal, no traceback)
         """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
 
         X = self._preprocess_input(X)
 
-        if self.inference_mode == InferenceMode.VITERBI:
+        if self.inference_mode == InferenceMode.CAUSAL_VITERBI:
+            return self.predict_causal_viterbi(X)
+        elif self.inference_mode == InferenceMode.VITERBI:
             predictions = self._model.predict([X]).flatten()
             # Convert torch tensor to numpy
             if hasattr(predictions, "detach"):
@@ -185,16 +231,21 @@ class BasePomegranateHMM(ABC):
 
         - FILTERING: filtered probabilities using only observations up to time t (causal)
         - SMOOTHING: smoothed probabilities using all observations (non-causal)
-        - VITERBI: raises ValueError (not applicable for probabilities)
+        - VITERBI / CAUSAL_VITERBI: raises ValueError (not applicable for probabilities)
         """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
 
         X = self._preprocess_input(X)
 
-        if self.inference_mode == InferenceMode.VITERBI:
+        if self.inference_mode in (InferenceMode.VITERBI, InferenceMode.CAUSAL_VITERBI):
+            # Both Viterbi members score PATHS, not per-bar states. The max-product frontier
+            # log_delta[t] is a vector of path log-probabilities; normalising it would produce
+            # something that looks like a posterior, sums to 1, and is not one. Callers wanting a
+            # causal distribution want FILTERING; callers wanting the path confidence should read
+            # causal_viterbi_scores() and take a within-row margin.
             raise ValueError(
-                "predict_proba() is not applicable with inference_mode=VITERBI. "
+                f"predict_proba() is not applicable with inference_mode={self.inference_mode.name}. "
                 "Use predict() instead, or set inference_mode to FILTERING or SMOOTHING."
             )
 
@@ -490,6 +541,99 @@ class BasePomegranateHMM(ABC):
         for t in range(1, T):
             log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
         return log_alpha
+
+    @staticmethod
+    def _max_product_forward_pass(log_pi: np.ndarray, log_A: np.ndarray, log_B: np.ndarray) -> np.ndarray:
+        """Viterbi (max-product) forward log-delta, shape ``(T, K)``.
+
+        ``log_delta[t, k]`` is the log-probability of the single most likely state path that ends in
+        state ``k`` at bar ``t``, jointly with the observations ``o_0 ... o_t``::
+
+            log_delta[t, k] = max over q_0..q_{t-1} of log P(q_0..q_{t-1}, q_t = k, o_0..o_t)
+
+        This is :meth:`_forward_pass` with exactly one operator changed - ``np.max`` in place of
+        ``np.logaddexp.reduce``. The sum-product version marginalises over every path prefix and
+        yields the filtered belief; this one maximises over them and yields the best prefix path. The
+        conditioning set is identical (``o_0 ... o_t``), so **both are causal**; they differ only in
+        how the prefix is aggregated.
+
+        No backpointers are stored, because nothing traces back. That is deliberate: the traceback is
+        the sole source of Viterbi's non-causality, and omitting it is what makes this usable live.
+
+        ``-inf`` entries in ``log_A`` mark forbidden transitions and propagate correctly through
+        ``np.max``; callers must check for an all-``-inf`` row rather than trusting ``argmax``, which
+        would silently tie on index 0 (see :meth:`predict_causal_viterbi`).
+
+        Values are unnormalised joint log-probabilities and decrease roughly linearly in ``T``. Only
+        differences within a row are meaningful - ``argmax`` is invariant to any per-row shift - and
+        float64 carries the magnitude comfortably for sequences far longer than any used here.
+        """
+        T, K = log_B.shape
+        log_delta = np.empty((T, K), dtype=np.float64)
+        log_delta[0] = log_pi + log_B[0]
+        for t in range(1, T):
+            log_delta[t] = np.max(log_delta[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
+        return log_delta
+
+    def causal_viterbi_scores(self, X: np.ndarray) -> np.ndarray:
+        """Max-product forward scores ``log_delta``, shape ``(T, K)``. See :meth:`predict_causal_viterbi`.
+
+        Exposed for diagnostics - the within-row gap between the best and second-best state is the
+        margin by which the incumbent path is winning, which is the natural confidence measure for
+        this decoder. These are path log-probabilities, **not** a distribution over states: they do
+        not normalise to 1 and must not be fed to anything expecting a posterior.
+        """
+        if self._model is None:
+            raise RuntimeError("Model has not been fitted. Call fit() before causal_viterbi_scores().")
+        X = np.asarray(X)
+        if X.size == 0:
+            raise ValueError("X must not be empty")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X contains NaN or Inf values. Clean input data before calling causal_viterbi_scores.")
+        X = self._preprocess_input(X)
+        log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+        return self._max_product_forward_pass(log_pi, log_A, log_B)
+
+    def predict_causal_viterbi(self, X: np.ndarray) -> np.ndarray:
+        """Causal MAP-path labels, shape ``(T,)``. ``label[t] = argmax_k log_delta[t, k]``.
+
+        The Viterbi-family member that is safe to trade. At each bar it reports the terminal state of
+        the most likely path over ``o_0 ... o_t``; it never revisits a label once emitted.
+
+        **Prefix consistency.** ``predict_causal_viterbi(X[:t+1])[-1] == predict_causal_viterbi(X)[t]``
+        for every ``t``. Standard Viterbi fails this badly: its backward traceback rewrites earlier
+        labels whenever a competing path overtakes later, so a label read live and the same label read
+        from a completed backtest can disagree. That divergence is invisible in aggregate metrics.
+
+        **Equivalent to expanding-window Viterbi, at streaming cost.** Running full Viterbi on
+        ``o_0..o_t`` and keeping only its last element gives exactly this label, because Viterbi's
+        termination step *is* ``argmax_k delta_t(k)``; the traceback only rewrites bars strictly before
+        ``t``, which the expanding window discards anyway. The naive construction costs ``O(T^2 K^2)``;
+        this costs ``O(K^2)`` per bar with ``O(K)`` state.
+
+        **Versus FILTERING.** Same information set, different aggregation over path prefixes - sum
+        versus max. Taking the max means a challenger state must overcome both the incumbent's
+        accumulated path advantage and the transition penalty ``log(a_ii / a_ij)`` to take over, which
+        produces persistence derived from the fitted transition matrix rather than from a tuned
+        threshold. Expect longer dwell and fewer label flips than ``argmax`` of the filtered posterior.
+
+        **What it gives up.** It is a worse *historical* labeller than SMOOTHING or VITERBI, and that
+        is not a defect - it is the price of not using data that had not arrived yet. When a competing
+        path overtakes later, the smoother corrects history and this decoder does not.
+        """
+        log_delta = self.causal_viterbi_scores(X)
+        dead = np.isneginf(log_delta).all(axis=1)
+        if dead.any():
+            # Mirrors the guard in posterior_inference.ViterbiInferer: -inf transitions are legitimate
+            # (a transition the model assigns zero probability must stay forbidden), but if every path
+            # into some bar is forbidden then the whole row is -inf and argmax ties silently on index 0,
+            # returning a label whose true probability is zero rather than reporting infeasibility.
+            raise ValueError(
+                f"predict_causal_viterbi: no feasible state path exists at bar {int(np.argmax(dead))} - "
+                "every candidate path is forced through a zero-probability transition. Inspect the "
+                "fitted transition matrix for over-restrictive zeros."
+            )
+        return np.argmax(log_delta, axis=1).astype(np.int64)
 
     def compute_per_bar_predictive_loglik(self, X: np.ndarray) -> np.ndarray:
         """Per-bar predictive log-likelihood under the fitted model, shape ``(T,)``.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -13,6 +13,9 @@ class StageReport:
     n_before: int
     n_after: int
     removed: List[str] = field(default_factory=list)
+    # Optional per-stage audit payload (e.g. Stage-0c's per-feature nearest-duplicate VIF). Populated even
+    # in diagnostic (report-only) mode so a threshold can be calibrated from a run without removals.
+    detail: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_removed(self) -> int:

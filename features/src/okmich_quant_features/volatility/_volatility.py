@@ -673,7 +673,7 @@ def realized_volatility_with_bipower_jump_variations(close: ArrayLike, window: i
         mu1 = np.sqrt(2 / np.pi)
         abs_r = np.abs(r)
         bpv_vals = abs_r * abs_r.shift(1)
-        bpv = bpv_vals.rolling(window=window_str).mean() / (mu1**2)
+        bpv = bpv_vals.rolling(window=window_str).sum() / (mu1**2)
         bpv = np.sqrt(bpv)
 
         # --- 3. Jump Variation (JV)
@@ -744,7 +744,7 @@ def realized_volatility_window_with_bipower_jump_variations(close: ArrayLike, wi
             mu1 = np.sqrt(2 / np.pi)
             abs_r = np.abs(r)
             bpv_vals = abs_r * abs_r.shift(1)
-            bpv = bpv_vals.rolling(window=window_str).mean() / (mu1**2)
+            bpv = bpv_vals.rolling(window=window_str).sum() / (mu1**2)
             bpv = np.sqrt(bpv)
 
             # --- 3. Jump Variation (JV)
