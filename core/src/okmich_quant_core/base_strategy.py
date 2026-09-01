@@ -258,8 +258,14 @@ class BaseStrategy(ABC):
         most one sweep of latency and removes the need for dedup state entirely.
         """
         tracked = self._open_trades.get(str(key))
-        if tracked is not None:
-            tracked["close_intent"] = reason
+        if tracked is None:
+            # Not tracked yet — a close requested on a position discovered mid-sweep, or one adopted after a
+            # restart. Start tracking it rather than dropping the intent: an intent that goes missing does not
+            # merely lose a label, it lets the broker's coarse "closed by client" stand and reports OUR close
+            # as a human's.
+            tracked = {"first_seen": _utc_now(), "last_seen": {}, "close_intent": None}
+            self._open_trades[str(key)] = tracked
+        tracked["close_intent"] = reason
 
     def _build_closed_trade(self, key: str, tracked: dict) -> Optional[ClosedTrade]:
         """Resolve a vanished position into a :class:`ClosedTrade`, falling back to its last-seen state."""
@@ -272,11 +278,16 @@ class BaseStrategy(ABC):
                          self.strategy_config.symbol, key, e)
             resolved = None
         if resolved is not None:
-            # The strategy's own intent is never overwritten by the broker's coarser label: a broker reports
-            # "closed by client", only we know it was the CTL flip that asked for it.
-            if intent and resolved.reason in (CloseReason.STRATEGY, CloseReason.MANUAL, CloseReason.UNKNOWN):
+            if not intent:
+                return resolved
+            # The intent is ALWAYS kept, but it only overrides a broker reason that is too coarse to be useful
+            # ("closed by client" — only we know it was the CTL flip that asked). A take-profit or stop-loss is
+            # a fact about how the trade ended and outranks intent: relabelling it would erase the very
+            # distinction the exit record exists to capture. Both can be true — we asked, and the target filled
+            # first — so the request is still recorded alongside the outcome.
+            if resolved.reason in (CloseReason.STRATEGY, CloseReason.MANUAL, CloseReason.UNKNOWN):
                 return replace(resolved, reason=CloseReason.STRATEGY, strategy_reason=intent)
-            return resolved
+            return replace(resolved, strategy_reason=intent)
         return ClosedTrade(
             key=key, symbol=self.strategy_config.symbol, magic=getattr(self.strategy_config, "magic", None),
             reason=CloseReason.STRATEGY if intent else CloseReason.UNKNOWN, strategy_reason=intent,

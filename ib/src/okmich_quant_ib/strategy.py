@@ -300,9 +300,15 @@ class BaseIBStrategy(BaseStrategy):
         if self._position_cache is None:
             return
         try:
-            con_id = getattr(fill.contract, "conId", None)
-            if con_id is not None:
-                self._last_fills[str(con_id)] = fill
+            # fillEvent is connection-wide, not per-strategy. Filter exactly as the cache does (orderRef AND
+            # conId) so another strategy's fill on the same connection neither overwrites our stored fill nor
+            # attributes its execution to our position.
+            if (fill.execution.orderRef != self._position_cache.order_ref
+                    or fill.contract.conId != self._position_cache.con_id):
+                return
+            # Both are kept: the realised P/L is on the fill, but the order type that produced it is on the
+            # TRADE. ib_async's Fill is (contract, execution, commissionReport, time) — it has no .order.
+            self._last_fills[str(fill.contract.conId)] = (trade, fill)
             self.observe_open_positions(self.get_open_positions())
         except Exception:
             logger.exception("Closed-position reconciliation failed on fill")
@@ -314,29 +320,58 @@ class BaseIBStrategy(BaseStrategy):
         payload is already in hand, which is why the shared handler takes a finished ClosedTrade rather than
         calling back into the broker (that call would have to be awaitable here and plain on MT5).
         """
-        fill = self._last_fills.pop(key, None)
-        if fill is None:
+        entry = self._last_fills.pop(key, None)
+        if entry is None:
             return None
-        report = getattr(fill, "commissionReport", None)
-        realised = getattr(report, "realizedPNL", None)
+        trade, fill = entry
+        realised = self._realised_pnl(getattr(fill, "commissionReport", None))
+        commission = self._finite(getattr(getattr(fill, "commissionReport", None), "commission", None))
         return ClosedTrade(
             key=key, symbol=self.strategy_config.symbol, magic=getattr(self.strategy_config, "magic", None),
-            reason=self._infer_close_reason(fill), volume=abs(float(fill.execution.shares)),
+            reason=self._infer_close_reason(trade), volume=abs(float(fill.execution.shares)),
             entry_price=float(last_seen.get("avg_cost") or 0.0), exit_price=float(fill.execution.price),
-            profit=float(realised) if realised is not None else 0.0,
-            commission=float(getattr(report, "commission", 0.0) or 0.0),
+            profit=realised if realised is not None else 0.0,
+            commission=commission if commission is not None else 0.0,
             closed_at=getattr(fill, "time", None), last_seen=last_seen,
             resolved=realised is not None)
 
+    #: IB's "this field was never populated" sentinel. It arrives as a real float, so an unguarded read reports
+    #: a profit of 1.8e308 — a number that poisons every downstream sum rather than failing visibly.
+    _UNSET_DOUBLE = 1.7976931348623157e+308
+
+    @classmethod
+    def _finite(cls, value) -> Optional[float]:
+        """A usable float, or None if IB left the field unset."""
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return None if abs(value) >= cls._UNSET_DOUBLE else value
+
+    @classmethod
+    def _realised_pnl(cls, report) -> Optional[float]:
+        """Realised P/L from a commission report, or None when IB did not supply one.
+
+        ``CommissionReport.realizedPNL`` defaults to ``0.0`` in ib_async and is set to ``UNSET_DOUBLE`` when the
+        broker does not report it, so neither a plain ``is not None`` nor a truthiness test distinguishes "flat
+        trade" from "not reported". A missing report means the trade is described but marked UNRESOLVED, which
+        is honest; reporting 0.0 as if it were realised would silently understate the record.
+        """
+        if report is None:
+            return None
+        return cls._finite(getattr(report, "realizedPNL", None))
+
     @staticmethod
-    def _infer_close_reason(fill) -> CloseReason:
-        """Best-effort cause from the order that produced the fill.
+    def _infer_close_reason(trade) -> CloseReason:
+        """Best-effort cause from the ORDER that produced the fill.
 
         IB does not label an execution the way MT5 labels a deal, so this reads the bracket child's order type:
         the protective leg is a stop, the target leg a limit. It is a heuristic and says so — a strategy-recorded
-        intent always wins over it in ``_build_closed_trade``.
+        intent refines it in ``_build_closed_trade``.
         """
-        order_type = str(getattr(getattr(fill, "order", None), "orderType", "") or "").upper()
+        order_type = str(getattr(getattr(trade, "order", None), "orderType", "") or "").upper()
         if order_type.startswith("STP"):
             return CloseReason.STOP_LOSS
         if order_type == "LMT":

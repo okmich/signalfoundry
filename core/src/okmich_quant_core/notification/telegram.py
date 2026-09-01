@@ -69,7 +69,7 @@ class TelegramNotifier(BaseNotifier):
         head = "🟢 CLOSED" if profit > 0 else "🔴 CLOSED"
         why = f"  [{html.escape(str(reason))}]" if reason else ""
         at = f"  @ {price}" if price else ""
-        msg = (f"<b>{head}</b> {self._broker_tag}{html.escape(symbol)} #{ticket}{why}{at}"
+        msg = (f"<b>{head}</b> {self._broker_tag}{html.escape(symbol)} #{html.escape(str(ticket))}{why}{at}"
                f"\nP&amp;L: {profit:+.2f}")
         self._dispatcher.dispatch(msg)
 

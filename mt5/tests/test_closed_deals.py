@@ -209,7 +209,12 @@ def test_debounced_sweep_returns_none_never_empty():
         q.assert_not_called()
 
 
-def test_query_failure_propagates_rather_than_reporting_flat():
+
+
+def test_sweep_reports_unobserved_rather_than_raising_on_a_failed_query():
+    """A failed sweep must not re-raise: position management already ran, so the raise adds no protection and
+    would count toward the circuit breaker on every intra-bar tick, turning a hiccup into a disabled strategy.
+    The entry gate in on_new_bar keeps its own fail-closed query."""
     from okmich_quant_mt5.strategy import BaseMt5Strategy
 
     stub = SimpleNamespace(prev_position_chk_dt=None, position_manager=None,
@@ -217,5 +222,47 @@ def test_query_failure_propagates_rather_than_reporting_flat():
                            _MIN_POSITION_CHK_SECONDS=BaseMt5Strategy._MIN_POSITION_CHK_SECONDS)
     manage = BaseMt5Strategy.manage_positions.__get__(stub, type(stub))
     with patch("okmich_quant_mt5.strategy.get_positions", side_effect=DataFetchError("terminal down")):
-        with pytest.raises(DataFetchError):
-            manage(datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc))
+        assert manage(datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)) is None
+
+
+def test_a_failed_sweep_is_never_mistaken_for_a_flat_book():
+    """The end-to-end property: an unreadable book must not report the open positions as closed."""
+    from okmich_quant_core.base_strategy import BaseStrategy
+
+    class _S(BaseStrategy):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.raise_next = False
+
+        def is_new_bar(self, run_dt):
+            return False
+
+        def on_new_bar(self):
+            pass
+
+        def manage_positions(self, run_dt, flag=False):
+            if self.raise_next:
+                return None                      # what BaseMt5Strategy now does on a query failure
+            return [{"ticket": 1}]
+
+        def resolve_closed_trade(self, key, last_seen):
+            raise AssertionError("no position actually closed")
+
+    from okmich_quant_core.config import StrategyConfig
+    from okmich_quant_core.logging import RunnerIdentity
+    from okmich_quant_core.signal import BaseSignal
+
+    class _NullLogger:
+        def write(self, record): pass
+        def drain(self, timeout=None): pass
+        def close(self): pass
+
+    s = _S(config=StrategyConfig(name="s", symbol="EURUSD", timeframe=5, magic=7),
+           signal=BaseSignal(), inference_logger=_NullLogger())
+    s.bind_runner_identity(RunnerIdentity(runner_id="r", runner_start_token="t", broker="b",
+                                          account_id="a", broker_session_id="s"))
+    t0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+    s.sync_positions(t0)
+    s.raise_next = True
+    s.sync_positions(t0 + timedelta(seconds=5))   # resolve_closed_trade must never be reached
+    assert set(s._open_trades) == {"1"}

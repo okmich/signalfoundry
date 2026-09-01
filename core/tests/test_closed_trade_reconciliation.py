@@ -335,3 +335,33 @@ def test_reconciliation_fault_does_not_break_position_management():
     s.book = [_pos(1), _pos(2)]
     assert s.sync_positions(_dt(0)) == [_pos(1), _pos(2)]     # sweep still returns the book
     assert s.open_position_count == 2                          # and the count is still correct
+
+
+# --------------------------------------------------------------------------------------
+# regressions found in review
+# --------------------------------------------------------------------------------------
+
+def test_intent_on_an_untracked_position_is_not_dropped():
+    """A close requested on a position discovered mid-sweep must still be attributed to the strategy.
+
+    Dropping it lets the broker's coarse 'closed by client' stand, which reports OUR close as a human's.
+    """
+    s = _Strat(notifier=_SpyNotifier())
+    s.note_close_intent(42, "flatten")          # never observed, never registered
+    s.resolved = _closed("42", reason=CloseReason.MANUAL)
+    closed = s.observe_open_positions([])
+    assert closed[0].reason == CloseReason.STRATEGY
+    assert closed[0].strategy_reason == "flatten"
+
+
+def test_intent_is_preserved_even_when_the_broker_reason_wins():
+    """We asked AND the target filled first. Both are true; the record must not lose the request."""
+    s = _Strat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.note_close_intent(1, "ctl_flip")
+    s.resolved = _closed("1", reason=CloseReason.TAKE_PROFIT)
+    closed = s.observe_open_positions([])
+    assert closed[0].reason == CloseReason.TAKE_PROFIT       # outcome outranks intent
+    assert closed[0].strategy_reason == "ctl_flip"           # but the request is still recorded
+    assert "take_profit" in closed[0].describe()

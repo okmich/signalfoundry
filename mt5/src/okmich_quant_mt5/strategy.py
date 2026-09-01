@@ -133,9 +133,16 @@ class BaseMt5Strategy(BaseStrategy):
             self.position_manager.manage_positions(run_dt, flag)
 
         self.prev_position_chk_dt = run_dt
-        # Deliberately NOT guarded: get_positions raises on a query failure, and that must propagate rather
-        # than degrade to "flat". The dispatch layer isolates the raise per strategy.
-        return get_positions(self.strategy_config.symbol, self.strategy_config.magic)
+        try:
+            return get_positions(self.strategy_config.symbol, self.strategy_config.magic)
+        except Exception as e:
+            # A failed query is reported as "unobserved", NOT re-raised. get_positions raises so that an entry
+            # gate cannot trade on a false flat, and on_new_bar's own call still enforces that. This sweep is
+            # not a gate: position management above has already run, so re-raising would add no protection and
+            # would newly count toward the circuit breaker on every intra-bar tick — turning a brief terminal
+            # hiccup into a disabled strategy. None already means exactly "I could not look".
+            logger.error(f"{self.strategy_config.symbol}: position sweep could not read the book: {e}")
+            return None
 
     def resolve_closed_trade(self, key: str, last_seen: dict) -> Optional[ClosedTrade]:
         """Describe a position that left the book, from the broker's own deal history.
