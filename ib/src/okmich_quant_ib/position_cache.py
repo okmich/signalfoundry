@@ -104,7 +104,10 @@ class IBPositionCache:
             cached["cost_basis"] = pos.position * pos.avgCost
 
     def get_open(self) -> list[dict]:
+        # conId is included so the dict is self-identifying: it is the only stable per-position key IB offers,
+        # and the shared close-detection diff keys on it.
         return [{
+            "conId": p["contract"].conId,
             "symbol": p["contract"].symbol,
             "contract": p["contract"],
             "position": p["position"],

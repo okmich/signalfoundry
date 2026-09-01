@@ -1,12 +1,14 @@
 import json
 import logging
 from abc import abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Union
 
 from . import number_of_minutes_in_timeframe, is_timeframe_match, timeframe_minutes_dict
 from .functions import (
     get_positions,
+    fetch_closed_deals,
+    select_history_window,
     close_position,
     fetch_recent_data,
     fetch_data_date_range,
@@ -28,7 +30,8 @@ from .resilience import (
     MT5PermanentError,
     MT5ConnectionError,
 )
-from okmich_quant_core import StrategyConfig, BaseSignal, BaseStrategy, OrderType, PositionSizingType
+from okmich_quant_core import (StrategyConfig, BaseSignal, BaseStrategy, ClosedTrade, CloseReason, OrderType,
+                                PositionSizingType)
 from okmich_quant_core.price_buffer import PriceBuffer
 
 logging.basicConfig(
@@ -36,8 +39,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+#: MT5 deal reason -> the broker-neutral cause. "client" and "expert" both mean "something asked for this close";
+#: which of the two it was does not survive as intent, so the strategy's own recorded reason wins over them.
+_MT5_CLOSE_REASONS = {
+    "take_profit": CloseReason.TAKE_PROFIT, "stop_loss": CloseReason.STOP_LOSS, "stop_out": CloseReason.STOP_OUT,
+    "expert": CloseReason.STRATEGY, "client": CloseReason.MANUAL, "mobile": CloseReason.MANUAL,
+    "web": CloseReason.MANUAL, "rollover": CloseReason.EXPIRED, "split": CloseReason.EXPIRED,
+}
+
 
 class BaseMt5Strategy(BaseStrategy):
+    #: Minimum spacing between position sweeps. Strictly less-than, so a runner polling exactly at this
+    #: cadence is NOT swallowed: with ``<=`` a chk_position_interval equal to this value silently dropped
+    #: every sweep, and the symptom (no position management at all) looks identical to a quiet market.
+    _MIN_POSITION_CHK_SECONDS = 5.0
+
     def __init__(self, config: StrategyConfig, signal: BaseSignal, *args, **kwargs):
         # Supply the contract envelope's integer-minute timeframe from the MT5 timeframe constant
         # (a raw MT5 constant is NOT minutes — e.g. H1 == 16385) (LOGGING_CONTRACT §6).
@@ -94,26 +110,58 @@ class BaseMt5Strategy(BaseStrategy):
         )
         logger.info("Connection monitor initialized")
 
-    def manage_positions(self, run_dt: datetime, flag: bool = False) -> int:
-        """
-        Search and runs position management based on the instance's position manager implementation and returns the number of open positions
+        # Deal history must be SELECTED before history_deals_get can serve it. Done once here so a
+        # position that closed while this runner was down is still resolvable on the first sweep.
+        select_history_window()
+
+    def manage_positions(self, run_dt: datetime, flag: bool = False) -> Optional[list[dict]]:
+        """Run position management and return the open positions for this (symbol, magic).
+
+        Returns ``None`` — never ``[]`` — when the book was not actually observed, so the caller's close
+        detection cannot mistake an unobserved book for an empty one and report the whole book as closed.
 
         :param run_dt:   - datetime this call was initiated
         :param flag:bool - indicates this was called on a new bar
         """
-        # try to tell if the run_dt is at most 5 second from the previous_run_dt
         if (
             self.prev_position_chk_dt
-            and abs((run_dt - self.prev_position_chk_dt).total_seconds()) <= 5
+            and abs((run_dt - self.prev_position_chk_dt).total_seconds()) < self._MIN_POSITION_CHK_SECONDS
         ):
-            return 0
+            return None                      # debounced: the book was NOT observed, not observed-and-empty
 
-        res = 0
         if self.position_manager:
             self.position_manager.manage_positions(run_dt, flag)
 
         self.prev_position_chk_dt = run_dt
-        return res
+        # Deliberately NOT guarded: get_positions raises on a query failure, and that must propagate rather
+        # than degrade to "flat". The dispatch layer isolates the raise per strategy.
+        return get_positions(self.strategy_config.symbol, self.strategy_config.magic)
+
+    def resolve_closed_trade(self, key: str, last_seen: dict) -> Optional[ClosedTrade]:
+        """Describe a position that left the book, from the broker's own deal history.
+
+        Reports the REALISED close: MT5 books profit, swap and commission on the closing deal, and a position
+        that has already gone cannot be asked what it made. Partial closes yield several OUT deals; they are
+        summed and the exit price is volume-weighted, so a scaled-out position reports one honest average
+        rather than whichever leg happened to be last.
+        """
+        deals = fetch_closed_deals(int(key))
+        if not deals:
+            return None
+        volume = sum(float(d.get("volume") or 0.0) for d in deals)
+        notional = sum(float(d.get("volume") or 0.0) * float(d.get("price") or 0.0) for d in deals)
+        last = deals[-1]
+        closed_at = datetime.fromtimestamp(last["time"], tz=timezone.utc) if last.get("time") else None
+        return ClosedTrade(
+            key=key, symbol=self.strategy_config.symbol, magic=self.strategy_config.magic,
+            reason=_MT5_CLOSE_REASONS.get(last.get("reason_name"), CloseReason.UNKNOWN),
+            volume=volume,
+            entry_price=float(last_seen.get("price_open") or 0.0),
+            exit_price=(notional / volume) if volume else float(last.get("price") or 0.0),
+            profit=sum(float(d.get("profit") or 0.0) for d in deals),
+            commission=sum(float(d.get("commission") or 0.0) for d in deals),
+            swap=sum(float(d.get("swap") or 0.0) for d in deals),
+            closed_at=closed_at, last_seen=last_seen)
 
     def is_new_bar(self, run_dt: datetime) -> bool:
         """
@@ -206,6 +254,20 @@ class BaseMt5Strategy(BaseStrategy):
             retcode=retcode, context={"strategy_name": self.strategy_config.name},
         )
 
+    def track_open_positions(self) -> None:
+        """Start tracking every open position for this (symbol, magic) right now.
+
+        Called immediately after a successful open. Waiting for the next sweep to notice a new position leaves a
+        window in which a position can open AND close unseen, and an exit nobody observed is an exit nobody can
+        report. Never raises: the order already went through, and a bookkeeping failure must not be reported to
+        the caller as a failed trade.
+        """
+        try:
+            for position in get_positions(self.strategy_config.symbol, self.strategy_config.magic):
+                self.register_open_position(position)
+        except Exception as e:
+            logger.error(f"{self.strategy_config.symbol}: could not track open positions after entry: {e}")
+
     def open_position(self, direction, price):
         """
         Open a market order position.
@@ -225,6 +287,7 @@ class BaseMt5Strategy(BaseStrategy):
                 magic=self.strategy_config.magic,
                 **custom_dict,
             )
+            self.track_open_positions()
             return True
         except (MT5TransientError, MT5ConnectionError) as e:
             # Transient errors already retried by decorator - log and fail
@@ -293,6 +356,7 @@ class BaseMt5Strategy(BaseStrategy):
                     f"Market order placed: {order_type} {volume} lots @ {price} "
                     f"(SL={sl}, TP={tp})"
                 )
+                self.track_open_positions()
                 return True
 
             # Pending orders (buy_stop, sell_stop, buy_limit, sell_limit)
@@ -352,12 +416,15 @@ class BaseMt5Strategy(BaseStrategy):
             magic=self.strategy_config.magic
         )
 
-    def close_position(self, ticket):
+    def close_position(self, ticket, reason: str = "strategy_close"):
         """
         Close a position by ticket number.
 
         Args:
             ticket: Position ticket number
+            reason: why this system is closing it, recorded as intent for the reconciler to attribute the
+                close with. NOT announced here - see BaseStrategy.note_close_intent for why the announcement
+                belongs to the reconciler.
 
         Returns:
             True if position closed successfully, False otherwise
@@ -366,6 +433,7 @@ class BaseMt5Strategy(BaseStrategy):
             logger.info(
                 f"Closing position {ticket} for {self.strategy_config.symbol} ({self.strategy_config.magic})..."
             )
+            self.note_close_intent(ticket, reason)
             close_position(
                 ticket, **{"filling_mode": self.symbol_info_dict["filling_mode"]}
             )
@@ -435,13 +503,11 @@ class GenericBasicStrategy(BaseMt5Strategy):
         if len(positions) > 0 and (exits_long != 0 or exits_short != 0):
             for pos in positions:
                 if (exits_long != 0 and pos["type"] == 0) or (exits_short != 0 and pos["type"] == 1):
-                    closed = self.close_position(pos["ticket"])
-                    if closed and self.notifier:
-                        self.notifier.on_trade_closed(
-                            symbol=_symbol,
-                            ticket=pos["ticket"],
-                            profit=pos.get("profit", 0.0),
-                        )
+                    # No on_trade_closed here on purpose: pos["profit"] is the UNREALISED figure read
+                    # before the close request, and announcing from both here and the reconciler would put
+                    # two emitters on one event. close_position records the intent; the next position sweep
+                    # resolves the realised fill from broker history and announces it once.
+                    self.close_position(pos["ticket"], reason="exit_signal")
 
         if entries_long != 0 or entries_short != 0:
             positions = get_positions(_symbol, _magic)  # call again incase things changed while closing positions

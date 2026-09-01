@@ -94,7 +94,13 @@ class BaseNotifier(ABC):
         ...
 
     @abstractmethod
-    def on_trade_closed(self, symbol: str, ticket: int, profit: float):
+    def on_trade_closed(self, symbol: str, ticket, profit: float, price: float = 0.0, reason: str = ""):
+        """A position left the book. ``profit`` is the broker's REALISED figure.
+
+        ``price`` and ``reason`` are optional so notifiers written before closed-trade reconciliation keep
+        working unchanged. ``ticket`` is typed loosely because it carries the broker-neutral position key —
+        an MT5 ticket is an int, an IB contract id is not the same kind of thing.
+        """
         ...
 
     @abstractmethod

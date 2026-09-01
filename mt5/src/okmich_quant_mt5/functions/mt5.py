@@ -702,3 +702,67 @@ def get_atr(symbol, timeframe, period) -> float:
         raise ValueError("ATR calculation failed - no valid values")
 
     return float(valid_atr_values[-1])
+
+
+#: MT5 deal entry direction: the deal that took the position OFF the book.
+DEAL_ENTRY_OUT = 1
+DEAL_ENTRY_OUT_BY = 2                  # closed by an opposing position (close-by)
+
+#: mt5.DEAL_REASON_* → the broker-neutral cause. Kept as a literal map rather than read off the module so an
+#: older terminal build that lacks one of the constants cannot raise at import time.
+_DEAL_REASON_NAMES = {
+    0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "stop_loss",
+    5: "take_profit", 6: "stop_out", 7: "rollover", 8: "vmargin", 9: "split",
+}
+
+
+def fetch_closed_deals(ticket: int) -> List[Dict[str, Any]]:
+    """Closing deals for one position id, newest last. ``[]`` when the position has no closing deal yet.
+
+    RAISES on a query failure rather than returning ``[]``, for the same reason ``get_positions`` does: the
+    caller is trying to distinguish "this position closed" from "I could not find out", and collapsing the two
+    reports a phantom close with fabricated (zero) fill and P/L. ``history_deals_get`` returns ``None`` on a
+    failed query and an empty tuple when the position genuinely has no deals, so the two ARE distinguishable —
+    only a caller that ignores the difference loses it.
+
+    A position normally yields two deals (in, out); partial closes yield more. Only the OUT deals are returned:
+    the entry deal is not a close and summing across both double-counts the volume.
+    """
+    deals = mt5.history_deals_get(position=ticket)
+    if deals is None:
+        msg = f"Failed to query deal history for position {ticket}. Cause: {mt5.last_error()}"
+        logging.error(msg)
+        raise DataFetchError(msg)
+    out = []
+    for deal in deals:
+        row = deal._asdict()
+        if row.get("entry") in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
+            row["reason_name"] = _DEAL_REASON_NAMES.get(row.get("reason"), "unknown")
+            out.append(row)
+    return sorted(out, key=lambda r: (r.get("time_msc") or 0, r.get("ticket") or 0))
+
+
+def select_history_window(days: int = 7) -> bool:
+    """Load the terminal's deal history so ``history_deals_get(position=...)`` can see recent closes.
+
+    MT5 only serves history it has been asked to select; on a freshly started terminal the position-scoped
+    lookup can come back empty simply because nothing has been loaded yet. Called once at strategy start so a
+    close that happened while the runner was down is still resolvable.
+
+    Never raises. This is a warm-up convenience, not a precondition — ``history_deals_get`` still works without
+    it on a terminal that has already loaded history — so a build that does not expose ``history_select`` must
+    degrade to "no preload" rather than stop a strategy from constructing.
+    """
+    select = getattr(mt5, "history_select", None)
+    if select is None:
+        logging.debug("MetaTrader5 build exposes no history_select(); skipping deal-history preload")
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        ok = select(now - timedelta(days=days), now + timedelta(days=1))
+    except Exception as e:
+        logging.warning(f"deal-history preload over the last {days}d raised: {e}")
+        return False
+    if not ok:
+        logging.warning(f"history_select over the last {days}d failed: {mt5.last_error()}")
+    return bool(ok)

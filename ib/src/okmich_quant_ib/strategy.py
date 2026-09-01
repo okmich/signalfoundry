@@ -11,7 +11,8 @@ import pandas as pd
 from ib_async import IB, Contract
 
 from okmich_quant_core import (
-    BarOutcome, BaseSignal, BaseStrategy, OrderType, PositionSizingType, StrategyConfig, StrategyHealth,
+    BarOutcome, BaseSignal, BaseStrategy, ClosedTrade, CloseReason, OrderType, PositionSizingType, StrategyConfig,
+    StrategyHealth,
 )
 from okmich_quant_core.notification.base import BaseNotifier
 from okmich_quant_core.price_buffer import PriceBuffer
@@ -69,6 +70,9 @@ class BaseIBStrategy(BaseStrategy):
         self.contract: Optional[Contract] = None
         self.contract_info: dict = {}
         self._position_cache: Optional[IBPositionCache] = None
+        #: conId -> the fill that last reduced that position. IB reports the realised P/L on the fill's
+        #: commission report, and a position that has already left the cache cannot be asked for it.
+        self._last_fills: dict[str, object] = {}
         self._bar_aggregator: Optional[BarAggregator] = None
         self._rt_bars = None
         self._ticker = None
@@ -137,6 +141,7 @@ class BaseIBStrategy(BaseStrategy):
         self._rt_bars.updateEvent += self._bar_aggregator.on_realtime_bar
         self._ticker = ib.reqMktData(self.contract, "", snapshot=False, regulatorySnapshot=False)
         ib.fillEvent += self._position_cache.on_fill
+        ib.fillEvent += self._on_position_fill          # AFTER the cache: dispatch is registration-ordered
         ib.positionEvent += self._position_cache.on_position
         ib.execDetailsEvent += self._on_fill
         ib.errorEvent += self._on_error
@@ -162,6 +167,7 @@ class BaseIBStrategy(BaseStrategy):
         finally:
             for _evt, _handler in [
                 (ib.fillEvent, self._position_cache.on_fill if self._position_cache else None),
+                (ib.fillEvent, self._on_position_fill),
                 (ib.positionEvent, self._position_cache.on_position if self._position_cache else None),
                 (ib.execDetailsEvent, self._on_fill),
                 (ib.errorEvent, self._on_error),
@@ -279,6 +285,64 @@ class BaseIBStrategy(BaseStrategy):
                 avg_price=trade.orderStatus.avgFillPrice,
             )
 
+    def _on_position_fill(self, trade, fill) -> None:
+        """Close detection for the event-driven path.
+
+        The polled MT5 path notices a close by missing the position from a sweep; here IB tells us. Both funnel
+        into the same ``observe_open_positions`` diff, so attribution, announcement and the once-only guarantee
+        are shared — only the trigger differs, because forcing IB to poll for something it already pushes would
+        be strictly worse.
+
+        LIMITATION: a reversal (long 100, sell 150 -> short 50) never takes the cached position to zero, so no
+        close is reported for the leg that ended. IB netting makes that one position, not two, and unpicking it
+        would mean inventing a close the broker never described.
+        """
+        if self._position_cache is None:
+            return
+        try:
+            con_id = getattr(fill.contract, "conId", None)
+            if con_id is not None:
+                self._last_fills[str(con_id)] = fill
+            self.observe_open_positions(self.get_open_positions())
+        except Exception:
+            logger.exception("Closed-position reconciliation failed on fill")
+
+    def resolve_closed_trade(self, key: str, last_seen: dict) -> Optional[ClosedTrade]:
+        """Describe a flattened position from the fill that flattened it.
+
+        IB books realised P/L on the commission report attached to the fill, so nothing has to be queried — the
+        payload is already in hand, which is why the shared handler takes a finished ClosedTrade rather than
+        calling back into the broker (that call would have to be awaitable here and plain on MT5).
+        """
+        fill = self._last_fills.pop(key, None)
+        if fill is None:
+            return None
+        report = getattr(fill, "commissionReport", None)
+        realised = getattr(report, "realizedPNL", None)
+        return ClosedTrade(
+            key=key, symbol=self.strategy_config.symbol, magic=getattr(self.strategy_config, "magic", None),
+            reason=self._infer_close_reason(fill), volume=abs(float(fill.execution.shares)),
+            entry_price=float(last_seen.get("avg_cost") or 0.0), exit_price=float(fill.execution.price),
+            profit=float(realised) if realised is not None else 0.0,
+            commission=float(getattr(report, "commission", 0.0) or 0.0),
+            closed_at=getattr(fill, "time", None), last_seen=last_seen,
+            resolved=realised is not None)
+
+    @staticmethod
+    def _infer_close_reason(fill) -> CloseReason:
+        """Best-effort cause from the order that produced the fill.
+
+        IB does not label an execution the way MT5 labels a deal, so this reads the bracket child's order type:
+        the protective leg is a stop, the target leg a limit. It is a heuristic and says so — a strategy-recorded
+        intent always wins over it in ``_build_closed_trade``.
+        """
+        order_type = str(getattr(getattr(fill, "order", None), "orderType", "") or "").upper()
+        if order_type.startswith("STP"):
+            return CloseReason.STOP_LOSS
+        if order_type == "LMT":
+            return CloseReason.TAKE_PROFIT
+        return CloseReason.UNKNOWN
+
     def _on_error(self, reqId, code, msg, _advanced) -> None:
         cls = classify_ib_error(code)
         if cls == ErrorClass.WARNING:
@@ -395,8 +459,13 @@ class BaseIBStrategy(BaseStrategy):
             self._notify_trade_failed(ot, str(e), e.code)
             return False
 
-    async def close_position(self, position: dict) -> bool:
+    async def close_position(self, position: dict, reason: str = "strategy_close") -> bool:
+        """Close a position. ``reason`` is recorded as intent, not announced: the fill that actually flattens
+        the position is what reports it, so the announcement carries the realised fill instead of a guess."""
         try:
+            key = self._position_key(position)
+            if key is not None:
+                self.note_close_intent(key, reason)
             await ib_close_position(self.ib, position, self.strategy_config.magic)
             return True
         except (IBTransientError, IBConnectionError) as e:

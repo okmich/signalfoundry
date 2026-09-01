@@ -1,5 +1,6 @@
 from .base_strategy import BaseStrategy
 from .broker_session import BrokerSession
+from .closed_trade import ClosedTrade, CloseReason
 from .filter import BaseFilter, FilterChain
 from .health import StrategyHealth
 from .logging import (
