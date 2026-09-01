@@ -21,20 +21,30 @@ class MacroMetastore:
         self.path = Path(folder) / filename
 
     def read(self) -> dict[str, Any]:
-        """Return the metadata dict, or ``{}`` if absent/unreadable."""
+        """Return the metadata dict, or ``{}`` if absent/corrupt.
+
+        Only a *missing* file or *unparseable* JSON (corrupt, rebuildable on the next run) maps to
+        ``{}``. A real ``OSError`` on an existing file (e.g. a transient Windows sharing-violation)
+        is deliberately NOT swallowed: ``update_series`` does a read-modify-write, so returning
+        ``{}`` from a failed read would rewrite the store with only the current series and clobber
+        every other series' record. Failing loudly preserves the existing file instead.
+        """
         if not self.path.exists():
             return {}
         try:
             data = json.loads(self.path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
 
     def write(self, metadata: dict[str, Any]) -> None:
-        """Persist the full metadata dict atomically (temp + replace)."""
+        """Persist the full metadata dict atomically (temp + fsync + replace)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps(metadata, indent=4, default=str))
+        with open(tmp, "w") as f:
+            f.write(json.dumps(metadata, indent=4, default=str))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
     def update_series(self, series: str, updates: dict[str, Any]) -> None:
@@ -44,5 +54,10 @@ class MacroMetastore:
         self.write(metadata)
 
     def last_obs(self, series: str) -> str | None:
-        """Return the stored last observation date (ISO string) for a series, if any."""
+        """Return the stored last observation date (ISO string) for a series, if any.
+
+        Informational only. The incremental fetch derives its watermark from the parquet itself
+        (``update.update_series``), not from here, so the data file stays the single source of
+        truth — do NOT wire incremental logic to this value or the two can diverge.
+        """
         return self.read().get(series, {}).get("last_obs")

@@ -52,8 +52,13 @@ def change(s: pd.Series, periods: int) -> pd.Series:
 
 
 def log_return(s: pd.Series, periods: int) -> pd.Series:
-    """Log return over ``periods`` observations: ``log(s / s.shift(periods))``."""
-    return np.log(s / s.shift(periods))
+    """Log return over ``periods`` observations: ``log(s / s.shift(periods))``.
+
+    Non-positive ratios — e.g. the 2020-04-20 negative WTI settlement print, a futures artifact —
+    map to NaN (no domain warning); those rows drop downstream. A no-op for always-positive series.
+    """
+    ratio = s / s.shift(periods)
+    return np.log(ratio.where(ratio > 0))
 
 
 def ratio(num: pd.Series, den: pd.Series) -> pd.Series:
@@ -105,6 +110,23 @@ DEFAULT_RECIPES: tuple[FeatureRecipe, ...] = (
     # Financial conditions (weekly): level + 4-week change. Cadence handled by the asof-merge.
     FeatureRecipe("nfci_level", (MacroSeries.NFCI,), level),
     FeatureRecipe("nfci_chg4", (MacroSeries.NFCI,), partial(change, periods=4)),
+    # USD breadth: AFE/EME levels are ~collinear with USD_BROAD, so feed only their *divergence* —
+    # z-scored log-ratio of EME-USD to AFE-USD (high ⇒ EM-USD unusually strong vs DM = EM stress).
+    FeatureRecipe("usd_eme_div", (MacroSeries.USD_EME, MacroSeries.USD_AFE), lambda eme, afe: zscore(np.log(eme / afe), 20)),
+    # Crude (growth/commodity factor): 5-day return + 20-day level z-score.
+    FeatureRecipe("oil_ret5", (MacroSeries.WTI,), partial(log_return, periods=5)),
+    FeatureRecipe("oil_z20", (MacroSeries.WTI,), partial(zscore, window=20)),
+)
+
+
+# Opt-in ICE BofA HY-OAS recipes — deliberately NOT in DEFAULT_RECIPES. The FRED series is
+# licence-capped to a rolling ~3y window (no pre-2023 history), so folding it into the defaults would
+# NaN-truncate any longer macro-joined dataset via the attach's drop_warmup. Concat explicitly
+# (``DEFAULT_RECIPES + HY_OAS_RECIPES``) only for 2023+ work that wants the high-yield credit gauge.
+HY_OAS_RECIPES: tuple[FeatureRecipe, ...] = (
+    FeatureRecipe("hy_oas_level", (MacroSeries.HY_OAS,), level),
+    FeatureRecipe("hy_oas_z20", (MacroSeries.HY_OAS,), partial(zscore, window=20)),
+    FeatureRecipe("hy_oas_chg5", (MacroSeries.HY_OAS,), partial(change, periods=5)),
 )
 
 
