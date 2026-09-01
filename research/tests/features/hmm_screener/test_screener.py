@@ -21,7 +21,9 @@ from okmich_quant_research.features.hmm_screener import (
     ParetoStatus,
     ScreenStrategy,
     SubsetEvaluation,
+    WinnerPool,
 )
+from okmich_quant_research.features.hmm_screener import BaselineRole, GreedyStopReason
 
 
 def _make_synthetic_ohlc(T: int = 2000, seed: int = 7) -> pd.DataFrame:
@@ -294,3 +296,267 @@ def test_subset_coherence_warnings_are_per_subset() -> None:
     assert not any("synthetic_feature_a" in w for w in warns_b)
     assert any("synthetic_feature_a" in w for w in warns_ab)
     assert any("synthetic_feature_b" in w for w in warns_ab)
+
+
+# --------------------------------------------------------------- baseline prior
+
+def _screener_for_prior() -> HmmFeatureScreener:
+    raw = _make_synthetic_ohlc(T=200)
+    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    return HmmFeatureScreener(config, raw, _feature_engineering)
+
+
+def _result_with_baseline(screener: HmmFeatureScreener, evs: list[SubsetEvaluation],
+                          baseline: tuple[str, ...]) -> HmmScreenerResult:
+    statuses = screener._classify(evs)
+    evs = [screener._with_status(ev, status) for ev, status in zip(evs, statuses)]
+    return HmmScreenerResult(evaluations=evs, results_=screener._build_results_df(evs, baseline),
+                             baseline=baseline, strategy=ScreenStrategy.ABLATION)
+
+
+def test_baseline_prior_reports_anchor_share_of_the_winner() -> None:
+    """base_frac = baseline-alone separation / winner separation, with the containment counts."""
+    screener = _screener_for_prior()
+    evs = [
+        _make_subset_eval(features=("a", "b"), axis_sep=0.8),        # the baseline itself
+        _make_subset_eval(features=("a", "b", "c"), axis_sep=1.0),   # add-one winner
+        _make_subset_eval(features=("a",), axis_sep=0.3),            # drop-one
+    ]
+    result = _result_with_baseline(screener, evs, ("a", "b"))
+
+    prior = result.baseline_prior
+    assert prior is not None
+    assert prior.baseline == ("a", "b")
+    assert prior.baseline_separation == pytest.approx(0.8)
+    assert prior.winner_separation == pytest.approx(1.0)
+    assert prior.base_frac == pytest.approx(0.8)
+    assert result.base_frac == pytest.approx(0.8)
+    assert prior.winner_keeps_baseline is True
+    # Only the drop-one subset lacks the full baseline.
+    assert prior.subsets_containing_baseline == 2
+    assert prior.n_subsets == 3
+    assert prior.winner_pool in set(WinnerPool)
+    assert "base_frac=0.800" in repr(result)
+    assert "base_frac" in str(prior)
+
+
+def test_baseline_prior_flags_a_search_that_never_beat_its_own_anchor() -> None:
+    """base_frac == 1.0 and the winner IS the baseline — the search added nothing."""
+    screener = _screener_for_prior()
+    evs = [
+        _make_subset_eval(features=("a", "b"), axis_sep=1.0),
+        _make_subset_eval(features=("a", "b", "c"), axis_sep=0.4),
+        _make_subset_eval(features=("a",), axis_sep=0.2),
+    ]
+    result = _result_with_baseline(screener, evs, ("a", "b"))
+
+    prior = result.baseline_prior
+    assert prior.base_frac == pytest.approx(1.0)
+    assert prior.winner == ("a", "b")
+    assert prior.winner_keeps_baseline is True
+
+
+def test_baseline_prior_ignores_errored_subsets() -> None:
+    """An errored subset is not a winner and does not inflate the containment denominator."""
+    screener = _screener_for_prior()
+    evs = [
+        _make_subset_eval(features=("a", "b"), axis_sep=0.5),
+        _make_subset_eval(features=("a", "b", "c"), axis_sep=99.0, error="fit diverged"),
+        _make_subset_eval(features=("a", "b", "d"), axis_sep=1.0),
+    ]
+    result = _result_with_baseline(screener, evs, ("a", "b"))
+
+    prior = result.baseline_prior
+    assert prior.winner_separation == pytest.approx(1.0)   # not the errored 99.0
+    assert prior.base_frac == pytest.approx(0.5)
+    assert prior.n_subsets == 2
+
+
+def test_baseline_prior_is_none_without_an_anchor() -> None:
+    """EXHAUSTIVE carries no anchor, so there is no prior to report and no base_frac in the repr."""
+    screener = _screener_for_prior()
+    evs = [_make_subset_eval(features=("a",), axis_sep=1.0)]
+    statuses = screener._classify(evs)
+    evs = [screener._with_status(ev, st) for ev, st in zip(evs, statuses)]
+    result = HmmScreenerResult(evaluations=evs, results_=screener._build_results_df(evs),
+                               strategy=ScreenStrategy.EXHAUSTIVE)
+
+    assert result.baseline is None
+    assert result.baseline_prior is None
+    assert result.base_frac is None
+    assert "base_frac" not in repr(result)
+    # With no anchor, no subset can be marked as containing one.
+    assert not result.results_["contains_baseline"].any()
+
+
+def test_effective_baseline_matches_the_baseline_the_screen_actually_used() -> None:
+    """The recorded baseline is the post-stage-0 intersection, not what the caller requested."""
+    screener = _screener_for_prior()
+    surviving = ["log_rets_smooth_24", "log_rets_smooth_48"]
+    effective = screener._effective_baseline(
+        surviving, ScreenStrategy.ABLATION, ["log_rets_smooth_24", "dropped_by_stage0"])
+
+    assert effective == ("log_rets_smooth_24",)
+    # The generated subsets anchor on that same intersection.
+    subsets = screener._generate_subsets(surviving, ScreenStrategy.ABLATION,
+                                         ["log_rets_smooth_24", "dropped_by_stage0"], None)
+    assert all("dropped_by_stage0" not in sub for sub in subsets)
+    assert screener._effective_baseline(surviving, ScreenStrategy.EXHAUSTIVE, None) is None
+
+
+def test_effective_baseline_rejects_a_baseline_with_no_survivors() -> None:
+    screener = _screener_for_prior()
+    with pytest.raises(ValueError, match="no overlap with surviving candidates"):
+        screener._effective_baseline(["a", "b"], ScreenStrategy.ABLATION, ["gone"])
+
+
+# ------------------------------------------------------------- greedy forward
+
+def _greedy_fe(df: pd.DataFrame) -> pd.DataFrame:
+    """Four features so a beam of 3 has somewhere to go."""
+    df = df.copy()
+    log_rets = np.log(df["close"] / df["close"].shift(1))
+    df["g_a"] = log_rets.ewm(span=12, adjust=False).mean()
+    df["g_b"] = log_rets.ewm(span=48, adjust=False).mean()
+    df["g_c"] = log_rets.rolling(24).std()
+    df["g_d"] = (df["high"] - df["low"]) / df["close"]
+    return df
+
+
+GREEDY_COLS = ["g_a", "g_b", "g_c", "g_d"]
+
+
+def _greedy_screener(**cfg_kw) -> HmmFeatureScreener:
+    raw = _make_synthetic_ohlc(T=600)
+    base = dict(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=600, random_state=42)
+    base.update(cfg_kw)
+    return HmmFeatureScreener(HmmScreenerConfig(**base), raw, _greedy_fe)
+
+
+def test_rank_for_beam_drops_fragile_and_traps() -> None:
+    """The beam ranks on quality-gated separation, not raw separation."""
+    screener = _greedy_screener()
+    trap_rate = screener.config.honesty_trap_rate
+    evs = [
+        _make_subset_eval(features=("clean_low",), axis_sep=1.0, honesty=trap_rate - 0.1),
+        _make_subset_eval(features=("clean_high",), axis_sep=2.0, honesty=trap_rate - 0.1),
+        _make_subset_eval(features=("trap",), axis_sep=9.0, honesty=trap_rate + 0.1),
+        _make_subset_eval(features=("fragile",), axis_sep=8.0, honesty=trap_rate - 0.1,
+                          balance=float("inf")),
+        _make_subset_eval(features=("errored",), axis_sep=7.0, error="boom"),
+    ]
+    ranked, used_fallback = screener._rank_for_beam(evs)
+
+    assert [e.features[0] for e in ranked] == ["clean_high", "clean_low"]
+    assert used_fallback is False
+
+
+def test_rank_for_beam_falls_back_when_every_candidate_is_a_trap() -> None:
+    """A fully trapped step still returns a path, but flags that it did."""
+    screener = _greedy_screener()
+    trap_rate = screener.config.honesty_trap_rate
+    evs = [
+        _make_subset_eval(features=("t1",), axis_sep=1.0, honesty=trap_rate + 0.1),
+        _make_subset_eval(features=("t2",), axis_sep=3.0, honesty=trap_rate + 0.2),
+    ]
+    ranked, used_fallback = screener._rank_for_beam(evs)
+
+    assert [e.features[0] for e in ranked] == ["t2", "t1"]
+    assert used_fallback is True
+
+
+def test_rank_for_beam_returns_nothing_when_all_candidates_are_degenerate() -> None:
+    screener = _greedy_screener()
+    evs = [_make_subset_eval(features=("f",), balance=float("inf")),
+           _make_subset_eval(features=("e",), error="boom")]
+    ranked, used_fallback = screener._rank_for_beam(evs)
+    assert ranked == []
+    assert used_fallback is True
+
+
+@pytest.mark.slow
+def test_greedy_forward_searches_up_from_empty_and_records_a_trace() -> None:
+    """Every singleton is fitted (the search starts from nothing) and the trace grows by one."""
+    screener = _greedy_screener(beam_width=2, greedy_max_depth=3, greedy_min_relative_gain=0.0)
+    result = screener.screen(GREEDY_COLS, strategy=ScreenStrategy.GREEDY_FORWARD)
+
+    assert result.strategy == ScreenStrategy.GREEDY_FORWARD
+    fitted = {tuple(sorted(e.features)) for e in result.evaluations}
+    # Step 1 is the whole candidate pool as singletons -- nothing is privileged.
+    assert all((c,) in fitted for c in GREEDY_COLS)
+    # No subset is fitted twice, even though beam paths propose overlapping supersets.
+    assert len(fitted) == len(result.evaluations)
+    assert result.search_trace
+    assert [st.step for st in result.search_trace] == list(range(1, len(result.search_trace) + 1))
+    for st in result.search_trace:
+        assert len(st.beam) <= screener.config.beam_width
+        assert len(st.best_subset) == st.step
+    # The curve is the unanchored analogue of base_frac.
+    curve = result.marginal_gain_curve
+    assert list(curve["step"]) == [st.step for st in result.search_trace]
+    assert "used_trap_fallback" in curve.columns
+
+
+@pytest.mark.slow
+def test_greedy_forward_stops_at_the_depth_cap() -> None:
+    screener = _greedy_screener(greedy_max_depth=1)
+    result = screener.screen(GREEDY_COLS, strategy=ScreenStrategy.GREEDY_FORWARD)
+
+    assert result.stop_reason == GreedyStopReason.DEPTH_CAP
+    assert len(result.search_trace) == 1
+    assert max(e.n_features for e in result.evaluations) == 1
+
+
+@pytest.mark.slow
+def test_greedy_forward_stops_when_the_marginal_gain_flattens() -> None:
+    """Step 1 has no predecessor so it can never trip the stop; step 2 always can."""
+    screener = _greedy_screener(greedy_max_depth=4, greedy_min_relative_gain=float("inf"))
+    result = screener.screen(GREEDY_COLS, strategy=ScreenStrategy.GREEDY_FORWARD)
+
+    assert result.stop_reason == GreedyStopReason.MIN_GAIN
+    assert len(result.search_trace) == 2
+    assert result.search_trace[0].relative_gain == float("inf")
+
+
+@pytest.mark.slow
+def test_greedy_forward_treats_a_baseline_as_a_benchmark_not_a_seed() -> None:
+    """The same argument that anchors ABLATION only benchmarks GREEDY_FORWARD."""
+    benchmark = ["g_a", "g_b"]
+    screener = _greedy_screener(beam_width=2, greedy_max_depth=2, greedy_min_relative_gain=0.0)
+    result = screener.screen(GREEDY_COLS, strategy=ScreenStrategy.GREEDY_FORWARD, baseline=benchmark)
+
+    assert result.baseline == ("g_a", "g_b")
+    prior = result.baseline_prior
+    assert prior.role == BaselineRole.BENCHMARK
+    assert "benchmark" in str(prior)
+    # Fitted for comparison...
+    assert tuple(sorted(benchmark)) in {tuple(sorted(e.features)) for e in result.evaluations}
+    # ...but it seeded nothing: singletons outside it were still fitted, which an anchored
+    # search would never do.
+    assert ("g_c",) in {tuple(sorted(e.features)) for e in result.evaluations}
+    assert ("g_d",) in {tuple(sorted(e.features)) for e in result.evaluations}
+
+
+@pytest.mark.slow
+def test_greedy_forward_without_a_benchmark_reports_no_prior() -> None:
+    screener = _greedy_screener(greedy_max_depth=1)
+    result = screener.screen(GREEDY_COLS, strategy=ScreenStrategy.GREEDY_FORWARD)
+
+    assert result.baseline is None
+    assert result.baseline_prior is None
+    assert result.base_frac is None
+
+
+def test_marginal_gain_curve_is_empty_for_an_anchored_screen() -> None:
+    """Only GREEDY_FORWARD has a trace; ABLATION reports base_frac instead."""
+    screener = _greedy_screener()
+    evs = [_make_subset_eval(features=("a", "b"), axis_sep=1.0)]
+    statuses = screener._classify(evs)
+    evs = [screener._with_status(e, st) for e, st in zip(evs, statuses)]
+    result = HmmScreenerResult(evaluations=evs, results_=screener._build_results_df(evs, ("a", "b")),
+                               baseline=("a", "b"), strategy=ScreenStrategy.ABLATION)
+
+    assert result.search_trace == ()
+    assert result.marginal_gain_curve.empty
+    assert result.baseline_prior.role == BaselineRole.ANCHOR
+    assert "prior" in str(result.baseline_prior)
