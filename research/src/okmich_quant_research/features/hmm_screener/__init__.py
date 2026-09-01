@@ -35,7 +35,8 @@ from ._evaluators import (
 from ._collinearity import nearest_duplicate_vif, stage0c_collinearity_filter
 from ._pareto import ParetoStatus, classify_pareto
 from ._persistence import adjacent_pair_count, persistence_score, stage0b_persistence_filter
-from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
+from ._result import (AxisEvaluation, BaselinePrior, BaselineRole, GreedyStep, GreedyStopReason,
+                      HmmScreenerResult, SubsetEvaluation, WinnerPool)
 from .screener import HmmFeatureScreener
 
 __all__ = [
@@ -45,6 +46,11 @@ __all__ = [
     "ScreenStrategy",
     "SubsetEvaluation",
     "AxisEvaluation",
+    "BaselinePrior",
+    "BaselineRole",
+    "WinnerPool",
+    "GreedyStep",
+    "GreedyStopReason",
     "ParetoStatus",
     "classify_pareto",
     "AxisEvaluator",

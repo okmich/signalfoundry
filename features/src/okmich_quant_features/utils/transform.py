@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import PowerTransformer
-from typing import Union, Tuple, Optional
+from typing import Dict, Union, Tuple, Optional
 
 
 def logit_transform(series: Union[np.ndarray, pd.Series], epsilon: float = 1e-9) -> Union[np.ndarray, pd.Series]:
@@ -317,6 +317,14 @@ class LogTransformer(BaseEstimator, TransformerMixin):
 # Helper Functions
 # ============================================================================
 
+# Emitted verbatim by FeatureEDA.recommend_transformations for heavy-tailed features.
+QUANTILE_OR_RANK = 'quantile/rank'
+
+# Transformations get_transformer can build. 'standardize' is deliberately absent: scaling is
+# the pipeline scaler's job, not this function's, and callers rely on it being skipped here.
+FITTABLE_TRANSFORMATIONS = ('yeo-johnson', 'box-cox', 'logit', 'log')
+
+
 def get_transformer(transformation_type: str, **kwargs):
     transformers = {
         'yeo-johnson': YeoJohnsonTransformer,
@@ -334,7 +342,105 @@ def get_transformer(transformation_type: str, **kwargs):
     return transformers[transformation_type](**kwargs)
 
 
-def apply_transformation_recommendations(df: pd.DataFrame, transformation_df: pd.DataFrame, replace_original: bool = True) -> pd.DataFrame:
+def primary_transformation(transformation_str) -> Optional[str]:
+    """
+    First fittable transformation named in a recommendation string, or None.
+
+    Recommendation strings are comma separated and already ordered by the recommender's own
+    priority, e.g. ``'box-cox, standardize'``. The previous implementation skipped the entire
+    row whenever 'standardize' appeared anywhere in the string, so that example silently
+    discarded the box-cox and passed the feature through untransformed -- and FeatureEDA emits
+    exactly that pairing routinely, appending 'standardize' for high-CV features and 'box-cox'
+    for non-normal positive ones.
+
+    Parameters
+    ----------
+    transformation_str : str or NaN
+        Comma-separated recommendation, e.g. 'logit, standardize'.
+
+    Returns
+    -------
+    Optional[str]
+        A member of FITTABLE_TRANSFORMATIONS, or None when the row names nothing fittable
+        (including 'none' and a bare 'standardize').
+    """
+    if transformation_str is None:
+        return None
+    if not isinstance(transformation_str, str):
+        try:
+            if pd.isna(transformation_str):
+                return None
+        except (TypeError, ValueError):
+            pass
+        transformation_str = str(transformation_str)
+
+    for token in transformation_str.split(','):
+        token = token.strip()
+        if token in FITTABLE_TRANSFORMATIONS:
+            return token
+    return None
+
+
+def fit_transformation_recommendations(df: pd.DataFrame, transformation_df: pd.DataFrame, verbose: bool = True,
+                                       **kwargs) -> Dict[str, object]:
+    """
+    Fit one transformer per recommended feature and return them for reuse.
+
+    Call this ONCE, on the training window. Persist the result with joblib and hand it to
+    :func:`apply_transformation_recommendations` at inference time, so no parameter is ever
+    re-estimated from serving data.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Training feature frame. Every transformer's parameters come from this frame only.
+    transformation_df : pd.DataFrame
+        Recommendations from ``FeatureEDA.recommend_transformations()``.
+    verbose : bool, default True
+        Print a per-feature warning when a transformer cannot be fitted.
+    **kwargs
+        Forwarded to the transformer constructors (e.g. ``standardize=True``, ``epsilon=1e-9``).
+
+    Returns
+    -------
+    Dict[str, object]
+        Feature name -> fitted transformer. joblib-serialisable.
+
+    Examples
+    --------
+    >>> fitted = fit_transformation_recommendations(train_df, recommendations)
+    >>> joblib.dump(fitted, 'transformers.pkl')
+    >>> # ... later, in the serving process ...
+    >>> fitted = joblib.load('transformers.pkl')
+    >>> X = apply_transformation_recommendations(live_df, recommendations, fitted_transformers=fitted)
+    """
+    fitted_transformers = {}
+
+    for _, row in transformation_df.iterrows():
+        feature = row['feature']
+        primary_trans = primary_transformation(row.get('transformations'))
+        if primary_trans is None:
+            continue
+
+        if feature not in df.columns:
+            if verbose:
+                print(f"Warning: Failed to fit {feature} with {primary_trans}: column not in dataframe")
+            continue
+
+        try:
+            transformer = get_transformer(primary_trans, **kwargs)
+            transformer.fit(df[feature])
+            fitted_transformers[feature] = transformer
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Failed to fit {feature} with {primary_trans}: {e}")
+
+    return fitted_transformers
+
+
+def apply_transformation_recommendations(df: pd.DataFrame, transformation_df: pd.DataFrame,
+                                         replace_original: bool = True,
+                                         fitted_transformers: Optional[Dict[str, object]] = None) -> pd.DataFrame:
     """
     Apply transformation recommendations from FeatureEDA.
 
@@ -347,6 +453,17 @@ def apply_transformation_recommendations(df: pd.DataFrame, transformation_df: pd
     replace_original : bool, default True
         If True, replaces original columns with transformed values (in-place).
         If False, creates new columns with suffix (e.g., 'feature_yeojohnson').
+    fitted_transformers : Dict[str, object], optional
+        Transformers already fitted by :func:`fit_transformation_recommendations`. When
+        supplied, NOTHING is refitted -- this is the inference-safe path. A recommended
+        feature missing from the mapping raises instead of quietly falling back to a refit,
+        because a silent per-column refit on serving data is precisely the train/serve skew
+        this argument exists to prevent.
+
+        When None (the default), each transformer is fitted on ``df``. That is correct for a
+        training frame and unsafe for anything else: the Box-Cox lambda and log offset would
+        be estimated from whatever batch you passed, so the same bar transforms differently
+        depending on what else is in the batch.
 
     Returns
     -------
@@ -360,34 +477,49 @@ def apply_transformation_recommendations(df: pd.DataFrame, transformation_df: pd
 
     # Keep original + add new transformed columns
     >>> df_transformed = apply_transformation_recommendations(df, recommendations, replace_original=False)
+
+    # Inference: reuse the training parameters, refitting nothing
+    >>> fitted = fit_transformation_recommendations(train_df, recommendations)
+    >>> df_transformed = apply_transformation_recommendations(live_df, recommendations,
+    ...                                                       fitted_transformers=fitted)
     """
     df_result = df.copy()
-    fitted_transformers = {}
+    use_fitted = fitted_transformers is not None
 
-    for idx, row in transformation_df.iterrows():
+    for _, row in transformation_df.iterrows():
         feature = row['feature']
-        trans_str = row['transformations']
-
-        if pd.isna(trans_str) or trans_str == 'none' or 'standardize' in trans_str:
+        primary_trans = primary_transformation(row.get('transformations'))
+        if primary_trans is None:
             continue
 
-        # Extract primary transformation (first in comma-separated list)
-        primary_trans = trans_str.split(',')[0].strip()
+        if feature not in df.columns:
+            print(f"Warning: Failed to transform {feature} with {primary_trans}: column not in dataframe")
+            continue
 
-        # Map to transformer type
-        if primary_trans in ['yeo-johnson', 'box-cox', 'logit', 'log']:
-            try:
-                transformer = get_transformer(primary_trans)
-                transformed = transformer.fit_transform(df[feature])
+        # Deliberately outside the try below: falling through to a refit here would reintroduce
+        # the exact bug this path guards against, and doing so silently is worse than failing.
+        if use_fitted and feature not in fitted_transformers:
+            raise KeyError(
+                f"No fitted transformer for '{feature}', which the recommendations require "
+                f"('{primary_trans}'). Refitting it on this frame would re-estimate its parameters from "
+                f"serving data. Fit it with fit_transformation_recommendations on the training frame, or "
+                f"drop it from transformation_df."
+            )
 
-                if replace_original:
-                    # Replace original column in-place
-                    df_result[feature] = transformed
-                else:
-                    # Add new column with transformation suffix
-                    new_name = f"{feature}_{primary_trans.replace('-', '')}"
-                    df_result[new_name] = transformed
+        try:
+            if use_fitted:
+                transformed = fitted_transformers[feature].transform(df[feature])
+            else:
+                transformed = get_transformer(primary_trans).fit_transform(df[feature])
 
-            except Exception as e:
-                print(f"Warning: Failed to transform {feature} with {primary_trans}: {e}")
+            if replace_original:
+                # Replace original column in-place
+                df_result[feature] = transformed
+            else:
+                # Add new column with transformation suffix
+                new_name = f"{feature}_{primary_trans.replace('-', '')}"
+                df_result[new_name] = transformed
+
+        except Exception as e:
+            print(f"Warning: Failed to transform {feature} with {primary_trans}: {e}")
     return df_result

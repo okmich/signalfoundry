@@ -20,6 +20,7 @@ from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.preprocessing import StandardScaler, RobustScaler
 
 from okmich_quant_features.utils.transform_pipeline import (
+    config_transformation_type,
     encode_transformation_recommendation,
     export_transformation_config,
     load_transformation_config,
@@ -453,5 +454,158 @@ def teardown_module(module):
             pass  # Ignore cleanup errors
 
 
+# =============================================================================
+# Test Config Encoding Of Every Recommendation Type
+# =============================================================================
+
+class TestConfigTransformationType:
+    """Test the recommendation-string to config-type mapping."""
+
+    def test_single_tokens(self):
+        assert config_transformation_type('yeo-johnson') == 'yeo-johnson'
+        assert config_transformation_type('box-cox') == 'box-cox'
+        assert config_transformation_type('logit') == 'logit'
+        assert config_transformation_type('log') == 'log'
+
+    def test_none_and_missing_are_passthrough(self):
+        assert config_transformation_type('none') == 'passthrough'
+        assert config_transformation_type(None) == 'passthrough'
+        assert config_transformation_type(np.nan) == 'passthrough'
+
+    def test_standardize_reaches_the_config(self):
+        """Previously collapsed to 'passthrough', so the exported JSON under-reported what the
+        EDA actually recommended."""
+        assert config_transformation_type('standardize') == 'standardize'
+
+    def test_quantile_or_rank_reaches_the_config(self):
+        """A quantile transform is not affine, so no downstream scaler can stand in for it."""
+        assert config_transformation_type('quantile/rank') == 'quantile'
+
+    def test_compound_string_keeps_the_leading_transformation(self):
+        """Regression: any occurrence of 'standardize' used to void the whole row."""
+        assert config_transformation_type('box-cox, standardize') == 'box-cox'
+        assert config_transformation_type('logit, quantile/rank, standardize') == 'logit'
+
+    def test_log_is_not_confused_with_logit(self):
+        assert config_transformation_type('logit') == 'logit'
+        assert config_transformation_type('log') == 'log'
+
+
+class TestPipelineCoversEveryRecommendationType:
+    """Test that encoded types actually become pipeline steps."""
+
+    @staticmethod
+    def _frame(n=200):
+        rng = np.random.default_rng(3)
+        return pd.DataFrame({
+            'heavy': rng.standard_t(df=1.5, size=n),
+            'wide': rng.normal(500, 250, n),
+            'plain': rng.normal(0, 1, n),
+        })
+
+    @staticmethod
+    def _recommendations():
+        return pd.DataFrame({
+            'feature': ['heavy', 'wide', 'plain'],
+            'transformations': ['quantile/rank', 'standardize', 'none'],
+            'reason': ['Heavy outliers', 'High variance', 'Well-behaved'],
+        })
+
+    def test_quantile_group_becomes_a_pipeline_step(self):
+        config = encode_transformation_recommendation(self._recommendations())
+        assert config['transformations']['heavy']['type'] == 'quantile'
+
+        pipeline = build_pipeline_from_config(config, scaler_type='robust')
+        step_names = [name for name, _, _ in pipeline.named_steps['transforms'].transformers]
+        assert 'quantile' in step_names
+
+    def test_quantile_transform_actually_changes_the_data(self):
+        frame = self._frame()
+        pipeline = build_pipeline_from_config(encode_transformation_recommendation(self._recommendations()),
+                                              scaler_type=None)
+        out = pd.DataFrame(pipeline.fit_transform(frame), columns=frame.columns)
+        # A heavy-tailed column mapped to a normal output should lose its extreme kurtosis.
+        assert out['heavy'].abs().max() < frame['heavy'].abs().max()
+
+    def test_standardize_is_left_to_the_global_scaler(self):
+        """Stacking a per-column StandardScaler under the default RobustScaler would scale
+        those columns twice."""
+        config = encode_transformation_recommendation(self._recommendations())
+        pipeline = build_pipeline_from_config(config, scaler_type='robust')
+        step_names = [name for name, _, _ in pipeline.named_steps['transforms'].transformers]
+        assert 'standardize' not in step_names
+        assert 'scaler' in pipeline.named_steps
+
+    def test_standardize_is_materialised_when_there_is_no_global_scaler(self):
+        config = encode_transformation_recommendation(self._recommendations())
+        pipeline = build_pipeline_from_config(config, scaler_type=None)
+        step_names = [name for name, _, _ in pipeline.named_steps['transforms'].transformers]
+        assert 'standardize' in step_names
+        assert 'scaler' not in pipeline.named_steps
+
+    def test_standardize_is_applied_when_no_global_scaler(self):
+        frame = self._frame()
+        pipeline = build_pipeline_from_config(encode_transformation_recommendation(self._recommendations()),
+                                              scaler_type=None)
+        out = pd.DataFrame(pipeline.fit_transform(frame), columns=frame.columns)
+        assert abs(out['wide'].mean()) < 0.1
+        assert abs(out['wide'].std(ddof=0) - 1.0) < 0.1
+
+    def test_pipeline_round_trips_through_a_saved_config(self, tmp_path):
+        config_path = tmp_path / 'config.json'
+        export_transformation_config(self._recommendations(), str(config_path))
+        pipeline = build_pipeline_from_config(str(config_path), scaler_type=None)
+        out = pipeline.fit_transform(self._frame())
+        assert out.shape == (200, 3)
+
+
+class TestConsoleOutputIsEncodable:
+    """U+2713 and U+2192 are unencodable in cp1252, the default Windows console codepage, so
+    every print here raised UnicodeEncodeError -- build_pipeline_from_config died partway
+    through returning its pipeline. Same class of bug as the arrow fixed in 9bf4368."""
+
+    @staticmethod
+    def _assert_cp1252_safe(text):
+        try:
+            text.encode('cp1252')
+        except UnicodeEncodeError as exc:
+            raise AssertionError(f"console output is not encodable on a cp1252 terminal: {exc}") from exc
+
+    def test_build_pipeline_output(self, sample_recommendations, capsys):
+        config = encode_transformation_recommendation(sample_recommendations)
+        build_pipeline_from_config(config, scaler_type='robust')
+        self._assert_cp1252_safe(capsys.readouterr().out)
+
+    def test_passthrough_pipeline_output(self, capsys):
+        build_pipeline_from_config({'transformations': {}}, scaler_type=None)
+        self._assert_cp1252_safe(capsys.readouterr().out)
+
+    def test_scaler_only_pipeline_output(self, capsys):
+        build_pipeline_from_config({'transformations': {}}, scaler_type='robust')
+        self._assert_cp1252_safe(capsys.readouterr().out)
+
+    def test_export_and_load_config_output(self, sample_recommendations, tmp_path, capsys):
+        path = tmp_path / 'config.json'
+        export_transformation_config(sample_recommendations, str(path))
+        load_transformation_config(str(path))
+        self._assert_cp1252_safe(capsys.readouterr().out)
+
+    def test_artifact_save_and_load_output(self, sample_recommendations, sample_data, tmp_path, capsys):
+        config = encode_transformation_recommendation(sample_recommendations)
+        pipeline = build_pipeline_from_config(config, scaler_type='robust')
+        pipeline.fit(sample_data)
+        save_pipeline_artifacts(pipeline, list(sample_data.columns), str(tmp_path / 'artifacts'),
+                                metadata={'version': '1'})
+        load_pipeline_artifacts(str(tmp_path / 'artifacts'))
+        self._assert_cp1252_safe(capsys.readouterr().out)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_literal_quantile_token_is_not_dropped():
+    """'quantile/rank' mapped to 'quantile' but a bare 'quantile' fell through to passthrough,
+    so re-encoding an already-encoded frame silently lost the transformation."""
+    assert config_transformation_type('quantile') == 'quantile'
+    assert config_transformation_type('quantile/rank') == 'quantile'

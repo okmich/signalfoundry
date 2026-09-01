@@ -15,6 +15,8 @@ from .transform import (
     LogitTransformer,
     LogTransformer,
     get_transformer,
+    primary_transformation,
+    fit_transformation_recommendations,
     apply_transformation_recommendations,
 )
 from .rolling_transforms import rolling_zscore, rolling_percentile_rank, rolling_volatility_scale, rolling_slope, \
@@ -22,6 +24,8 @@ from .rolling_transforms import rolling_zscore, rolling_percentile_rank, rolling
 
 from .transform_pipeline import (
     # Config export/load
+    config_transformation_type,
+    encode_transformation_recommendation,
     export_transformation_config,
     load_transformation_config,
     # Pipeline builder

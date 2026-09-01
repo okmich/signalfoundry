@@ -12,10 +12,10 @@ Workflow:
     >>> candidates = reg.candidates_for("regime", min_relevance="HIGH").names()
     >>> config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=4)
     >>> screener = HmmFeatureScreener(config, raw_data, feature_engineering_fn)
-    >>> result = screener.screen(candidates, strategy=ScreenStrategy.ABLATION,
-    ...                           baseline=["macd_26_55_13", "dbl_smoothed_log_rets"])
-    >>> result.results_   # ranked DataFrame
-    >>> result.asymmetry_candidates    # Pareto-optimal non-trap subsets (Stage-1 candidates)
+    >>> result = screener.screen(candidates, strategy=ScreenStrategy.GREEDY_FORWARD)
+    >>> result.results_             # ranked DataFrame
+    >>> result.marginal_gain_curve  # what each greedy step bought
+    >>> result.asymmetry_candidates # Pareto-optimal non-trap subsets (Stage-1 candidates)
 
 Implementation notes:
     * Evaluator state labels are ``argmax(filtering gamma)`` (causal MAP), not the offline Viterbi path.
@@ -49,7 +49,8 @@ from ._evaluators import get_evaluator
 from ._persistence import stage0b_persistence_filter
 from ._collinearity import stage0c_collinearity_filter
 from ._pareto import ParetoStatus, classify_pareto
-from ._result import AxisEvaluation, HmmScreenerResult, SubsetEvaluation
+from ._result import (AxisEvaluation, GreedyStep, GreedyStopReason, HmmScreenerResult,
+                      SubsetEvaluation)
 
 
 _PASSTHROUGH_COLUMNS = ("open", "high", "low", "close", "tick_volume", "volume")
@@ -108,12 +109,22 @@ class HmmFeatureScreener:
         candidate_features : list[str]
             Features to screen. Must be column names produced by ``feature_engineering``.
         strategy : ScreenStrategy
-            ``ABLATION`` (default): baseline + drop-one + add-one ablation.
-            ``EXHAUSTIVE``: all non-empty subsets up to ``max_subset_size``.
+            ``ABLATION`` (default): baseline + drop-one + add-one ablation. Anchored -- read
+            ``result.base_frac`` beside the verdict.
+            ``GREEDY_FORWARD``: unanchored beam search up from the empty set, width
+            ``config.beam_width``. Stops at the depth cap or when a step's gain falls below
+            ``config.greedy_min_relative_gain``; ``result.marginal_gain_curve`` shows what each
+            feature bought.
+            ``EXHAUSTIVE``: all non-empty subsets up to ``max_subset_size``. ``2**n - 1`` fits --
+            tractable only on small pools.
         baseline : list[str], optional
-            Reference subset for ``ABLATION``. Defaults to all surviving candidates if not provided.
+            Under ``ABLATION`` this is the ANCHOR: it seeds every subset, so it is a prior on the
+            result (defaults to all surviving candidates). Under ``GREEDY_FORWARD`` the same
+            argument is a BENCHMARK: fitted once for comparison, it seeds nothing, and omitting it
+            simply means the run reports no benchmark. Ignored by ``EXHAUSTIVE``.
         max_subset_size : int, optional
-            Cap for ``EXHAUSTIVE``. Defaults to ``len(candidate_features)``.
+            Cap for ``EXHAUSTIVE`` (defaults to ``len(candidate_features)``) and depth cap for
+            ``GREEDY_FORWARD`` (defaults to ``config.greedy_max_depth``).
         """
         df = self.feature_engineering(self.raw_data.copy())
         missing = [c for c in candidate_features if c not in df.columns]
@@ -154,26 +165,160 @@ class HmmFeatureScreener:
                     f"structure in any moment). See result.stage_reports for which filter rejected them.",
                     UserWarning, stacklevel=2)
 
-        subsets = self._generate_subsets(surviving, strategy, baseline, max_subset_size)
-        if not subsets:
+        effective_baseline = self._effective_baseline(surviving, strategy, baseline)
+        trace: tuple[GreedyStep, ...] = ()
+        stop_reason: GreedyStopReason | None = None
+        if strategy == ScreenStrategy.GREEDY_FORWARD:
+            # Adaptive: each step's candidates depend on the previous step's fits, so generation
+            # cannot be hoisted out of the fit loop the way ABLATION/EXHAUSTIVE do it.
+            evaluations, trace, stop_reason = self._greedy_forward(
+                surviving, df, max_subset_size, effective_baseline)
+        else:
+            subsets = self._generate_subsets(surviving, strategy, baseline, max_subset_size)
+            if not subsets:
+                raise ValueError("No subsets to screen. Check candidate_features and strategy.")
+            evaluations = [self._evaluate_subset(subset, df) for subset in subsets]
+        if not evaluations:
             raise ValueError("No subsets to screen. Check candidate_features and strategy.")
-
-        # Per-subset fit + diagnostic.
-        evaluations: list[SubsetEvaluation] = []
-        for subset in subsets:
-            evaluations.append(self._evaluate_subset(subset, df))
 
         statuses = self._classify(evaluations)
         evaluations = [self._with_status(ev, status) for ev, status in zip(evaluations, statuses)]
 
-        results_df = self._build_results_df(evaluations)
+        results_df = self._build_results_df(evaluations, effective_baseline)
         return HmmScreenerResult(
             evaluations=evaluations,
             results_=results_df,
             stage_reports=[stage0_report, persistence_report, collinearity_report],
+            baseline=effective_baseline,
+            strategy=strategy,
+            search_trace=trace,
+            stop_reason=stop_reason,
         )
 
     # -------------------------------------------------------- subset generation
+
+    @staticmethod
+    def _effective_baseline(surviving: list[str], strategy: ScreenStrategy,
+                            baseline: list[str] | None) -> tuple[str, ...] | None:
+        """The anchor ABLATION actually uses, after intersecting the request with the survivors.
+
+        Single source of truth for both subset generation and the ``BaselinePrior`` audit, so the
+        prior can never be measured against a baseline different from the one that was screened.
+        Returns ``None`` for strategies that carry no anchor.
+        """
+        if not surviving:
+            return None
+        if strategy == ScreenStrategy.GREEDY_FORWARD:
+            # Benchmark, not an anchor: it is fitted once so the unanchored winner can be scored
+            # against the frozen set it replaces, but it seeds nothing. Absent means no benchmark;
+            # unlike ABLATION there is no "default to everything" fallback, because there is no
+            # subset the search needs to start from.
+            if baseline is None:
+                return None
+            benchmark = tuple(c for c in baseline if c in surviving)
+            return benchmark or None
+        if strategy != ScreenStrategy.ABLATION:
+            return None
+        requested = list(surviving) if baseline is None else baseline
+        baseline_set = tuple(c for c in requested if c in surviving)
+        if not baseline_set:
+            raise ValueError(f"baseline {baseline} has no overlap with surviving candidates {surviving}.")
+        return baseline_set
+
+    def _rank_for_beam(self, evaluations: list[SubsetEvaluation]
+                       ) -> tuple[list[SubsetEvaluation], bool]:
+        """Order candidates for beam selection: axis_separation among quality-gated subsets.
+
+        Returns ``(ranked, used_trap_fallback)``. The flag is the caller's only signal that the
+        step ranked on trapped subsets, which is otherwise invisible in a rising gain curve.
+
+        Both gates are ABSOLUTE per-subset -- the Phase-A thresholds and ``honesty_trap_rate`` are
+        config constants, not population statistics like the Pareto frontier. A subset's
+        eligibility therefore does not shift as the search grows, which is what makes the beam
+        reproducible and the trace replayable.
+
+        Trap exclusion is the load-bearing part. Ranking on raw ``axis_separation`` would walk the
+        search straight into the confidence-trap quadrant, which is where most high-separation
+        subsets live; the fallback to merely non-fragile fires only when EVERY candidate at a step
+        is a trap, so a trapped axis still returns a best-effort path instead of stopping dead.
+        """
+        healthy = [e for e in evaluations
+                   if e.error is None and np.isfinite(e.axis_separation) and np.isfinite(e.honesty)
+                   and not self._is_fragile(e)]
+        non_trap = [e for e in healthy if e.honesty <= self.config.honesty_trap_rate]
+        pool = non_trap or healthy
+        return sorted(pool, key=lambda e: e.axis_separation, reverse=True), not non_trap
+
+    def _greedy_forward(self, surviving: list[str], df: pd.DataFrame, max_subset_size: int | None,
+                        benchmark: tuple[str, ...] | None
+                        ) -> tuple[list[SubsetEvaluation], tuple[GreedyStep, ...], GreedyStopReason]:
+        """Beam search up from the empty set. Returns (all evaluations, per-step trace, stop reason).
+
+        Every subset fitted along the way is returned, not just the beam -- the frontier is the
+        audit trail, and dropping the non-beam fits would make the result look like a far narrower
+        search than the one actually paid for.
+        """
+        depth_cap = max_subset_size if max_subset_size is not None else self.config.greedy_max_depth
+        depth_cap = min(depth_cap, len(surviving))
+        evaluated: dict[tuple[str, ...], SubsetEvaluation] = {}
+
+        def _fit(key: tuple[str, ...]) -> SubsetEvaluation:
+            if key not in evaluated:
+                evaluated[key] = self._evaluate_subset(key, df)
+            return evaluated[key]
+
+        trace: list[GreedyStep] = []
+        beam: tuple[tuple[str, ...], ...] = ()
+        best_sep = 0.0
+        stop_reason = GreedyStopReason.DEPTH_CAP
+        for step in range(1, depth_cap + 1):
+            if step == 1:
+                candidates = [(c,) for c in surviving]
+            else:
+                seen: set[tuple[str, ...]] = set()
+                candidates = []
+                for path in beam:
+                    for col in surviving:
+                        if col in path:
+                            continue
+                        key = tuple(sorted(path + (col,)))
+                        # Two beam paths routinely propose the same superset; fit it once.
+                        if key in seen or key in evaluated:
+                            continue
+                        seen.add(key)
+                        candidates.append(key)
+            if not candidates:
+                stop_reason = GreedyStopReason.POOL_EXHAUSTED
+                break
+
+            step_evals = [_fit(key) for key in candidates]
+            ranked, trap_fallback = self._rank_for_beam(step_evals)
+            if not ranked:
+                # Every candidate at this depth was structurally degenerate or errored.
+                stop_reason = GreedyStopReason.NO_ELIGIBLE_CANDIDATES
+                break
+
+            step_best = ranked[0]
+            gain = step_best.axis_separation - best_sep
+            # Step 1 has no predecessor, so its gain is unbounded by construction and can never
+            # trip the min-gain stop -- the search always fits at least one full step.
+            relative_gain = (gain / best_sep) if best_sep > 0 else float("inf")
+            beam = tuple(tuple(e.features) for e in ranked[: self.config.beam_width])
+            trace.append(GreedyStep(
+                step=step, n_fitted=len(candidates), beam=beam,
+                best_subset=tuple(step_best.features), best_separation=step_best.axis_separation,
+                gain=gain, relative_gain=relative_gain, used_trap_fallback=trap_fallback,
+            ))
+            best_sep = max(best_sep, step_best.axis_separation)
+            if relative_gain < self.config.greedy_min_relative_gain:
+                # Includes the negative-gain case: adding a feature made the best path worse.
+                stop_reason = GreedyStopReason.MIN_GAIN
+                break
+
+        # The benchmark seeds nothing, but it must be fitted or `base_frac` has no numerator.
+        if benchmark:
+            _fit(tuple(sorted(benchmark)))
+        return list(evaluated.values()), tuple(trace), stop_reason
 
     def _generate_subsets(self, surviving: list[str], strategy: ScreenStrategy,
                          baseline: list[str] | None, max_subset_size: int | None) -> list[tuple[str, ...]]:
@@ -188,11 +333,7 @@ class HmmFeatureScreener:
             return out
 
         # ABLATION: baseline + drop-one (for each in baseline) + add-one (for each not in baseline).
-        if baseline is None:
-            baseline = list(surviving)
-        baseline_set = [c for c in baseline if c in surviving]
-        if not baseline_set:
-            raise ValueError(f"baseline {baseline} has no overlap with surviving candidates {surviving}.")
+        baseline_set = list(self._effective_baseline(surviving, strategy, baseline))
         seen: set[tuple[str, ...]] = set()
         out: list[tuple[str, ...]] = []
 
@@ -404,13 +545,18 @@ class HmmFeatureScreener:
         )
 
     @staticmethod
-    def _build_results_df(evaluations: list[SubsetEvaluation]) -> pd.DataFrame:
+    def _build_results_df(evaluations: list[SubsetEvaluation],
+                          baseline: tuple[str, ...] | None = None) -> pd.DataFrame:
         rows = []
+        # Under ABLATION all but the drop-one rows are supersets of the anchor, so `contains_baseline`
+        # is what lets a reader see at a glance how little of the frontier is anchor-independent.
+        baseline_set = set(baseline or ())
         for i, ev in enumerate(evaluations):
             rows.append({
                 "subset_id": i,
                 "features": ",".join(ev.features),
                 "n_features": ev.n_features,
+                "contains_baseline": bool(baseline_set) and baseline_set.issubset(ev.features),
                 "axis_separation": ev.axis_separation,
                 "axis_separation_range": ev.axis_separation_range,
                 "secondary_robustness": ev.secondary_robustness,

@@ -26,6 +26,8 @@ from okmich_quant_features.utils.transform import (
     LogTransformer,
     # Helper functions
     get_transformer,
+    primary_transformation,
+    fit_transformation_recommendations,
     apply_transformation_recommendations,
 )
 
@@ -624,6 +626,151 @@ def teardown_module(module):
     """Module-level teardown to cleanup any test artifacts."""
     import gc
     gc.collect()
+
+
+# =============================================================================
+# Test Inference Safety (fit once on train, transform anywhere)
+# =============================================================================
+
+class TestPrimaryTransformation:
+    """Test the recommendation-string parser."""
+
+    def test_single_token(self):
+        assert primary_transformation('yeo-johnson') == 'yeo-johnson'
+
+    def test_none_and_missing(self):
+        assert primary_transformation('none') is None
+        assert primary_transformation(None) is None
+        assert primary_transformation(np.nan) is None
+
+    def test_bare_standardize_is_not_fittable_here(self):
+        """Scaling stays the pipeline scaler's job."""
+        assert primary_transformation('standardize') is None
+
+    def test_compound_string_keeps_the_fittable_transformation(self):
+        """Regression: 'standardize' appearing anywhere used to void the whole row, so this
+        recommendation silently passed the feature through untransformed."""
+        assert primary_transformation('box-cox, standardize') == 'box-cox'
+        assert primary_transformation('logit, quantile/rank, standardize') == 'logit'
+
+    def test_first_token_wins(self):
+        assert primary_transformation('log, box-cox') == 'log'
+
+
+class TestFitTransformationRecommendations:
+    """Test fitting transformers once for reuse."""
+
+    def test_returns_one_fitted_transformer_per_feature(self, sample_dataframe, sample_recommendations):
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+        assert set(fitted) == {'returns', 'volume', 'hurst'}
+
+    def test_fitted_transformers_carry_state(self, sample_dataframe, sample_recommendations):
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+        assert fitted['volume'].offset_ is not None
+        assert fitted['returns'].lambda_ is not None
+
+    def test_standardize_only_row_is_skipped(self, sample_dataframe):
+        recommendations = pd.DataFrame({'feature': ['returns'], 'transformations': ['standardize']})
+        assert fit_transformation_recommendations(sample_dataframe, recommendations) == {}
+
+    def test_missing_column_warns_and_is_skipped(self, sample_dataframe, capsys):
+        recommendations = pd.DataFrame({'feature': ['nope'], 'transformations': ['log']})
+        fitted = fit_transformation_recommendations(sample_dataframe, recommendations)
+        assert fitted == {}
+        assert 'Warning' in capsys.readouterr().out
+
+    def test_verbose_false_is_silent(self, sample_dataframe, capsys):
+        recommendations = pd.DataFrame({'feature': ['nope'], 'transformations': ['log']})
+        fit_transformation_recommendations(sample_dataframe, recommendations, verbose=False)
+        assert capsys.readouterr().out == ''
+
+
+class TestInferenceSafeApplication:
+    """The train/serve skew this module exists to prevent."""
+
+    @staticmethod
+    def _shifted_batch():
+        """An inference batch drawn from a visibly different distribution."""
+        rng = np.random.default_rng(7)
+        return pd.DataFrame({
+            'returns': rng.normal(0.01, 0.05, 50),
+            'volume': np.abs(rng.normal(0, 1, 50)) * 5000 + 8000,
+            'hurst': rng.uniform(0.45, 0.55, 50),
+            'atr': np.abs(rng.normal(0, 1, 50)) * 30 + 200,
+        })
+
+    def test_fitted_transformers_are_not_refitted(self, sample_dataframe, sample_recommendations):
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+        lambda_before = fitted['returns'].lambda_
+        offset_before = fitted['volume'].offset_
+
+        apply_transformation_recommendations(self._shifted_batch(), sample_recommendations,
+                                             fitted_transformers=fitted)
+
+        assert fitted['returns'].lambda_ == lambda_before
+        assert fitted['volume'].offset_ == offset_before
+
+    def test_inference_output_differs_from_a_refit_on_the_batch(self, sample_dataframe, sample_recommendations):
+        """If these matched, the fitted path would be doing nothing."""
+        batch = self._shifted_batch()
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+
+        safe = apply_transformation_recommendations(batch, sample_recommendations, fitted_transformers=fitted)
+        refit = apply_transformation_recommendations(batch, sample_recommendations)
+
+        # 'returns' is Yeo-Johnson, whose lambda is estimated from the data it is fitted on.
+        # 'volume' is a log with a zero offset here (its values never reach zero), which happens
+        # to be batch-invariant -- only the fitted-parameter transforms expose the skew.
+        assert not np.allclose(safe['returns'].to_numpy(), refit['returns'].to_numpy())
+
+    def test_a_bar_transforms_identically_regardless_of_its_batch(self, sample_dataframe, sample_recommendations):
+        """The defining property of inference safety: batch composition must not change a row."""
+        batch = self._shifted_batch()
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+
+        whole = apply_transformation_recommendations(batch, sample_recommendations, fitted_transformers=fitted)
+        first_ten = apply_transformation_recommendations(batch.iloc[:10], sample_recommendations,
+                                                         fitted_transformers=fitted)
+
+        pd.testing.assert_frame_equal(first_ten, whole.iloc[:10])
+
+    def test_refitting_path_violates_that_property(self, sample_dataframe, sample_recommendations):
+        """Sanity check on the test above -- proves it is actually measuring something."""
+        batch = self._shifted_batch()
+        whole = apply_transformation_recommendations(batch, sample_recommendations)
+        first_ten = apply_transformation_recommendations(batch.iloc[:10], sample_recommendations)
+        assert not np.allclose(first_ten['returns'].to_numpy(), whole['returns'].iloc[:10].to_numpy())
+
+    def test_missing_fitted_transformer_raises_instead_of_refitting(self, sample_dataframe, sample_recommendations):
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+        del fitted['volume']
+        with pytest.raises(KeyError, match='volume'):
+            apply_transformation_recommendations(sample_dataframe, sample_recommendations,
+                                                 fitted_transformers=fitted)
+
+    def test_empty_fitted_mapping_still_raises(self, sample_dataframe, sample_recommendations):
+        """An empty dict is not None, so it means inference mode, not 'please fit'."""
+        with pytest.raises(KeyError):
+            apply_transformation_recommendations(sample_dataframe, sample_recommendations, fitted_transformers={})
+
+    def test_survives_a_joblib_round_trip(self, sample_dataframe, sample_recommendations, tmp_path):
+        import joblib
+        batch = self._shifted_batch()
+        fitted = fit_transformation_recommendations(sample_dataframe, sample_recommendations)
+        expected = apply_transformation_recommendations(batch, sample_recommendations, fitted_transformers=fitted)
+
+        path = tmp_path / 'transformers.pkl'
+        joblib.dump(fitted, path)
+        reloaded = apply_transformation_recommendations(batch, sample_recommendations,
+                                                        fitted_transformers=joblib.load(path))
+
+        pd.testing.assert_frame_equal(reloaded, expected)
+
+    def test_compound_recommendation_is_applied_not_dropped(self, sample_dataframe):
+        """Regression: 'box-cox, standardize' used to pass the feature through untouched."""
+        recommendations = pd.DataFrame({'feature': ['atr'], 'transformations': ['box-cox, standardize']})
+        result = apply_transformation_recommendations(sample_dataframe, recommendations)
+        assert not np.allclose(result['atr'].to_numpy(), sample_dataframe['atr'].to_numpy())
 
 
 if __name__ == '__main__':

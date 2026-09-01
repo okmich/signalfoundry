@@ -439,13 +439,16 @@ class ClusteringComparisonPipeline:
     def _select_symbol_frame(self, store, sym, what):
         if not store:
             raise RuntimeError(f"No {what} labels available - call run() with should_fit_cluster=True first.")
+        # Copy on the way out: callers routinely overwrite the label column in place (e.g. mapping
+        # states to signs), which would otherwise mutate the block held here and make a second call
+        # return already-transformed labels.
         if sym is not None:
             if sym not in store:
                 raise KeyError(f"No {what} labels for {sym!r}. Available: {sorted(store)}")
-            return store[sym]
+            return store[sym].copy()
         if len(store) == 1:
-            return next(iter(store.values()))
-        return dict(store)
+            return next(iter(store.values())).copy()
+        return {k: v.copy() for k, v in store.items()}
 
     def get_train_labels(self, sym: str = None):
         """The LABELLED training block — fit a state->sign map on this, never on the test output.

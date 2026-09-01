@@ -10,8 +10,23 @@ from ..registry import SIGNAL_TYPES
 
 
 class ScreenStrategy(StrEnum):
-    """Subset enumeration strategy for the screener."""
+    """Subset enumeration strategy for the screener.
+
+    ``ABLATION`` is anchored: every add-one subset is ``baseline + candidate``, so no subset ever
+    pairs two non-baseline features and the search is a 1-neighbourhood of a hand-chosen fixed
+    point. Cheap (``1 + n`` fits) but its winner is a restatement of the anchor as much as a
+    finding -- read ``HmmScreenerResult.base_frac`` beside any ablation verdict.
+
+    ``GREEDY_FORWARD`` drops the anchor: it beam-searches up from the empty set, so the first
+    feature is chosen by the data rather than by hand. Costs roughly
+    ``n + beam_width * (n-1 + ... + n-depth+1)`` fits (~464 at n=38, B=3, depth 5) -- an order of
+    magnitude more than ablation, but the only affordable unanchored option: ``EXHAUSTIVE`` is
+    ``2**n - 1`` and is out of reach above n ~ 16.
+
+    ``EXHAUSTIVE`` is kept for small pools and for tests; it is not tractable on a full recipe.
+    """
     ABLATION = "ablation"
+    GREEDY_FORWARD = "greedy_forward"
     EXHAUSTIVE = "exhaustive"
 
 
@@ -87,6 +102,19 @@ class HmmScreenerConfig:
     allowed_signal_types: frozenset[str] | None = None
     raise_on_off_axis: bool = False
     random_state: int | None = None
+    # --- GREEDY_FORWARD beam search -------------------------------------------------------
+    # Beam width. B=1 is plain greedy, which merely moves the fixed point one step later: the
+    # step-1 winner then anchors everything after it, and step 1 ranks n single-feature HMMs on an
+    # in-sample criterion where rank 1 vs rank 3 is easily inside noise. B>=3 keeps the top paths
+    # alive so path-dependence is measurable instead of assumed -- it is the structural replacement
+    # for re-running an anchored screen under a second hand-picked baseline.
+    beam_width: int = 3
+    # Depth cap, in features. Overridden by ``screen(max_subset_size=...)`` when that is passed.
+    greedy_max_depth: int = 5
+    # Early stop: end the search when the best step gain falls below this FRACTION of the best
+    # separation so far. Relative rather than absolute because axis_separation is in the axis
+    # target unit and differs by orders of magnitude across axes (log-returns vs tick volume).
+    greedy_min_relative_gain: float = 0.02
 
     def __post_init__(self):
         if self.signal_type not in SIGNAL_TYPES:
@@ -119,6 +147,13 @@ class HmmScreenerConfig:
             )
         if self.max_balance_ratio < 1.0:
             raise ValueError(f"max_balance_ratio must be >= 1.0, got {self.max_balance_ratio}")
+        if self.beam_width < 1:
+            raise ValueError(f"beam_width must be >= 1, got {self.beam_width}")
+        if self.greedy_max_depth < 1:
+            raise ValueError(f"greedy_max_depth must be >= 1, got {self.greedy_max_depth}")
+        if self.greedy_min_relative_gain < 0.0:
+            raise ValueError(
+                f"greedy_min_relative_gain must be >= 0, got {self.greedy_min_relative_gain}")
 
     @property
     def effective_allowed_signal_types(self) -> frozenset[str]:
