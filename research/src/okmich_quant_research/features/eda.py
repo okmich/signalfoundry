@@ -360,6 +360,26 @@ class _FittedQuantile:
         return self.fit(X).transform(X)
 
 
+def _warn_if_unsuitable(transformation: Transformation, values: pd.Series, feature: str) -> None:
+    """Warn when a transformation is about to be fitted on data it will silently mangle.
+
+    ``LogitTransformer`` clips its input to ``[eps, 1 - eps]`` and never validates the range.
+    Pointed at an unbounded feature it therefore pins every negative value to ``logit(eps)``
+    and every value above one to ``logit(1 - eps)`` -- roughly +/-16 -- flattening the majority
+    of the sample onto two constants and destroying the signal, with no error raised.
+    ``recommend_transformations`` only ever suggests logit for bounded features, but
+    :meth:`FeatureEDA.apply_transformation` is public and takes whatever it is given.
+    """
+    if transformation != Transformation.LOGIT:
+        return
+    outside = float(((values < 0.0) | (values > 1.0)).mean())
+    if outside > 0:
+        warnings.warn(f"logit on '{feature}': {outside:.1%} of the fitted values fall outside [0, 1] and will be "
+                      f"clipped to the epsilon bounds, flattening them onto two constants. Logit is for bounded "
+                      f"ratios and oscillators -- use yeo-johnson or quantile for unbounded features.",
+                      UserWarning, stacklevel=3)
+
+
 def _build_transformer(transformation: Transformation, **kwargs):
     """Instantiate an unfitted transformer for ``transformation``.
 
@@ -802,6 +822,13 @@ class FeatureEDA:
             if len(self._wf_folds) < self.n_splits:
                 warnings.warn(f"requested n_splits={self.n_splits} but only {len(self._wf_folds)} folds fit after "
                               f"purge and embargo; proceeding with {len(self._wf_folds)}.", UserWarning, stacklevel=2)
+            # A window at least as long as every fold's training block clamps train_start to 0
+            # on every fold, which is ANCHORED -- silently not what the caller asked for.
+            if (self.wf_scheme == WFScheme.ROLLING and self.wf_train_window
+                    and all(train_pos[0] == 0 for train_pos, _ in self._wf_folds)):
+                warnings.warn(f"wf_train_window={self.wf_train_window} is at least as long as every fold's training "
+                              f"block, so ROLLING produces exactly the same folds as ANCHORED here. Lower it to get "
+                              f"genuinely sliding windows.", UserWarning, stacklevel=2)
 
         self.manifest = LeakageManifest(
             mode=self.mode, wf_scheme=self.wf_scheme, train_threshold=self.train_threshold, horizon=self.horizon,
@@ -1636,6 +1663,7 @@ class FeatureEDA:
             if len(fit_slice) < MIN_SAMPLES:
                 spec.failures[feature] = f"only {len(fit_slice)} finite train observations"
                 continue
+            _warn_if_unsuitable(transformation, fit_slice, feature)
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
@@ -1690,6 +1718,7 @@ class FeatureEDA:
         if fit_slice.empty:
             raise ValueError(f"feature '{feature}' has no finite values in the {scope} partition")
 
+        _warn_if_unsuitable(transformation, fit_slice, feature)
         transformer = _build_transformer(transformation, **kwargs).fit(fit_slice)
         result = transformer.transform(series)
         if not isinstance(result, pd.Series):

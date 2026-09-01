@@ -678,3 +678,68 @@ def test_vif_still_detects_genuine_collinearity() -> None:
     vif = _eda(features, target).compute_vif().set_index("feature")["vif"]
     assert vif["a"] > 100 and vif["a_copy"] > 100
     assert vif["c"] < 2.0
+
+
+# ============================================================================
+# MISUSE GUARDS (second review pass)
+# ============================================================================
+
+
+def test_logit_on_an_unbounded_feature_warns() -> None:
+    """LogitTransformer clips silently, pinning most of a normal feature onto two constants."""
+    features, target = _panel(n=1000)
+    eda = _eda(features, target)
+    with pytest.warns(UserWarning, match="outside"):
+        transformed = eda.apply_transformation("real", Transformation.LOGIT)
+    # and it really is destroyed, which is why the warning has to exist
+    saturated = np.mean(np.abs(np.abs(transformed.to_numpy()) - 16.1) < 0.1)
+    assert saturated > 0.5
+
+
+def test_logit_on_a_bounded_feature_is_silent() -> None:
+    features, target = _panel(n=1000)
+    eda = _eda(features, target)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eda.apply_transformation("bounded", Transformation.LOGIT)
+
+
+def test_fit_transformations_warns_for_an_unsuitable_logit() -> None:
+    features, target = _panel(n=1000)
+    eda = _eda(features, target)
+    recommendations = pd.DataFrame([{"feature": "real", "transformations": str(Transformation.LOGIT)}])
+    with pytest.warns(UserWarning, match="outside"):
+        eda.fit_transformations(recommendations=recommendations)
+
+
+def test_rolling_window_that_can_never_bind_warns() -> None:
+    """A window longer than every training block makes ROLLING identical to ANCHORED."""
+    features, target = _panel(n=4000)
+    with pytest.warns(UserWarning, match="same folds as ANCHORED"):
+        _eda(features, target, mode=EDAMode.WALK_FORWARD, wf_scheme=WFScheme.ROLLING, wf_train_window=100000)
+
+
+def test_rolling_window_that_binds_does_not_warn() -> None:
+    features, target = _panel(n=4000)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eda = _eda(features, target, mode=EDAMode.WALK_FORWARD, wf_scheme=WFScheme.ROLLING, wf_train_window=300)
+    assert {len(train_pos) for train_pos, _ in eda.wf_folds} == {300}
+
+
+def test_walk_forward_test_blocks_never_overlap() -> None:
+    features, target = _panel(n=4000)
+    for scheme in (WFScheme.ANCHORED, WFScheme.ROLLING):
+        eda = _eda(features, target, mode=EDAMode.WALK_FORWARD, wf_scheme=scheme)
+        covered = [int(i) for _, test_pos in eda.wf_folds for i in test_pos]
+        assert len(covered) == len(set(covered)), f"{scheme}: test blocks overlap"
+
+
+def test_full_scope_accounts_for_every_row() -> None:
+    """train + holdout + the purged band must equal the whole sample."""
+    features, target = _panel(n=2000)
+    horizon = 10
+    eda = _eda(features, target, horizon=horizon)
+    # _index_for is the private accessor; the warning lives in the public _resolve_scope path.
+    n_full = len(eda._index_for(EDAScope.FULL))
+    assert len(eda.train_index) + len(eda.holdout_index) + horizon == n_full == len(features)

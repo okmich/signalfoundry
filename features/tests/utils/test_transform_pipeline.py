@@ -602,3 +602,10 @@ class TestConsoleOutputIsEncodable:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_literal_quantile_token_is_not_dropped():
+    """'quantile/rank' mapped to 'quantile' but a bare 'quantile' fell through to passthrough,
+    so re-encoding an already-encoded frame silently lost the transformation."""
+    assert config_transformation_type('quantile') == 'quantile'
+    assert config_transformation_type('quantile/rank') == 'quantile'

@@ -13,7 +13,7 @@ from .transform import (YeoJohnsonTransformer, BoxCoxTransformer, LogitTransform
 
 # Transformation types the config understands, beyond 'passthrough'. Scanned in the order the
 # recommender wrote them, so a row's own priority wins rather than a fixed global one.
-CONFIG_TRANSFORMATIONS = ('yeo-johnson', 'box-cox', 'logit', 'log', 'standardize')
+CONFIG_TRANSFORMATIONS = ('yeo-johnson', 'box-cox', 'logit', 'log', 'quantile', 'standardize')
 
 
 def config_transformation_type(transformation_str) -> str:

@@ -32,3 +32,7 @@ ENV/
 *.swo
 
 .claude/
+
+# Test artifacts regenerated on every run (the timothymasters C++ reference program
+# rewrites this memory log with fresh timestamps and heap addresses)
+features/tests/timothymasters/cpp_reference/test_data/MEM.LOG
