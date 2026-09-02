@@ -29,6 +29,9 @@ okmich-quant-core = { workspace = true, editable = true }
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
+    # okmich-quant-ib declares this in its own optional 'dev' extra, but a workspace sync installs the ROOT
+    # dev group only - so the ib async suite silently did not run at all until it was declared here too.
+    "pytest-asyncio>=0.23.0",
     "jsonschema>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",

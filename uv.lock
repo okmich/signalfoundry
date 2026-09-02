@@ -3768,6 +3768,7 @@ dev = [
     { name = "jupyter" },
     { name = "mypy" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
@@ -3783,6 +3784,7 @@ dev = [
     { name = "jupyter", specifier = ">=1.0.0" },
     { name = "mypy", specifier = ">=1.5.0" },
     { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=4.1.0" },
     { name = "ruff", specifier = ">=0.1.0" },
 ]
