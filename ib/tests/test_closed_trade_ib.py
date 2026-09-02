@@ -8,6 +8,7 @@ concerns, so they are tested off the class without a live IB connection.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -148,3 +149,125 @@ def test_the_stored_fill_is_consumed_so_it_cannot_be_reused():
     assert r.resolve_closed_trade("42", {}) is not None
     assert r.resolve_closed_trade("42", {}) is None
     assert r._last_fills == {}
+
+
+# --------------------------------------------------------------------------------------
+# a close that did not happen leaves no claim behind
+# --------------------------------------------------------------------------------------
+
+def _close_stub(calls):
+    """BaseIBStrategy.close_position lifted onto a stub, with intent recording spied on."""
+    stub = SimpleNamespace(
+        ib=object(), strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+        _position_key=lambda position: str(position["conId"]),
+        note_close_intent=lambda k, r: calls.append(("note", k, r)),
+        clear_close_intent=lambda k: calls.append(("clear", k)),
+        _notify_trade_failed=lambda *a, **kw: None,
+    )
+    return BaseIBStrategy.close_position.__get__(stub, type(stub))
+
+
+def test_a_failed_ib_close_withdraws_its_intent():
+    """Intent is recorded before the request. Left behind after a failure it outlives the call, and a human
+    closing that position later has their MANUAL close reported as ours."""
+    import asyncio
+    from okmich_quant_ib.resilience import IBPermanentError
+
+    calls = []
+    close = _close_stub(calls)
+    with patch("okmich_quant_ib.strategy.ib_close_position",
+               side_effect=IBPermanentError("rejected", code=201)):
+        assert asyncio.run(close({"conId": 42}, reason="exit_signal")) is False
+    assert calls == [("note", "42", "exit_signal"), ("clear", "42")]
+
+
+def test_a_successful_ib_close_keeps_its_intent():
+    import asyncio
+
+    async def _ok(*a, **kw):
+        return True
+
+    calls = []
+    close = _close_stub(calls)
+    with patch("okmich_quant_ib.strategy.ib_close_position", side_effect=_ok):
+        assert asyncio.run(close({"conId": 42}, reason="exit_signal")) is True
+    assert calls == [("note", "42", "exit_signal")]
+
+
+# --------------------------------------------------------------------------------------
+# reconnect must not leave handlers registered twice
+# --------------------------------------------------------------------------------------
+
+class _Event:
+    """ib_async's Event surface, as much of it as subscribe/unsubscribe touch."""
+
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def __isub__(self, handler):
+        self.handlers.remove(handler)          # raises when absent, as ib_async's does
+        return self
+
+
+class _FakeIB:
+    def __init__(self):
+        self.fillEvent = _Event()
+        self.positionEvent = _Event()
+        self.execDetailsEvent = _Event()
+        self.errorEvent = _Event()
+
+    def reqRealTimeBars(self, *a, **kw):
+        return SimpleNamespace(updateEvent=_Event())
+
+    def reqMktData(self, *a, **kw):
+        return SimpleNamespace()
+
+    def cancelRealTimeBars(self, *a, **kw):
+        pass
+
+    def cancelMktData(self, *a, **kw):
+        pass
+
+
+def test_reconnect_does_not_register_handlers_twice():
+    """ib_async keeps handlers on the IB object across a reconnect, so re-subscribing without detaching
+    first leaves every handler registered twice — and each reconnect adds another copy, so one fill is
+    applied to the position cache N times. Silent, and it compounds."""
+    import asyncio
+    from okmich_quant_ib.contract import SecType
+
+    ib = _FakeIB()
+
+    async def _resync(_ib):
+        return None
+
+    stub = SimpleNamespace(
+        ib=ib, contract=object(), contract_cfg=SimpleNamespace(sec_type=SecType.CASH),
+        _rt_bars=None, _ticker=None,
+        _bar_aggregator=SimpleNamespace(on_realtime_bar=lambda *a: None, _reset=lambda: None),
+        _position_cache=SimpleNamespace(on_fill=lambda *a: None, on_position=lambda *a: None, resync=_resync),
+        _on_position_fill=lambda *a: None, _on_fill=lambda *a: None, _on_error=lambda *a: None,
+    )
+    cls = type(stub)
+    stub._subscribe = BaseIBStrategy._subscribe.__get__(stub, cls)
+    stub._unsubscribe = BaseIBStrategy._unsubscribe.__get__(stub, cls)
+    resubscribe = BaseIBStrategy._resubscribe.__get__(stub, cls)
+
+    asyncio.run(stub._subscribe(ib))
+    events = ("fillEvent", "positionEvent", "execDetailsEvent", "errorEvent")
+    baseline = {name: len(getattr(ib, name).handlers) for name in events}
+    assert baseline["fillEvent"] == 2                       # the cache, then close detection
+
+    for _ in range(3):                                      # three reconnects
+        asyncio.run(resubscribe(ib))
+
+    for name, count in baseline.items():
+        assert len(getattr(ib, name).handlers) == count, f"{name} accumulated duplicate handlers"
+
+    fills = ib.fillEvent.handlers
+    assert fills.index(stub._position_cache.on_fill) < fills.index(stub._on_position_fill), \
+        "close detection must stay registered AFTER the cache, so the fill is applied before the diff"

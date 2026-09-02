@@ -6,7 +6,7 @@ the broker's coarser label. None of these raise; they just quietly corrupt the t
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -365,3 +365,212 @@ def test_intent_is_preserved_even_when_the_broker_reason_wins():
     assert closed[0].reason == CloseReason.TAKE_PROFIT       # outcome outranks intent
     assert closed[0].strategy_reason == "ctl_flip"           # but the request is still recorded
     assert "take_profit" in closed[0].describe()
+
+
+# --------------------------------------------------------------------------------------
+# holding a close the broker cannot yet describe
+# --------------------------------------------------------------------------------------
+
+class _GraceStrat(_Strat):
+    """A broker whose resolution is an eventually-consistent QUERY (MT5), not a payload in hand (IB)."""
+
+    _CLOSE_RESOLUTION_GRACE_SECONDS = 20.0
+
+
+def test_an_unresolved_close_is_held_back_rather_than_announced_as_a_flat_zero():
+    """MT5 drops the position and writes the deal as two separate events. A sweep landing between them used
+    to announce a real winner as +0.00 — and the tracking record was gone, so it was never corrected."""
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+
+    s.resolved = None                                   # the deal has not landed in history yet
+    s.book = []
+    assert s.observe_open_positions([]) == []           # nothing ANNOUNCED
+    assert s.notifier.closed == []
+    assert set(s._pending_closes) == {"1"}
+    assert "1" not in s._open_trades                    # not re-reported as vanishing on every later sweep
+
+
+def test_a_held_close_is_announced_with_the_realised_figures_once_it_resolves():
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.sync_positions(_dt(10))
+
+    s.resolved = _closed("1", profit=12.0)              # the deal has now landed
+    closed = s.observe_open_positions([])
+    assert [t.key for t in closed] == ["1"]
+    assert s.notifier.closed == [{"symbol": "EURUSD", "ticket": "1", "profit": 12.0,
+                                  "price": 1.2, "reason": "take_profit"}]
+    assert s._pending_closes == {}
+
+
+def test_a_held_close_is_announced_unresolved_once_the_grace_expires(monkeypatch):
+    """Held, not held forever: an unresolvable close must still be reported, once, and marked UNRESOLVED."""
+    import okmich_quant_core.base_strategy as bs
+    clock = {"now": datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)}
+    monkeypatch.setattr(bs, "_utc_now", lambda: clock["now"])
+
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.sync_positions(_dt(5))
+    assert s.notifier.closed == []
+
+    clock["now"] += timedelta(seconds=21)
+    closed = s.observe_open_positions([])
+    assert len(closed) == 1 and closed[0].resolved is False
+    assert len(s.notifier.closed) == 1                  # exactly once
+    assert s._pending_closes == {}
+
+    s.sync_positions(_dt(40))
+    assert len(s.notifier.closed) == 1                  # and never again
+
+
+def test_a_held_close_is_retried_on_every_observation():
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.sync_positions(_dt(5))
+    s.sync_positions(_dt(10))
+    s.sync_positions(_dt(15))
+    assert [k for k, _ in s.resolve_calls] == ["1", "1", "1"]
+
+
+def test_a_position_that_comes_back_retracts_its_pending_close():
+    """The book is the authority. A key that reappears was never closed, and its history must survive intact."""
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.note_close_intent(1, "exit_signal")
+    first_seen = s._open_trades["1"]["first_seen"]
+
+    s.resolved = None
+    s.book = []
+    s.sync_positions(_dt(5))
+    assert set(s._pending_closes) == {"1"}
+
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(10))
+    assert s._pending_closes == {}
+    assert s.notifier.closed == []
+    assert s._open_trades["1"]["first_seen"] == first_seen          # not restarted from scratch
+    assert s._open_trades["1"]["close_intent"] == "exit_signal"     # and the intent is not lost
+
+
+def test_zero_grace_announces_immediately():
+    """The default, and correct where resolution is a one-shot payload already in hand (IB reads the realised
+    P/L off the fill it was handed): a retry cannot learn anything, so holding would only delay the report."""
+    s = _Strat(notifier=_SpyNotifier())
+    assert s._CLOSE_RESOLUTION_GRACE_SECONDS == 0.0
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    closed = s.observe_open_positions([])
+    assert len(closed) == 1 and closed[0].resolved is False
+    assert len(s.notifier.closed) == 1
+    assert s._pending_closes == {}
+
+
+# --------------------------------------------------------------------------------------
+# withdrawing an intent for a close that did not happen
+# --------------------------------------------------------------------------------------
+
+def test_a_withdrawn_intent_does_not_relabel_someone_elses_close():
+    """Intent is recorded BEFORE the request. If the request fails and the intent survives, a human closing
+    that same position later has their MANUAL close reported as ours — the inversion of what intent is for."""
+    s = _Strat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.note_close_intent(1, "exit_signal")
+    s.clear_close_intent(1)                             # the close request failed
+    assert s._open_trades["1"]["close_intent"] is None
+
+    s.resolved = _closed("1", reason=CloseReason.MANUAL)
+    s.book = []
+    closed = s.observe_open_positions([])
+    assert closed[0].reason == CloseReason.MANUAL
+    assert closed[0].strategy_reason is None
+
+
+def test_intent_reaches_and_can_be_withdrawn_from_a_position_already_held_for_resolution():
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.sync_positions(_dt(5))
+
+    s.note_close_intent(1, "exit_signal")
+    assert s._pending_closes["1"]["tracked"]["close_intent"] == "exit_signal"
+    s.clear_close_intent(1)
+    assert s._pending_closes["1"]["tracked"]["close_intent"] is None
+
+
+def test_clearing_an_intent_for_an_untracked_position_is_a_no_op():
+    s = _Strat(notifier=_SpyNotifier())
+    s.clear_close_intent(404)
+    assert s._open_trades == {}                         # does not conjure a record
+
+
+# --------------------------------------------------------------------------------------
+# size is size, not direction
+# --------------------------------------------------------------------------------------
+
+def test_an_unresolved_short_reports_a_positive_volume():
+    """IB's ``position`` is SIGNED quantity. A negative volume flips the sign of anything aggregating it."""
+    s = _Strat(notifier=_SpyNotifier())
+    s.book = [{"conId": 42, "position": -300.0, "avg_cost": 1.5}]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    closed = s.observe_open_positions([])
+    assert closed[0].volume == 300.0
+    assert closed[0].entry_price == 1.5
+
+
+def test_shutdown_settles_a_close_still_held_for_resolution():
+    """Holding a close is a bet that the NEXT observation resolves it. At teardown there is no next
+    observation, so the bet must be settled — otherwise the runner stops and the trade is simply missing."""
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.observe_open_positions([])
+    assert set(s._pending_closes) == {"1"}
+    assert s.notifier.closed == []
+
+    s.cleanup()
+    assert s._pending_closes == {}
+    assert len(s.notifier.closed) == 1
+
+
+def test_shutdown_reports_the_realised_figures_when_the_last_attempt_resolves():
+    """The forced drain still tries to resolve first — a deal that landed during teardown is not thrown away."""
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.resolved = None
+    s.book = []
+    s.observe_open_positions([])
+
+    s.resolved = _closed("1", profit=31.0)
+    s.cleanup()
+    assert [c["profit"] for c in s.notifier.closed] == [31.0]
+
+
+def test_shutdown_with_nothing_held_announces_nothing():
+    s = _GraceStrat(notifier=_SpyNotifier())
+    s.book = [_pos(1)]
+    s.sync_positions(_dt(0))
+    s.cleanup()
+    assert s.notifier.closed == []

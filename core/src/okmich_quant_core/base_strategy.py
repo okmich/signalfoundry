@@ -89,6 +89,9 @@ class BaseStrategy(ABC):
         #: key -> {first_seen, last_seen, close_intent}. The book as this strategy last observed it;
         #: a key that disappears from an observation is a position that left the book.
         self._open_trades: dict[str, dict[str, Any]] = {}
+        #: key -> {tracked, vanished_at}. Positions that have left the book but whose close the broker cannot
+        #: yet describe. Held here, unannounced, until it resolves or the grace period runs out.
+        self._pending_closes: dict[str, dict[str, Any]] = {}
         self._warned_legacy_manage_positions = False
 
         # Fail-closed inference logging (§5): the logical identity (and therefore the file path)
@@ -220,17 +223,79 @@ class BaseStrategy(ABC):
                                self.strategy_config.symbol, position)
                 continue
             seen[key] = position
+
+        # A key that comes BACK was never closed. Retract the pending close and restore the original tracking
+        # record — rebuilding it from this observation would reset first_seen and discard the close intent.
+        for key in [k for k in self._pending_closes if k in seen]:
+            logger.info("%s: position %s is back in the book before its close resolved; close retracted",
+                        self.strategy_config.symbol, key)
+            self._open_trades[key] = self._pending_closes.pop(key)["tracked"]
+
+        for key, position in seen.items():
             tracked = self._open_trades.get(key)
             if tracked is None:
                 self._open_trades[key] = {"first_seen": _utc_now(), "last_seen": position, "close_intent": None}
             else:
                 tracked["last_seen"] = position
 
-        closed: list[ClosedTrade] = []
+        closed: list[ClosedTrade] = self._flush_pending_closes()
         for key in [k for k in self._open_trades if k not in seen]:
-            tracked = self._open_trades.pop(key)
-            trade = self._build_closed_trade(key, tracked)
+            trade = self._settle_vanished_position(key, self._open_trades.pop(key))
             if trade is not None:
+                closed.append(trade)
+        return closed
+
+    #: How long to keep re-asking the broker about a position that has left the book before announcing it
+    #: unresolved. Zero (the default) means announce immediately: correct wherever resolution is a one-shot
+    #: payload already in hand, where a retry cannot learn anything the first attempt did not.
+    #:
+    #: A broker whose source is an eventually-consistent QUERY must override this. MT5 removes a position from
+    #: ``positions_get`` and writes its deal to history as two separate events, so a sweep landing between them
+    #: resolves nothing — and announcing then reports a real winner as a flat +0.00 that is never corrected,
+    #: because the tracking record is gone by the time the deal shows up.
+    #:
+    #: INVARIANT for any broker setting this above zero: a position key must not be REUSED while a close on
+    #: that key is still pending. MT5 tickets are unique per position, so this holds. IB's conId identifies a
+    #: contract rather than a position and is reused on re-entry — which is safe only because IB resolves from
+    #: a fill already in hand and therefore leaves this at zero. Raising it for IB needs that settled first.
+    _CLOSE_RESOLUTION_GRACE_SECONDS: float = 0.0
+
+    def _settle_vanished_position(self, key: str, tracked: dict) -> Optional[ClosedTrade]:
+        """Announce a departed position, or park it for another try. Returns the trade only if announced."""
+        trade = self._build_closed_trade(key, tracked)
+        if trade is None:
+            return None
+        if trade.resolved or self._CLOSE_RESOLUTION_GRACE_SECONDS <= 0:
+            self._on_position_closed(trade)
+            return trade
+        logger.info("%s: position %s left the book but the broker cannot describe it yet; holding up to %.0fs",
+                    self.strategy_config.symbol, key, self._CLOSE_RESOLUTION_GRACE_SECONDS)
+        self._pending_closes[key] = {"tracked": tracked, "vanished_at": _utc_now()}
+        return None
+
+    def _flush_pending_closes(self, force: bool = False) -> list[ClosedTrade]:
+        """Re-attempt held closes; announce the ones that resolved and the ones that have waited long enough.
+
+        ``force`` drains everything still held regardless of how long it has waited. Used at shutdown: holding
+        a close is only ever a bet that the next observation will resolve it, and at teardown there is no next
+        observation — so the bet has to be settled rather than abandoned with the process.
+        """
+        closed: list[ClosedTrade] = []
+        for key in list(self._pending_closes):
+            pending = self._pending_closes[key]
+            trade = self._build_closed_trade(key, pending["tracked"])
+            if trade is not None and trade.resolved:
+                del self._pending_closes[key]
+                self._on_position_closed(trade)
+                closed.append(trade)
+                continue
+            waited = (_utc_now() - pending["vanished_at"]).total_seconds()
+            if not force and waited < self._CLOSE_RESOLUTION_GRACE_SECONDS:
+                continue
+            del self._pending_closes[key]
+            if trade is not None:
+                logger.warning("%s: giving up on resolving position %s after %.0fs; reporting it unresolved",
+                               self.strategy_config.symbol, key, waited)
                 self._on_position_closed(trade)
                 closed.append(trade)
         return closed
@@ -257,15 +322,37 @@ class BaseStrategy(ABC):
         event — the duplicate that has to be deduplicated somewhere. One emitter, fed by broker truth, costs at
         most one sweep of latency and removes the need for dedup state entirely.
         """
-        tracked = self._open_trades.get(str(key))
-        if tracked is None:
-            # Not tracked yet — a close requested on a position discovered mid-sweep, or one adopted after a
-            # restart. Start tracking it rather than dropping the intent: an intent that goes missing does not
-            # merely lose a label, it lets the broker's coarse "closed by client" stand and reports OUR close
-            # as a human's.
-            tracked = {"first_seen": _utc_now(), "last_seen": {}, "close_intent": None}
-            self._open_trades[str(key)] = tracked
-        tracked["close_intent"] = reason
+        self._intent_record(key)["close_intent"] = reason
+
+    def clear_close_intent(self, key) -> None:
+        """Withdraw an intent recorded for a close that did not actually go through.
+
+        Intent is recorded BEFORE the request, because a close that succeeds can be reconciled before the call
+        returns. So a failed request leaves a claim that we closed a position we did not — and that claim does
+        not expire. If a human later closes that same position in the terminal, the stale intent relabels their
+        MANUAL close as ours, which is the exact inversion of the mislabelling intent exists to prevent.
+        """
+        record = self._open_trades.get(str(key)) or (self._pending_closes.get(str(key)) or {}).get("tracked")
+        if record is not None:
+            record["close_intent"] = None
+
+    def _intent_record(self, key) -> dict:
+        """The tracking record intent attaches to, creating one if this position is not tracked yet.
+
+        A close can be requested on a position that was discovered mid-sweep or adopted after a restart, and on
+        one already parked awaiting resolution. Dropping the intent in those cases does not merely lose a label:
+        it lets the broker's coarse "closed by client" stand and reports OUR close as a human's.
+        """
+        key = str(key)
+        tracked = self._open_trades.get(key)
+        if tracked is not None:
+            return tracked
+        pending = self._pending_closes.get(key)
+        if pending is not None:
+            return pending["tracked"]
+        tracked = {"first_seen": _utc_now(), "last_seen": {}, "close_intent": None}
+        self._open_trades[key] = tracked
+        return tracked
 
     def _build_closed_trade(self, key: str, tracked: dict) -> Optional[ClosedTrade]:
         """Resolve a vanished position into a :class:`ClosedTrade`, falling back to its last-seen state."""
@@ -291,7 +378,9 @@ class BaseStrategy(ABC):
         return ClosedTrade(
             key=key, symbol=self.strategy_config.symbol, magic=getattr(self.strategy_config, "magic", None),
             reason=CloseReason.STRATEGY if intent else CloseReason.UNKNOWN, strategy_reason=intent,
-            volume=float(last_seen.get("volume") or last_seen.get("position") or 0.0),
+            # abs(): IB's "position" is SIGNED quantity, so a short would otherwise report a negative volume
+            # and flip the sign of anything that aggregates it. Direction belongs in last_seen, not in size.
+            volume=abs(float(last_seen.get("volume") or last_seen.get("position") or 0.0)),
             entry_price=float(last_seen.get("price_open") or last_seen.get("avg_cost") or 0.0),
             opened_at=tracked.get("first_seen"), closed_at=_utc_now(), last_seen=last_seen, resolved=False)
 
@@ -484,6 +573,13 @@ class BaseStrategy(ABC):
         The inference logger is closed FIRST and independently of the notifier: its close() drains the bounded bar queue
         (the ops-critical heartbeats), so a notifier failure must never prevent that drain — each close is isolated.
         """
+        # Settle held closes FIRST, while the notifier is still open. A close held for resolution is
+        # unannounced by design, so a runner stopping while one is held would drop the trade entirely —
+        # the record silently missing a position rather than describing it poorly.
+        try:
+            self._flush_pending_closes(force=True)
+        except Exception:
+            logger.exception("error settling held closes for %s", self._log_binding.logical.logical_system_id)
         try:
             self._log_binding.logger.close()
         except Exception:

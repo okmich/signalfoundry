@@ -266,3 +266,114 @@ def test_a_failed_sweep_is_never_mistaken_for_a_flat_book():
     s.raise_next = True
     s.sync_positions(t0 + timedelta(seconds=5))   # resolve_closed_trade must never be reached
     assert set(s._open_trades) == {"1"}
+
+
+# --------------------------------------------------------------------------------------
+# deal entry direction — pinned to the terminal, never hand-copied
+# --------------------------------------------------------------------------------------
+
+def test_deal_entry_constants_match_the_terminal_module():
+    """OUT_BY was hand-copied as 2 — the value of INOUT — which silently dropped every close-by exit AND
+    counted every reversal as a close. Pin the values so a literal can never drift from the terminal again."""
+    import MetaTrader5 as terminal
+    from okmich_quant_mt5.functions import mt5 as fns
+
+    assert (fns.DEAL_ENTRY_OUT, fns.DEAL_ENTRY_OUT_BY, fns.DEAL_ENTRY_INOUT) == (1, 3, 2)
+    assert fns.DEAL_ENTRY_OUT == terminal.DEAL_ENTRY_OUT
+    assert fns.DEAL_ENTRY_OUT_BY == terminal.DEAL_ENTRY_OUT_BY
+    assert fns.DEAL_ENTRY_INOUT == terminal.DEAL_ENTRY_INOUT
+
+
+def test_a_close_by_deal_is_a_close():
+    """entry=OUT_BY: closed against an opposing position. It left the book like any other exit."""
+    fake = _FakeMt5((_deal(entry=0, ticket=1), _deal(entry=3, ticket=2)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert [d["ticket"] for d in fetch_closed_deals(99)] == [2]
+
+
+def test_a_reversal_deal_is_not_a_close():
+    """entry=INOUT: ONE deal flattens one side and opens the other under the SAME position id. The position
+    never leaves the book, and counting it would add the opening half to the closing volume and P/L."""
+    fake = _FakeMt5((_deal(entry=0, ticket=1), _deal(entry=2, ticket=2)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert fetch_closed_deals(99) == []
+
+
+def test_the_history_window_is_reselected_on_every_lookup():
+    """A window selected once at construction ends at a fixed instant, so a runner up longer than that
+    resolves nothing afterwards — passing every short test on its way to failing on day two."""
+    fake = _FakeMt5((_deal(entry=1, ticket=2),))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        fetch_closed_deals(99)
+        assert fake.selected is not None
+        fake.selected = None
+        fetch_closed_deals(99)
+        assert fake.selected is not None, "second lookup relied on the first call's window"
+
+
+# --------------------------------------------------------------------------------------
+# deal timestamps are broker server wall-clock, not UTC
+# --------------------------------------------------------------------------------------
+
+def test_server_epoch_is_stamped_with_the_broker_offset_rather_than_read_as_utc():
+    """``fromtimestamp(e, tz=utc)`` is wrong for every MT5 epoch and wrong SILENTLY — the result is a
+    perfectly valid datetime, just dated by the broker's offset (2-3h on most FX brokers)."""
+    from okmich_quant_mt5.functions import mt5 as fns
+
+    epoch = 1_700_000_000
+    with patch.object(fns, "_resolve_broker_tz", return_value=timezone(timedelta(hours=3))):
+        got = fns.server_epoch_to_utc(epoch, "EURUSD")
+
+    digits = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)   # the raw server wall-clock
+    assert got == (digits - timedelta(hours=3)).replace(tzinfo=timezone.utc)
+    assert got.utcoffset() == timedelta(0)
+    assert got != datetime.fromtimestamp(epoch, tz=timezone.utc)                   # the old, wrong reading
+
+
+def test_resolution_dates_the_close_in_utc_from_server_time():
+    r = _make_resolver()
+    deal = dict(_deal(t=1_700_000_000)._asdict(), reason_name="take_profit")
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals", return_value=[deal]), \
+         patch("okmich_quant_mt5.strategy.server_epoch_to_utc") as conv:
+        conv.return_value = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+        trade = r.resolve_closed_trade("99", {"price_open": 1.2})
+    conv.assert_called_once_with(1_700_000_000, "EURUSD")
+    assert trade.closed_at == datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+
+
+# --------------------------------------------------------------------------------------
+# a close that did not happen leaves no claim behind
+# --------------------------------------------------------------------------------------
+
+def test_a_failed_close_withdraws_its_intent():
+    """Intent is recorded before the request. Left behind after a failure it outlives the call and relabels
+    whoever really closes the position as us."""
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    calls = []
+    stub = SimpleNamespace(strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           symbol_info_dict={"filling_mode": 1},
+                           note_close_intent=lambda k, r: calls.append(("note", k, r)),
+                           clear_close_intent=lambda k: calls.append(("clear", k)),
+                           _notify_trade_failed=lambda *a, **kw: None)
+    close = BaseMt5Strategy.close_position.__get__(stub, type(stub))
+
+    with patch("okmich_quant_mt5.strategy.close_position", side_effect=ValueError("position not found")):
+        assert close(4242, reason="exit_signal") is False
+    assert calls == [("note", 4242, "exit_signal"), ("clear", 4242)]
+
+
+def test_a_successful_close_keeps_its_intent():
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    calls = []
+    stub = SimpleNamespace(strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           symbol_info_dict={"filling_mode": 1},
+                           note_close_intent=lambda k, r: calls.append(("note", k, r)),
+                           clear_close_intent=lambda k: calls.append(("clear", k)),
+                           _notify_trade_failed=lambda *a, **kw: None)
+    close = BaseMt5Strategy.close_position.__get__(stub, type(stub))
+
+    with patch("okmich_quant_mt5.strategy.close_position", return_value=True):
+        assert close(4242, reason="exit_signal") is True
+    assert calls == [("note", 4242, "exit_signal")]

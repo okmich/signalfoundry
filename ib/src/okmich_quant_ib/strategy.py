@@ -188,6 +188,10 @@ class BaseIBStrategy(BaseStrategy):
         self.ib = ib
         self._bar_aggregator._reset()
         await self._position_cache.resync(ib)
+        # Detach first. ib_async keeps handlers on the IB object across a reconnect, so subscribing again
+        # without this leaves every handler registered twice — and each reconnect adds another copy, so one
+        # fill is applied to the position cache N times.
+        await self._unsubscribe(ib)
         await self._subscribe(ib)
 
     # ---- Event handlers ----
@@ -497,8 +501,8 @@ class BaseIBStrategy(BaseStrategy):
     async def close_position(self, position: dict, reason: str = "strategy_close") -> bool:
         """Close a position. ``reason`` is recorded as intent, not announced: the fill that actually flattens
         the position is what reports it, so the announcement carries the realised fill instead of a guess."""
+        key = self._position_key(position)
         try:
-            key = self._position_key(position)
             if key is not None:
                 self.note_close_intent(key, reason)
             await ib_close_position(self.ib, position, self.strategy_config.magic)
@@ -506,11 +510,14 @@ class BaseIBStrategy(BaseStrategy):
         except (IBTransientError, IBConnectionError) as e:
             logger.error(f"Close failed after retries: {e}")
             self._notify_trade_failed("CLOSE", str(e), getattr(e, "code", None))
-            return False
         except IBPermanentError as e:
             logger.error(f"Close failed (permanent): {e}")
             self._notify_trade_failed("CLOSE", str(e), e.code)
-            return False
+        # The close did not go through: withdraw the intent so it cannot outlive this call and relabel a
+        # later close by someone else as ours.
+        if key is not None:
+            self.clear_close_intent(key)
+        return False
 
     async def place_bracket(self, action: str, take_profit: float, stop_loss: float,
                             limit_price: Optional[float] = None,

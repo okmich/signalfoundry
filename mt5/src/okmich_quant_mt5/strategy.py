@@ -1,14 +1,14 @@
 import json
 import logging
 from abc import abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional, Union
 
 from . import number_of_minutes_in_timeframe, is_timeframe_match, timeframe_minutes_dict
 from .functions import (
     get_positions,
     fetch_closed_deals,
-    select_history_window,
+    server_epoch_to_utc,
     close_position,
     fetch_recent_data,
     fetch_data_date_range,
@@ -53,6 +53,12 @@ class BaseMt5Strategy(BaseStrategy):
     #: cadence is NOT swallowed: with ``<=`` a chk_position_interval equal to this value silently dropped
     #: every sweep, and the symptom (no position management at all) looks identical to a quiet market.
     _MIN_POSITION_CHK_SECONDS = 5.0
+
+    #: MT5 drops a position from ``positions_get`` and writes its closing deal to history as two separate
+    #: events, so a sweep can land in between and resolve nothing. Held closes are re-queried on each sweep
+    #: (every ``_MIN_POSITION_CHK_SECONDS``), giving roughly four attempts before the trade is announced
+    #: unresolved — cheap, because the alternative is reporting a real winner as a flat +0.00 forever.
+    _CLOSE_RESOLUTION_GRACE_SECONDS = 20.0
 
     def __init__(self, config: StrategyConfig, signal: BaseSignal, *args, **kwargs):
         # Supply the contract envelope's integer-minute timeframe from the MT5 timeframe constant
@@ -110,23 +116,17 @@ class BaseMt5Strategy(BaseStrategy):
         )
         logger.info("Connection monitor initialized")
 
-        # Deal history must be SELECTED before history_deals_get can serve it. Done once here so a
-        # position that closed while this runner was down is still resolvable on the first sweep.
-        select_history_window()
-
     def manage_positions(self, run_dt: datetime, flag: bool = False) -> Optional[list[dict]]:
         """Run position management and return the open positions for this (symbol, magic).
 
-        Returns ``None`` — never ``[]`` — when the book was not actually observed, so the caller's close
-        detection cannot mistake an unobserved book for an empty one and report the whole book as closed.
-
         :param run_dt:   - datetime this call was initiated
         :param flag:bool - indicates this was called on a new bar
+
+        Returns ``None`` — never ``[]`` — when the book was not actually observed, so the caller's close
+        detection cannot mistake an unobserved book for an empty one and report the whole book as closed.
         """
-        if (
-            self.prev_position_chk_dt
-            and abs((run_dt - self.prev_position_chk_dt).total_seconds()) < self._MIN_POSITION_CHK_SECONDS
-        ):
+        if (self.prev_position_chk_dt
+            and abs((run_dt - self.prev_position_chk_dt).total_seconds()) < self._MIN_POSITION_CHK_SECONDS):
             return None                      # debounced: the book was NOT observed, not observed-and-empty
 
         if self.position_manager:
@@ -151,6 +151,10 @@ class BaseMt5Strategy(BaseStrategy):
         that has already gone cannot be asked what it made. Partial closes yield several OUT deals; they are
         summed and the exit price is volume-weighted, so a scaled-out position reports one honest average
         rather than whichever leg happened to be last.
+
+        Returns ``None`` when no closing deal is visible yet. That is not a failure: MT5 drops the position
+        and writes the deal as two separate events, so the caller holds the close and asks again rather than
+        announcing a fabricated zero (see ``BaseStrategy._CLOSE_RESOLUTION_GRACE_SECONDS``).
         """
         deals = fetch_closed_deals(int(key))
         if not deals:
@@ -158,7 +162,9 @@ class BaseMt5Strategy(BaseStrategy):
         volume = sum(float(d.get("volume") or 0.0) for d in deals)
         notional = sum(float(d.get("volume") or 0.0) * float(d.get("price") or 0.0) for d in deals)
         last = deals[-1]
-        closed_at = datetime.fromtimestamp(last["time"], tz=timezone.utc) if last.get("time") else None
+        # Server wall-clock, not UTC — see server_epoch_to_utc. Reading the epoch as UTC silently dates every
+        # close by the broker's offset and puts the trade record hours out of step with the bar record.
+        closed_at = server_epoch_to_utc(last["time"], self.strategy_config.symbol) if last.get("time") else None
         return ClosedTrade(
             key=key, symbol=self.strategy_config.symbol, magic=self.strategy_config.magic,
             reason=_MT5_CLOSE_REASONS.get(last.get("reason_name"), CloseReason.UNKNOWN),
@@ -449,22 +455,22 @@ class BaseMt5Strategy(BaseStrategy):
             # Transient errors already retried by decorator - log and fail
             logger.error(f"Failed to close position {ticket} after retries: {e}")
             self._notify_trade_failed("CLOSE", f"ticket={ticket}: {e}", getattr(e, "retcode", None))
-            return False
         except MT5PermanentError as e:
             # Permanent errors - log and fail immediately
             logger.error(f"Failed to close position {ticket} (permanent error): {e}")
             self._notify_trade_failed("CLOSE", f"ticket={ticket}: {e}", e.retcode)
-            return False
         except ValueError as e:
             # Position not found
             logger.error(f"Position {ticket} not found: {e}")
             self._notify_trade_failed("CLOSE", f"ticket={ticket} not found: {e}")
-            return False
         except Exception as e:
             # Unexpected errors
             logger.error(f"Unexpected error closing position {ticket}: {e}")
             self._notify_trade_failed("CLOSE", f"ticket={ticket} unexpected: {e}")
-            return False
+        # Every path reaching here failed to close. Withdraw the intent: the position is still ours and still
+        # open, and a claim that we closed it would outlive this call and relabel whoever really closes it.
+        self.clear_close_intent(ticket)
+        return False
 
     def calculate_lot_size(self) -> float:
         sizing = self.strategy_config.position_sizing

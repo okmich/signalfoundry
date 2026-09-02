@@ -100,6 +100,18 @@ def _stamp_server_time(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return df
 
 
+def server_epoch_to_utc(epoch: float, symbol: str) -> datetime:
+    """Convert an MT5 epoch (broker SERVER wall-clock) into a true UTC instant.
+
+    ``datetime.fromtimestamp(epoch, tz=utc)`` is wrong for EVERY MT5 timestamp and wrong silently: the epoch's
+    digits already are server wall-clock, so reading them as UTC shifts the result by the broker's offset —
+    2-3h on most FX brokers, and no exception to show for it. This applies the same rule ``_stamp_server_time``
+    applies to bars (stamp with the decoded offset, then convert) so deal times and bar times agree.
+    """
+    server_digits = datetime.fromtimestamp(epoch, tz=timezone.utc)      # digits only; the tz here is a carrier
+    return server_digits.replace(tzinfo=_resolve_broker_tz(symbol)).astimezone(timezone.utc)
+
+
 def _to_server_naive(dt: datetime, symbol: str) -> datetime:
     """Express an instant as NAIVE broker-server wall-clock for MT5 query args (the inverse of stamping).
 
@@ -704,9 +716,17 @@ def get_atr(symbol, timeframe, period) -> float:
     return float(valid_atr_values[-1])
 
 
-#: MT5 deal entry direction: the deal that took the position OFF the book.
-DEAL_ENTRY_OUT = 1
-DEAL_ENTRY_OUT_BY = 2                  # closed by an opposing position (close-by)
+#: MT5 deal entry direction: the deals that took the position OFF the book. Read from the terminal module
+#: with a literal fallback, so an older build missing a constant cannot raise at import time while a build
+#: that HAS it is always authoritative. A hand-copied literal is exactly how OUT_BY came to be 2 (the value
+#: of INOUT) instead of 3, which silently dropped every close-by exit and miscounted every reversal.
+DEAL_ENTRY_OUT = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+DEAL_ENTRY_OUT_BY = getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)      # closed by an opposing position (close-by)
+#: NOT a close, and named here so its exclusion is visible rather than accidental: a reversal books ONE deal
+#: that flattens the old side and opens the other under the SAME position id. The position never leaves the
+#: book, so there is nothing to reconcile — and counting it as an OUT would add the opening half of the
+#: reversal to the closing volume and P/L.
+DEAL_ENTRY_INOUT = getattr(mt5, "DEAL_ENTRY_INOUT", 2)
 
 #: mt5.DEAL_REASON_* → the broker-neutral cause. Kept as a literal map rather than read off the module so an
 #: older terminal build that lacks one of the constants cannot raise at import time.
@@ -727,7 +747,12 @@ def fetch_closed_deals(ticket: int) -> List[Dict[str, Any]]:
 
     A position normally yields two deals (in, out); partial closes yield more. Only the OUT deals are returned:
     the entry deal is not a close and summing across both double-counts the volume.
+
+    The history window is (re)selected on every call, NOT once at startup. A window selected at construction
+    ends at a fixed instant, so a runner up for longer than that reports every later close as unresolved —
+    a failure that passes any short test and appears on day two.
     """
+    select_history_window()
     deals = mt5.history_deals_get(position=ticket)
     if deals is None:
         msg = f"Failed to query deal history for position {ticket}. Cause: {mt5.last_error()}"
