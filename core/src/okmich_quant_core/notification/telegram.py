@@ -65,8 +65,12 @@ class TelegramNotifier(BaseNotifier):
             f"SL: {sl} | TP: {tp} | #{ticket}"
         self._dispatcher.dispatch(msg)
 
-    def on_trade_closed(self, symbol: str, ticket: int, profit: float):
-        msg = f"<b>🔴 CLOSED</b> {self._broker_tag}{symbol} ticket #{ticket}\nP&amp;L: {profit}"
+    def on_trade_closed(self, symbol: str, ticket, profit: float, price: float = 0.0, reason: str = ""):
+        head = "🟢 CLOSED" if profit > 0 else "🔴 CLOSED"
+        why = f"  [{html.escape(str(reason))}]" if reason else ""
+        at = f"  @ {price}" if price else ""
+        msg = (f"<b>{head}</b> {self._broker_tag}{html.escape(symbol)} #{html.escape(str(ticket))}{why}{at}"
+               f"\nP&amp;L: {profit:+.2f}")
         self._dispatcher.dispatch(msg)
 
     def on_trade_modified(self, symbol: str, ticket: int, sl: float, tp: float):

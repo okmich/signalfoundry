@@ -1,6 +1,9 @@
 from .mt5 import (
     modify_position,
     get_positions,
+    fetch_closed_deals,
+    select_history_window,
+    server_epoch_to_utc,
     get_atr,
     close_position,
     close_all_positions,

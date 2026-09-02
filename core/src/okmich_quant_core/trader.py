@@ -33,7 +33,7 @@ class Trader:
             return
 
         try:
-            self.strategy.manage_positions(run_dt, False)
+            self.strategy.sync_positions(run_dt, False)
             self.health.record_position_check()
         except Exception as e:
             logger.error(f"Error in position check for '{self.health.strategy_name}': {e}", exc_info=True)

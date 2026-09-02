@@ -1,0 +1,379 @@
+"""MT5 half of closed-position reconciliation: deal-history resolution and the sweep debounce.
+
+The debounce test exists because the original ``<=`` made a runner polling at exactly the debounce interval
+silently do NO position management at all — and the symptom is indistinguishable from a quiet market.
+"""
+from __future__ import annotations
+
+from collections import namedtuple
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from okmich_quant_core.closed_trade import CloseReason
+from okmich_quant_mt5.functions.mt5 import DataFetchError, fetch_closed_deals, select_history_window
+
+_Deal = namedtuple("_Deal", "ticket position entry reason volume price profit commission swap time time_msc")
+
+
+def _deal(entry=1, reason=5, volume=0.1, price=1.2, profit=10.0, commission=-0.5, swap=-0.1, t=1_700_000_000,
+          ticket=1, position=99):
+    return _Deal(ticket, position, entry, reason, volume, price, profit, commission, swap, t, t * 1000)
+
+
+class _FakeMt5:
+    """Only the surface fetch_closed_deals touches."""
+
+    DEAL_ENTRY_OUT = 1
+
+    def __init__(self, deals):
+        self._deals = deals
+        self.selected = None
+
+    def history_deals_get(self, position=None):
+        return self._deals
+
+    def history_select(self, start, end):
+        self.selected = (start, end)
+        return True
+
+    @staticmethod
+    def last_error():
+        return (1, "boom")
+
+
+# --------------------------------------------------------------------------------------
+# fetch_closed_deals
+# --------------------------------------------------------------------------------------
+
+def test_query_failure_raises_rather_than_reporting_no_deals():
+    """None means 'could not ask'. Returning [] here would report a phantom close with zero P/L."""
+    fake = _FakeMt5(None)
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        with pytest.raises(DataFetchError):
+            fetch_closed_deals(99)
+
+
+def test_genuinely_no_closing_deal_yet_returns_empty():
+    fake = _FakeMt5(())
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert fetch_closed_deals(99) == []
+
+
+def test_entry_deal_is_excluded_so_volume_is_not_double_counted():
+    fake = _FakeMt5((_deal(entry=0, ticket=1), _deal(entry=1, ticket=2)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        deals = fetch_closed_deals(99)
+    assert [d["ticket"] for d in deals] == [2]
+
+
+def test_deal_reason_is_named():
+    fake = _FakeMt5((_deal(reason=4), ))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert fetch_closed_deals(99)[0]["reason_name"] == "stop_loss"
+
+
+def test_unknown_reason_code_degrades_to_unknown():
+    fake = _FakeMt5((_deal(reason=99), ))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert fetch_closed_deals(99)[0]["reason_name"] == "unknown"
+
+
+def test_deals_are_ordered_oldest_first():
+    fake = _FakeMt5((_deal(t=200, ticket=2), _deal(t=100, ticket=1)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert [d["ticket"] for d in fetch_closed_deals(99)] == [1, 2]
+
+
+# --------------------------------------------------------------------------------------
+# select_history_window — a convenience, never a precondition
+# --------------------------------------------------------------------------------------
+
+def test_history_preload_is_skipped_when_the_build_lacks_it():
+    """An older or stubbed MetaTrader5 must not stop a strategy from constructing."""
+    with patch("okmich_quant_mt5.functions.mt5.mt5", SimpleNamespace()):
+        assert select_history_window() is False
+
+
+def test_history_preload_swallows_a_raise():
+    class _Boom(SimpleNamespace):
+        @staticmethod
+        def history_select(*_a):
+            raise RuntimeError("terminal busy")
+
+    with patch("okmich_quant_mt5.functions.mt5.mt5", _Boom()):
+        assert select_history_window() is False
+
+
+def test_history_preload_covers_the_requested_window():
+    fake = _FakeMt5(())
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert select_history_window(days=3) is True
+    start, end = fake.selected
+    assert timedelta(days=2, hours=23) < (datetime.now(timezone.utc) - start) < timedelta(days=3, hours=1)
+    assert end > datetime.now(timezone.utc)
+
+
+# --------------------------------------------------------------------------------------
+# resolve_closed_trade — realised, not last-seen
+# --------------------------------------------------------------------------------------
+
+class _Resolver:
+    """BaseMt5Strategy.resolve_closed_trade lifted off the class, so the test needs no live terminal."""
+
+    def __init__(self, symbol="EURUSD", magic=7):
+        self.strategy_config = SimpleNamespace(symbol=symbol, magic=magic)
+
+    resolve_closed_trade = None      # bound below
+
+
+def _make_resolver():
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+    r = _Resolver()
+    r.resolve_closed_trade = BaseMt5Strategy.resolve_closed_trade.__get__(r, _Resolver)
+    return r
+
+
+def test_resolution_reports_realised_profit_and_broker_reason():
+    r = _make_resolver()
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals",
+               return_value=[dict(_deal(reason=5, price=1.25, profit=12.0, commission=-0.4, swap=-0.2)._asdict(),
+                                  reason_name="take_profit")]):
+        trade = r.resolve_closed_trade("99", {"price_open": 1.2})
+    assert trade.reason == CloseReason.TAKE_PROFIT
+    assert trade.exit_price == 1.25
+    assert trade.entry_price == 1.2
+    assert trade.profit == 12.0
+    assert trade.net_profit == pytest.approx(11.4)
+    assert trade.resolved is True
+
+
+def test_partial_closes_are_summed_and_volume_weighted():
+    """Scaling out must report one honest average, not whichever leg happened to be last."""
+    r = _make_resolver()
+    legs = [dict(_deal(volume=0.1, price=1.20, profit=5.0, t=100)._asdict(), reason_name="take_profit"),
+            dict(_deal(volume=0.3, price=1.30, profit=15.0, t=200)._asdict(), reason_name="take_profit")]
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals", return_value=legs):
+        trade = r.resolve_closed_trade("99", {"price_open": 1.1})
+    assert trade.volume == pytest.approx(0.4)
+    assert trade.exit_price == pytest.approx(1.275)          # (0.1*1.20 + 0.3*1.30) / 0.4
+    assert trade.profit == pytest.approx(20.0)
+
+
+def test_no_closing_deal_yet_is_unresolved_not_a_fabricated_zero():
+    r = _make_resolver()
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals", return_value=[]):
+        assert r.resolve_closed_trade("99", {"price_open": 1.2}) is None
+
+
+def test_stop_out_maps_to_its_own_reason():
+    r = _make_resolver()
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals",
+               return_value=[dict(_deal(reason=6)._asdict(), reason_name="stop_out")]):
+        assert r.resolve_closed_trade("99", {}).reason == CloseReason.STOP_OUT
+
+
+# --------------------------------------------------------------------------------------
+# the debounce
+# --------------------------------------------------------------------------------------
+
+def test_debounce_is_strict_so_polling_at_the_interval_is_not_swallowed():
+    """chk_position_interval == _MIN_POSITION_CHK_SECONDS must still sweep."""
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    stub = SimpleNamespace(prev_position_chk_dt=None, position_manager=None,
+                           strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           _MIN_POSITION_CHK_SECONDS=BaseMt5Strategy._MIN_POSITION_CHK_SECONDS)
+    manage = BaseMt5Strategy.manage_positions.__get__(stub, type(stub))
+    t0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    with patch("okmich_quant_mt5.strategy.get_positions", return_value=[{"ticket": 1}]):
+        assert manage(t0) == [{"ticket": 1}]
+        assert manage(t0 + timedelta(seconds=5)) == [{"ticket": 1}]      # exactly at the interval: allowed
+        assert manage(t0 + timedelta(seconds=7)) is None                 # inside it: unobserved, NOT []
+
+
+def test_debounced_sweep_returns_none_never_empty():
+    """The whole point: an unobserved book must be distinguishable from a flat one."""
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    t0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+    stub = SimpleNamespace(prev_position_chk_dt=t0, position_manager=None,
+                           strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           _MIN_POSITION_CHK_SECONDS=BaseMt5Strategy._MIN_POSITION_CHK_SECONDS)
+    manage = BaseMt5Strategy.manage_positions.__get__(stub, type(stub))
+    with patch("okmich_quant_mt5.strategy.get_positions", return_value=[]) as q:
+        assert manage(t0 + timedelta(seconds=1)) is None
+        q.assert_not_called()
+
+
+
+
+def test_sweep_reports_unobserved_rather_than_raising_on_a_failed_query():
+    """A failed sweep must not re-raise: position management already ran, so the raise adds no protection and
+    would count toward the circuit breaker on every intra-bar tick, turning a hiccup into a disabled strategy.
+    The entry gate in on_new_bar keeps its own fail-closed query."""
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    stub = SimpleNamespace(prev_position_chk_dt=None, position_manager=None,
+                           strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           _MIN_POSITION_CHK_SECONDS=BaseMt5Strategy._MIN_POSITION_CHK_SECONDS)
+    manage = BaseMt5Strategy.manage_positions.__get__(stub, type(stub))
+    with patch("okmich_quant_mt5.strategy.get_positions", side_effect=DataFetchError("terminal down")):
+        assert manage(datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)) is None
+
+
+def test_a_failed_sweep_is_never_mistaken_for_a_flat_book():
+    """The end-to-end property: an unreadable book must not report the open positions as closed."""
+    from okmich_quant_core.base_strategy import BaseStrategy
+
+    class _S(BaseStrategy):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.raise_next = False
+
+        def is_new_bar(self, run_dt):
+            return False
+
+        def on_new_bar(self):
+            pass
+
+        def manage_positions(self, run_dt, flag=False):
+            if self.raise_next:
+                return None                      # what BaseMt5Strategy now does on a query failure
+            return [{"ticket": 1}]
+
+        def resolve_closed_trade(self, key, last_seen):
+            raise AssertionError("no position actually closed")
+
+    from okmich_quant_core.config import StrategyConfig
+    from okmich_quant_core.logging import RunnerIdentity
+    from okmich_quant_core.signal import BaseSignal
+
+    class _NullLogger:
+        def write(self, record): pass
+        def drain(self, timeout=None): pass
+        def close(self): pass
+
+    s = _S(config=StrategyConfig(name="s", symbol="EURUSD", timeframe=5, magic=7),
+           signal=BaseSignal(), inference_logger=_NullLogger())
+    s.bind_runner_identity(RunnerIdentity(runner_id="r", runner_start_token="t", broker="b",
+                                          account_id="a", broker_session_id="s"))
+    t0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+    s.sync_positions(t0)
+    s.raise_next = True
+    s.sync_positions(t0 + timedelta(seconds=5))   # resolve_closed_trade must never be reached
+    assert set(s._open_trades) == {"1"}
+
+
+# --------------------------------------------------------------------------------------
+# deal entry direction — pinned to the terminal, never hand-copied
+# --------------------------------------------------------------------------------------
+
+def test_deal_entry_constants_match_the_terminal_module():
+    """OUT_BY was hand-copied as 2 — the value of INOUT — which silently dropped every close-by exit AND
+    counted every reversal as a close. Pin the values so a literal can never drift from the terminal again."""
+    import MetaTrader5 as terminal
+    from okmich_quant_mt5.functions import mt5 as fns
+
+    assert (fns.DEAL_ENTRY_OUT, fns.DEAL_ENTRY_OUT_BY, fns.DEAL_ENTRY_INOUT) == (1, 3, 2)
+    assert fns.DEAL_ENTRY_OUT == terminal.DEAL_ENTRY_OUT
+    assert fns.DEAL_ENTRY_OUT_BY == terminal.DEAL_ENTRY_OUT_BY
+    assert fns.DEAL_ENTRY_INOUT == terminal.DEAL_ENTRY_INOUT
+
+
+def test_a_close_by_deal_is_a_close():
+    """entry=OUT_BY: closed against an opposing position. It left the book like any other exit."""
+    fake = _FakeMt5((_deal(entry=0, ticket=1), _deal(entry=3, ticket=2)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert [d["ticket"] for d in fetch_closed_deals(99)] == [2]
+
+
+def test_a_reversal_deal_is_not_a_close():
+    """entry=INOUT: ONE deal flattens one side and opens the other under the SAME position id. The position
+    never leaves the book, and counting it would add the opening half to the closing volume and P/L."""
+    fake = _FakeMt5((_deal(entry=0, ticket=1), _deal(entry=2, ticket=2)))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        assert fetch_closed_deals(99) == []
+
+
+def test_the_history_window_is_reselected_on_every_lookup():
+    """A window selected once at construction ends at a fixed instant, so a runner up longer than that
+    resolves nothing afterwards — passing every short test on its way to failing on day two."""
+    fake = _FakeMt5((_deal(entry=1, ticket=2),))
+    with patch("okmich_quant_mt5.functions.mt5.mt5", fake):
+        fetch_closed_deals(99)
+        assert fake.selected is not None
+        fake.selected = None
+        fetch_closed_deals(99)
+        assert fake.selected is not None, "second lookup relied on the first call's window"
+
+
+# --------------------------------------------------------------------------------------
+# deal timestamps are broker server wall-clock, not UTC
+# --------------------------------------------------------------------------------------
+
+def test_server_epoch_is_stamped_with_the_broker_offset_rather_than_read_as_utc():
+    """``fromtimestamp(e, tz=utc)`` is wrong for every MT5 epoch and wrong SILENTLY — the result is a
+    perfectly valid datetime, just dated by the broker's offset (2-3h on most FX brokers)."""
+    from okmich_quant_mt5.functions import mt5 as fns
+
+    epoch = 1_700_000_000
+    with patch.object(fns, "_resolve_broker_tz", return_value=timezone(timedelta(hours=3))):
+        got = fns.server_epoch_to_utc(epoch, "EURUSD")
+
+    digits = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)   # the raw server wall-clock
+    assert got == (digits - timedelta(hours=3)).replace(tzinfo=timezone.utc)
+    assert got.utcoffset() == timedelta(0)
+    assert got != datetime.fromtimestamp(epoch, tz=timezone.utc)                   # the old, wrong reading
+
+
+def test_resolution_dates_the_close_in_utc_from_server_time():
+    r = _make_resolver()
+    deal = dict(_deal(t=1_700_000_000)._asdict(), reason_name="take_profit")
+    with patch("okmich_quant_mt5.strategy.fetch_closed_deals", return_value=[deal]), \
+         patch("okmich_quant_mt5.strategy.server_epoch_to_utc") as conv:
+        conv.return_value = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+        trade = r.resolve_closed_trade("99", {"price_open": 1.2})
+    conv.assert_called_once_with(1_700_000_000, "EURUSD")
+    assert trade.closed_at == datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+
+
+# --------------------------------------------------------------------------------------
+# a close that did not happen leaves no claim behind
+# --------------------------------------------------------------------------------------
+
+def test_a_failed_close_withdraws_its_intent():
+    """Intent is recorded before the request. Left behind after a failure it outlives the call and relabels
+    whoever really closes the position as us."""
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    calls = []
+    stub = SimpleNamespace(strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           symbol_info_dict={"filling_mode": 1},
+                           note_close_intent=lambda k, r: calls.append(("note", k, r)),
+                           clear_close_intent=lambda k: calls.append(("clear", k)),
+                           _notify_trade_failed=lambda *a, **kw: None)
+    close = BaseMt5Strategy.close_position.__get__(stub, type(stub))
+
+    with patch("okmich_quant_mt5.strategy.close_position", side_effect=ValueError("position not found")):
+        assert close(4242, reason="exit_signal") is False
+    assert calls == [("note", 4242, "exit_signal"), ("clear", 4242)]
+
+
+def test_a_successful_close_keeps_its_intent():
+    from okmich_quant_mt5.strategy import BaseMt5Strategy
+
+    calls = []
+    stub = SimpleNamespace(strategy_config=SimpleNamespace(symbol="EURUSD", magic=7),
+                           symbol_info_dict={"filling_mode": 1},
+                           note_close_intent=lambda k, r: calls.append(("note", k, r)),
+                           clear_close_intent=lambda k: calls.append(("clear", k)),
+                           _notify_trade_failed=lambda *a, **kw: None)
+    close = BaseMt5Strategy.close_position.__get__(stub, type(stub))
+
+    with patch("okmich_quant_mt5.strategy.close_position", return_value=True):
+        assert close(4242, reason="exit_signal") is True
+    assert calls == [("note", 4242, "exit_signal")]
