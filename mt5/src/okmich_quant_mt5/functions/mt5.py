@@ -100,6 +100,18 @@ def _stamp_server_time(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return df
 
 
+def server_epoch_to_utc(epoch: float, symbol: str) -> datetime:
+    """Convert an MT5 epoch (broker SERVER wall-clock) into a true UTC instant.
+
+    ``datetime.fromtimestamp(epoch, tz=utc)`` is wrong for EVERY MT5 timestamp and wrong silently: the epoch's
+    digits already are server wall-clock, so reading them as UTC shifts the result by the broker's offset —
+    2-3h on most FX brokers, and no exception to show for it. This applies the same rule ``_stamp_server_time``
+    applies to bars (stamp with the decoded offset, then convert) so deal times and bar times agree.
+    """
+    server_digits = datetime.fromtimestamp(epoch, tz=timezone.utc)      # digits only; the tz here is a carrier
+    return server_digits.replace(tzinfo=_resolve_broker_tz(symbol)).astimezone(timezone.utc)
+
+
 def _to_server_naive(dt: datetime, symbol: str) -> datetime:
     """Express an instant as NAIVE broker-server wall-clock for MT5 query args (the inverse of stamping).
 
@@ -234,16 +246,21 @@ def fetch_tick_data_date_range(
 
 
 def get_positions(symbol, magic) -> List[Dict[str, Any]]:
+    """Open positions for (symbol, magic).
+
+    RAISES on a query failure instead of returning []. ``mt5.positions_get`` returns None when the query itself
+    fails and an empty tuple when the account is genuinely flat; collapsing both to [] told every caller "no
+    positions" during a terminal hiccup. That is fail-OPEN: strategies gate entries on len(get_positions(...)),
+    so a transient failure would bypass max_number_of_open_positions and stack a second position on top of a live
+    one. Unknown broker state must block trading, not permit it, so the failure is raised and the caller's bar
+    fails loudly (LOGGING_CONTRACT outcome=error) rather than silently trading on a false flat.
+    """
     positions = mt5.positions_get(symbol=symbol)
-    if not positions:
-        return []
-
-    # Filter by magic number
-    positions = [pos for pos in positions if pos.magic == magic]
-    if not positions:
-        return []
-
-    return [p._asdict() for p in positions]
+    if positions is None:
+        msg = f"Failed to query open positions for {symbol}. Cause: {mt5.last_error()}"
+        logging.error(msg)
+        raise DataFetchError(msg)
+    return [p._asdict() for p in positions if p.magic == magic]
 
 
 @with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0)
@@ -697,3 +714,80 @@ def get_atr(symbol, timeframe, period) -> float:
         raise ValueError("ATR calculation failed - no valid values")
 
     return float(valid_atr_values[-1])
+
+
+#: MT5 deal entry direction: the deals that took the position OFF the book. Read from the terminal module
+#: with a literal fallback, so an older build missing a constant cannot raise at import time while a build
+#: that HAS it is always authoritative. A hand-copied literal is exactly how OUT_BY came to be 2 (the value
+#: of INOUT) instead of 3, which silently dropped every close-by exit and miscounted every reversal.
+DEAL_ENTRY_OUT = getattr(mt5, "DEAL_ENTRY_OUT", 1)
+DEAL_ENTRY_OUT_BY = getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)      # closed by an opposing position (close-by)
+#: NOT a close, and named here so its exclusion is visible rather than accidental: a reversal books ONE deal
+#: that flattens the old side and opens the other under the SAME position id. The position never leaves the
+#: book, so there is nothing to reconcile — and counting it as an OUT would add the opening half of the
+#: reversal to the closing volume and P/L.
+DEAL_ENTRY_INOUT = getattr(mt5, "DEAL_ENTRY_INOUT", 2)
+
+#: mt5.DEAL_REASON_* → the broker-neutral cause. Kept as a literal map rather than read off the module so an
+#: older terminal build that lacks one of the constants cannot raise at import time.
+_DEAL_REASON_NAMES = {
+    0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "stop_loss",
+    5: "take_profit", 6: "stop_out", 7: "rollover", 8: "vmargin", 9: "split",
+}
+
+
+def fetch_closed_deals(ticket: int) -> List[Dict[str, Any]]:
+    """Closing deals for one position id, newest last. ``[]`` when the position has no closing deal yet.
+
+    RAISES on a query failure rather than returning ``[]``, for the same reason ``get_positions`` does: the
+    caller is trying to distinguish "this position closed" from "I could not find out", and collapsing the two
+    reports a phantom close with fabricated (zero) fill and P/L. ``history_deals_get`` returns ``None`` on a
+    failed query and an empty tuple when the position genuinely has no deals, so the two ARE distinguishable —
+    only a caller that ignores the difference loses it.
+
+    A position normally yields two deals (in, out); partial closes yield more. Only the OUT deals are returned:
+    the entry deal is not a close and summing across both double-counts the volume.
+
+    The history window is (re)selected on every call, NOT once at startup. A window selected at construction
+    ends at a fixed instant, so a runner up for longer than that reports every later close as unresolved —
+    a failure that passes any short test and appears on day two.
+    """
+    select_history_window()
+    deals = mt5.history_deals_get(position=ticket)
+    if deals is None:
+        msg = f"Failed to query deal history for position {ticket}. Cause: {mt5.last_error()}"
+        logging.error(msg)
+        raise DataFetchError(msg)
+    out = []
+    for deal in deals:
+        row = deal._asdict()
+        if row.get("entry") in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
+            row["reason_name"] = _DEAL_REASON_NAMES.get(row.get("reason"), "unknown")
+            out.append(row)
+    return sorted(out, key=lambda r: (r.get("time_msc") or 0, r.get("ticket") or 0))
+
+
+def select_history_window(days: int = 7) -> bool:
+    """Load the terminal's deal history so ``history_deals_get(position=...)`` can see recent closes.
+
+    MT5 only serves history it has been asked to select; on a freshly started terminal the position-scoped
+    lookup can come back empty simply because nothing has been loaded yet. Called once at strategy start so a
+    close that happened while the runner was down is still resolvable.
+
+    Never raises. This is a warm-up convenience, not a precondition — ``history_deals_get`` still works without
+    it on a terminal that has already loaded history — so a build that does not expose ``history_select`` must
+    degrade to "no preload" rather than stop a strategy from constructing.
+    """
+    select = getattr(mt5, "history_select", None)
+    if select is None:
+        logging.debug("MetaTrader5 build exposes no history_select(); skipping deal-history preload")
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        ok = select(now - timedelta(days=days), now + timedelta(days=1))
+    except Exception as e:
+        logging.warning(f"deal-history preload over the last {days}d raised: {e}")
+        return False
+    if not ok:
+        logging.warning(f"history_select over the last {days}d failed: {mt5.last_error()}")
+    return bool(ok)

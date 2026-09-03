@@ -1,8 +1,14 @@
-"""Per-signal-type axis evaluators.
+"""Per-axis evaluators.
+
+Dispatch is keyed by ``registry.Axis`` — the partition being separated — NOT by ``signal_type``, which
+is a feature tag and was doing double duty here until the axis layer landed. ``Axis.DIRECTIONAL``
+replaces the former ``trend`` and ``momentum`` keys and uses ``evaluate_direction`` (median forward-
+return spread), which is what the entire existing corpus was in fact screened with.
 
 Each ``evaluate_*`` function takes a fitted HMM's outputs plus the raw OHLC data and returns an ``AxisEvaluation`` carrying:
-  * ``axis_separation`` — the primary axis-matched spread across states (forward-return spread for direction/momentum,
-                          forward-vol spread for volatility, choppiness-index spread for path structure).
+  * ``axis_separation`` — the primary axis-matched spread across states (forward-return spread for
+                          DIRECTIONAL, forward-vol spread for VOLATILITY, choppiness-index spread for
+                          PATH_STRUCTURE, forward-volume spread for LIQUIDITY).
   * ``secondary_robustness`` — an axis-appropriate count / monotonicity stat.
 
 Wraps the existing ``okmich_quant_labelling.utils.label_util`` mapper functions with ``return_diagnostics=True`` so the
@@ -17,12 +23,12 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from okmich_quant_labelling.utils.label_util import (
-    map_label_to_momentum_score,
     map_label_to_trend_direction,
     map_regime_to_path_structure_score,
     map_regime_to_volatility_score,
 )
 
+from ..registry import AXIS_PRIMARY_HORIZON, Axis
 from ._result import AxisEvaluation
 
 
@@ -65,8 +71,7 @@ def _build_forward_log_returns(close: NDArray, state_labels: NDArray, horizon: i
     return pd.DataFrame({"state": state_labels[:len(close)], "returns": fwd}).dropna()
 
 
-def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
-                               use_abs: bool = False) -> tuple[float, float]:
+def _weighted_separation_stats(diag: pd.DataFrame, median_col: str) -> tuple[float, float]:
     """Population-weighted SD of per-state medians + the legacy max-min range.
 
     Robustness motivation: ``max(median) - min(median)`` is dominated by the two
@@ -85,9 +90,6 @@ def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
         flagged True are dropped before the computation.
     median_col : str
         Name of the per-state median column to use as the separation target.
-    use_abs : bool, default False
-        If True, compute statistics on ``|median|`` rather than signed median.
-        Used by the momentum evaluator's non-directional branch.
 
     Returns
     -------
@@ -107,8 +109,6 @@ def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
     if len(valid) < 2:
         return 0.0, 0.0
     medians = valid[median_col].astype(float).to_numpy()
-    if use_abs:
-        medians = np.abs(medians)
     counts = valid["count"].astype(float).to_numpy()
     total = float(counts.sum())
     if total <= 0:
@@ -121,15 +121,39 @@ def _weighted_separation_stats(diag: pd.DataFrame, median_col: str, *,
     return weighted_sd, raw_range
 
 
+def _diag_is_empty(diag: pd.DataFrame, median_col: str) -> bool:
+    """Did the label_util mapper come back with nothing usable?
+
+    The mappers return ``({}, pd.DataFrame())`` on their no-valid-data branches. ``_weighted_separation_stats``
+    then hits its guard and returns ``(0.0, 0.0)`` — so a TOTAL mapper failure was surfacing as a
+    legitimate-looking ``axis_separation == 0.0`` with no error and no warning, indistinguishable from a
+    real subset that simply does not separate. Callers use this to say so instead.
+
+    ``median_col`` is checked as well as ``count`` because ``_weighted_separation_stats`` bails on EITHER
+    being absent. Testing only ``count`` would leave the same silent-zero hole open for a diagnostics
+    frame that carries counts but not the axis target column.
+    """
+    return diag is None or len(diag) == 0 or "count" not in diag.columns or median_col not in diag.columns
+
+
+def _resolve_horizon(primary_horizon: int | None, horizons: tuple[int, ...]) -> int:
+    """Per-axis horizon wins; ``horizons[0]`` is the fallback for a direct call that passes none."""
+    if primary_horizon is not None:
+        return primary_horizon
+    return horizons[0] if horizons else 12
+
+
 def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], respect_sessions: bool = False,
-                       **_ignored) -> AxisEvaluation:
-    """Direction axis: forward log-return median spread + count of conservatively-significant states.
+                       horizons: tuple[int, ...], primary_horizon: int | None = None,
+                       respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
+    """DIRECTIONAL axis: forward log-return median spread + count of conservatively-significant states.
 
     Median (not mean) keeps the score robust to the heavy right/left tails of intraday FX forward
-    returns — aligning the trend axis with the other axes, which already use medians.
+    returns — aligning this axis with the others, which already use medians.
+
+    This is the evaluator the whole existing corpus was screened with, under the former ``trend`` key.
     """
-    primary_horizon = horizons[0] if horizons else 12
+    primary_horizon = _resolve_horizon(primary_horizon, horizons)
     sessions = _session_ids(raw_data, respect_sessions)
     fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon, sessions)
     if len(fwd_df) < 30:
@@ -138,6 +162,10 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
 
     mapping, diag = map_label_to_trend_direction(fwd_df, state_col="state", return_col="returns",
         method="conservative", return_diagnostics=True)
+    if _diag_is_empty(diag, "median"):
+        return AxisEvaluation(0.0, 0.0, "n_significant_states",
+                              raw_details={"error": "map_label_to_trend_direction returned no diagnostics",
+                                           "horizon": primary_horizon})
     n_significant = sum(1 for v in mapping.values() if v != 0)
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median")
@@ -150,45 +178,11 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
     )
 
 
-def evaluate_momentum(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                     horizons: tuple[int, ...], is_directional: bool = True,
-                     respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
-    """Momentum axis: forward log-return rank spread + count of distinct momentum scores.
-
-    ``is_directional`` selects between signed momentum (rank by signed median) and magnitude-only momentum
-    (rank by ``|median|``). The screener decides by inspecting the baseline features' registry-declared ``directional`` flag.
-    """
-    primary_horizon = horizons[0] if horizons else 12
-    sessions = _session_ids(raw_data, respect_sessions)
-    fwd_df = _build_forward_log_returns(raw_data["close"].values, state_labels, primary_horizon, sessions)
-    if len(fwd_df) < 30:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_scores",
-                              raw_details={"error": "fewer than 30 valid forward returns"})
-
-    fwd_df = fwd_df.rename(columns={"state": "regime"})
-    mapping, diag = map_label_to_momentum_score(
-        fwd_df, regime_col="regime", ret_col="returns",
-        method="robust", is_directional=is_directional, return_diagnostics=True,
-    )
-
-    weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median",
-                                                         use_abs=not is_directional)
-    n_distinct = len(set(mapping.values()))
-    return AxisEvaluation(
-        axis_separation=weighted_sd,
-        secondary_robustness=float(n_distinct),
-        secondary_label="n_distinct_scores",
-        axis_separation_range=raw_range,
-        raw_details={"horizon": primary_horizon, "is_directional": is_directional,
-                     "mapping": {int(k): int(v) for k, v in mapping.items()}},
-    )
-
-
 def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], respect_sessions: bool = False,
-                       **_ignored) -> AxisEvaluation:
-    """Volatility axis: forward realized-vol median spread + distinct bucket count."""
-    primary_horizon = horizons[0] if horizons else 12
+                       horizons: tuple[int, ...], primary_horizon: int | None = None,
+                       respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
+    """VOLATILITY axis: forward realized-vol median spread + distinct bucket count."""
+    primary_horizon = _resolve_horizon(primary_horizon, horizons)
     close = raw_data["close"].values
     if len(close) <= primary_horizon:
         return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
@@ -218,6 +212,10 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
         fwd_df, regime_col="regime", vol_proxy_col="realized_vol",
         method="median", return_diagnostics=True,
     )
+    if _diag_is_empty(diag, "median_vol"):
+        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+                              raw_details={"error": "map_regime_to_volatility_score returned no diagnostics",
+                                           "horizon": primary_horizon})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
     n_distinct = len(set(mapping.values()))
@@ -232,7 +230,12 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
 
 def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
                            horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
-    """Efficiency / path-structure axis: choppiness-index median spread + distinct scores."""
+    """PATH_STRUCTURE axis: choppiness-index median spread + distinct scores.
+
+    The only axis with no forward window: the choppiness index is measured on the bars the state
+    already occupies, so there is no horizon to pick and ``primary_horizon`` is accepted (via
+    ``**_ignored``) and deliberately unused. That is why ``raw_details`` carries no ``horizon`` key.
+    """
     required = {"high", "low", "close"}
     missing = required - set(raw_data.columns)
     if missing:
@@ -243,6 +246,9 @@ def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: 
     df["regime"] = state_labels[:len(df)]
     mapping, diag = map_regime_to_path_structure_score(df, regime_col="regime", method="id_chop",
                                                        return_diagnostics=True)
+    if _diag_is_empty(diag, "median_chop"):
+        return AxisEvaluation(0.0, 0.0, "n_distinct_scores",
+                              raw_details={"error": "map_regime_to_path_structure_score returned no diagnostics"})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_chop")
     n_distinct = len(set(mapping.values()))
@@ -256,11 +262,11 @@ def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: 
 
 
 def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                       horizons: tuple[int, ...], respect_sessions: bool = False,
-                       **_ignored) -> AxisEvaluation:
-    """Liquidity axis: forward median volume spread + bucket monotonicity.
+                       horizons: tuple[int, ...], primary_horizon: int | None = None,
+                       respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
+    """LIQUIDITY axis: forward median volume spread + bucket monotonicity.
 
-    Computes the forward cumulative volume over ``horizons[0]`` bars, then ranks states by median forward volume via
+    Computes the forward cumulative volume over ``primary_horizon`` bars, then ranks states by median forward volume via
     ``map_regime_to_volatility_score`` (mechanically generic — any non-negative scalar proxy works). Higher buckets
     = more active / liquid (higher forward volume per period).
 
@@ -276,7 +282,7 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
     Requires ``raw_data`` to contain ``close`` and a volume column. Accepts ``tick_volume`` or ``volume`` (in that order of preference);
     if neither is present, returns a zero-separation result with a clear error message in ``raw_details``.
     """
-    primary_horizon = horizons[0] if horizons else 12
+    primary_horizon = _resolve_horizon(primary_horizon, horizons)
 
     vol_col: str | None = None
     for c in ("tick_volume", "volume"):
@@ -316,6 +322,10 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         fwd_df, regime_col="regime", vol_proxy_col="fwd_volume",
         method="median", return_diagnostics=True,
     )
+    if _diag_is_empty(diag, "median_vol"):
+        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+                              raw_details={"error": "map_regime_to_volatility_score returned no diagnostics",
+                                           "horizon": primary_horizon, "volume_col": vol_col})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
     n_distinct = len(set(mapping.values()))
@@ -331,37 +341,35 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
     )
 
 
-def _not_implemented_factory(signal_type: str) -> AxisEvaluator:
-    """Return a stub evaluator that raises a clear message until a real one lands."""
-    def _impl(**_kwargs) -> AxisEvaluation:
-        raise NotImplementedError(
-            f"No HMM evaluator implemented for signal_type={signal_type!r}. "
-            f"Add one in hmm_screener._evaluators when this axis is needed."
-        )
-    return _impl
-
-
-# Dispatch from registry SIGNAL_TYPES -> evaluator. Stubs raise on call rather
-# than at registration time so that the screener's __init__ doesn't trip on
-# unrelated axes.
-AXIS_EVALUATORS: dict[str, AxisEvaluator] = {
-    "trend": evaluate_direction,
-    "momentum": evaluate_momentum,
-    "volatility": evaluate_volatility,
-    "price_structure": evaluate_path_structure,
-    "liquidity": evaluate_liquidity,
-    "toxicity": _not_implemented_factory("toxicity"),
-    "order_flow": _not_implemented_factory("order_flow"),
-    "volume_structure": _not_implemented_factory("volume_structure"),
-    "information": _not_implemented_factory("information"),
-    "composite": _not_implemented_factory("composite"),
-    "regime": _not_implemented_factory("regime"),
-    "temporal": _not_implemented_factory("temporal"),
+# Dispatch keyed by Axis. Every Axis member has a real evaluator, so there are no NotImplementedError
+# stubs any more: the enum is closed at four, and an axis without an evaluator would be an axis nobody
+# can screen. The former `momentum` -> evaluate_momentum entry is gone with the axis it served.
+AXIS_EVALUATORS: dict[Axis, AxisEvaluator] = {
+    Axis.DIRECTIONAL: evaluate_direction,
+    Axis.VOLATILITY: evaluate_volatility,
+    Axis.PATH_STRUCTURE: evaluate_path_structure,
+    Axis.LIQUIDITY: evaluate_liquidity,
 }
 
+assert set(AXIS_EVALUATORS) == set(Axis), "every Axis needs an evaluator"
 
-def get_evaluator(signal_type: str) -> AxisEvaluator:
-    """Look up the evaluator for a registry signal_type."""
-    if signal_type not in AXIS_EVALUATORS:
-        raise KeyError(f"No evaluator registered for signal_type={signal_type!r}. Known: {sorted(AXIS_EVALUATORS)}")
-    return AXIS_EVALUATORS[signal_type]
+
+def get_evaluator(axis: Axis) -> AxisEvaluator:
+    """Look up the evaluator for an ``Axis``.
+
+    Accepts the enum or its string value; anything else — notably a ``signal_type`` such as
+    ``"trend"`` or ``"momentum"`` — raises. Those are feature TAGS; both map onto
+    ``Axis.DIRECTIONAL``, which is the only directional axis there is.
+    """
+    try:
+        key = Axis(axis)
+    except ValueError:
+        raise KeyError(f"No evaluator for axis={axis!r}. Known: {sorted(a.value for a in Axis)}. "
+                       f"'trend'/'momentum' are signal_types, not axes -- both are "
+                       f"Axis.DIRECTIONAL.") from None
+    return AXIS_EVALUATORS[key]
+
+
+def primary_horizon_for(axis: Axis) -> int:
+    """The measured default forward horizon for ``axis`` (DIRECTIONAL peaks at 18, not 12)."""
+    return AXIS_PRIMARY_HORIZON[Axis(axis)]

@@ -113,7 +113,7 @@ class MultiTrader:
                 continue
 
             try:
-                strategy.manage_positions(run_dt)
+                strategy.sync_positions(run_dt)
                 health.record_position_check()
             except Exception as e:
                 logger.error(f"Error in position check for '{strategy_key}': {e}", exc_info=True,)

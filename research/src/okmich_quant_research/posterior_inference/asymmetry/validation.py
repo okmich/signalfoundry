@@ -23,7 +23,8 @@ from numpy.typing import NDArray
 from scipy.stats import norm
 
 from .profiler import ForwardOutcome, forward_outcome_by_state
-from .forward_axes import MarketAxis, forward_axis_series
+from ...features.registry import Axis
+from .forward_axes import forward_axis_series
 
 
 @dataclass(frozen=True)
@@ -97,7 +98,9 @@ def _contrast_table(probs: NDArray, probe: AxisProbe, kind: str, state_names: li
                     values: NDArray) -> pd.DataFrame:
     df = forward_outcome_by_state(probs, {probe.axis: ForwardOutcome(values, probe.horizon)},
                                   state_names=state_names, min_coverage=min_coverage)
-    df = df.rename(columns={"axis": "market_axis"})
+    # No rename: the column is called "axis" everywhere now (profiler emits it, Axis names it).
+    # Bracket access is used throughout below rather than ``df.axis`` -- attribute access on a column
+    # named like a pandas kwarg is exactly the kind of thing that breaks quietly.
     df["kind"] = kind
     return df
 
@@ -121,7 +124,7 @@ def _fold_stability(probs: NDArray, fold_ids: NDArray, unique_folds: NDArray, ax
             continue
         evaluable += 1
         passes += int(abs(row.t_hac) > t_threshold)
-        rows.append({"market_axis": axis, "fold": int(f), "state": focal,
+        rows.append({"axis": axis, "fold": int(f), "state": focal,
                      "t_hac": float(row.t_hac), "delta_vs_pooled": float(row.delta_vs_pooled)})
     return (passes / evaluable if evaluable else float("nan")), evaluable, rows
 
@@ -136,7 +139,7 @@ def _bonferroni_t(t_threshold: float, n_tests: int) -> float:
 
 
 def _inconclusive_focal_row(axis: str) -> dict:
-    return {"market_axis": axis, "focal_state": -1, "focal_state_label": None, "horizon": -1,
+    return {"axis": axis, "focal_state": -1, "focal_state_label": None, "horizon": -1,
             "delta_vs_pooled": float("nan"), "t_hac": float("nan"), "deflated_t": float("nan"),
             "n_cells_tested": 0, "fold_fraction": float("nan"), "verdict": ValidationVerdict.INCONCLUSIVE.value}
 
@@ -166,7 +169,7 @@ def validate_outcomes(stream: PosteriorStream, probes: list[AxisProbe], *, min_c
 
     inc_table = table[table.kind == "incremental"]
     for axis in dict.fromkeys(pr.axis for pr in probes):                       # unique axes, order preserved
-        cells = inc_table[(inc_table.market_axis == axis) & (~inc_table.low_coverage) & inc_table.t_hac.notna()]
+        cells = inc_table[(inc_table["axis"] == axis) & (~inc_table.low_coverage) & inc_table.t_hac.notna()]
         if cells.empty:                                                        # no judgeable incremental cell
             verdicts[axis] = ValidationVerdict.INCONCLUSIVE
             focal_rows.append(_inconclusive_focal_row(axis))
@@ -193,7 +196,7 @@ def validate_outcomes(stream: PosteriorStream, probes: list[AxisProbe], *, min_c
                 verdict = (ValidationVerdict.CONFIRMED if fraction >= min_stable_fraction
                            else ValidationVerdict.REJECTED)                    # deflated-significant but not fold-stable
         verdicts[axis] = verdict
-        focal_rows.append({"market_axis": axis, "focal_state": focal_state, "focal_state_label": best.state_label,
+        focal_rows.append({"axis": axis, "focal_state": focal_state, "focal_state_label": best.state_label,
                            "horizon": focal_h, "delta_vs_pooled": float(best.delta_vs_pooled),
                            "t_hac": float(best.t_hac), "deflated_t": deflated_t, "n_cells_tested": n_cells,
                            "fold_fraction": fraction, "verdict": verdict.value})
@@ -201,14 +204,14 @@ def validate_outcomes(stream: PosteriorStream, probes: list[AxisProbe], *, min_c
     confirmed = [a for a, v in verdicts.items() if v == ValidationVerdict.CONFIRMED]
     summary = (f"confirmed={confirmed or 'none'}; verdicts=" +
                ", ".join(f"{a}:{v.value}" for a, v in verdicts.items()))
-    focal_cols = ["market_axis", "focal_state", "focal_state_label", "horizon", "delta_vs_pooled", "t_hac",
+    focal_cols = ["axis", "focal_state", "focal_state_label", "horizon", "delta_vs_pooled", "t_hac",
                   "deflated_t", "n_cells_tested", "fold_fraction", "verdict"]
-    per_fold = pd.DataFrame(fold_rows, columns=["market_axis", "fold", "state", "t_hac", "delta_vs_pooled"])
+    per_fold = pd.DataFrame(fold_rows, columns=["axis", "fold", "state", "t_hac", "delta_vs_pooled"])
     return ValidationReport(table=table, focal_summary=pd.DataFrame(focal_rows, columns=focal_cols),
                             per_fold=per_fold, verdicts=verdicts, summary=summary)
 
 
-def validate_stream(stream: PosteriorStream, prices: pd.DataFrame, *, axes: list[MarketAxis], horizons: list[int],
+def validate_stream(stream: PosteriorStream, prices: pd.DataFrame, *, axes: list[Axis], horizons: list[int],
                     min_coverage: float = 200.0, t_threshold: float = 2.0,
                     min_stable_fraction: float = 0.6) -> ValidationReport:
     """Build per-axis probes from ``prices`` (aligned to ``stream.index``), then judge via ``validate_outcomes``.

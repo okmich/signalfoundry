@@ -2,7 +2,7 @@ from typing import Optional
 
 import pandas as pd
 
-from ._adx import adx, plus_di, minus_di
+from ._adx import adx, plus_di, minus_di, di_spread
 from ._cci import cci
 from ._core_momentum import roc, roc_smoothed, momentum, macd, log_returns, momentum_acceleration, roc_velocity, \
     momentum_volatility_ratio, rolling_slope, stochastic, mean_adjusted_ratio, rsi, rolling_sharpe, jerk, williams_r, \
