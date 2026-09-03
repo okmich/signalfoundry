@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from okmich_quant_research.features.registry import Axis
 from okmich_quant_research.features.hmm_screener import (
     HmmScreenerConfig,
     adjacent_pair_count,
@@ -84,7 +85,7 @@ def test_diagnostic_is_the_default_and_removes_nothing() -> None:
     Xf, report = stage0b_persistence_filter(X, verbose=False)  # no min_persistence passed
     assert report.removed == []
     assert list(Xf.columns) == list(X.columns)
-    assert HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2).min_persistence == 0.0
+    assert HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2).min_persistence == 0.0
 
 
 def test_opt_in_filter_removes_only_the_memoryless_feature() -> None:
@@ -165,7 +166,7 @@ def test_helper_validates_min_obs() -> None:
 
 def test_config_validates_the_floor() -> None:
     with pytest.raises(ValueError, match="min_persistence"):
-        HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, min_persistence=1.5)
+        HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, min_persistence=1.5)
 
 
 def test_rejected_baseline_feature_warns_and_is_excluded_from_every_subset() -> None:
@@ -188,7 +189,7 @@ def test_rejected_baseline_feature_warns_and_is_excluded_from_every_subset() -> 
         out["coin_feat"] = pd.Series(rng.normal(size=len(out)), index=out.index)
         return out
 
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=T,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=T,
                                random_state=0, min_persistence=FXPIG_M5_FLOOR)
     screener = HmmFeatureScreener(config, raw, fe)
 

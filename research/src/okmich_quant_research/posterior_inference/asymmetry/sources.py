@@ -18,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from okmich_quant_ml.hmm import DistType, InferenceMode, create_simple_hmm_instance
 from okmich_quant_labelling.utils.label_util import map_regime_to_volatility_score
 
-from .forward_axes import MarketAxis
+from ...features.registry import Axis
 from .validation import PosteriorStream
 
 
@@ -109,7 +109,7 @@ def _vol_rank_order(train_close: np.ndarray, train_map: np.ndarray, n_states: in
 
 
 def walk_forward_filtered_posteriors(data: pd.DataFrame, *, feature_columns: list[str], fit: HmmFitSpec,
-                                     window: WalkForwardWindow, identity_axis: MarketAxis = MarketAxis.VOLATILITY,
+                                     window: WalkForwardWindow, identity_axis: Axis = Axis.VOLATILITY,
                                      state_names: list[str] | None = None) -> PosteriorStream:
     """Walk-forward causal filtering posteriors as one stitched ``PosteriorStream``.
 
@@ -121,7 +121,7 @@ def walk_forward_filtered_posteriors(data: pd.DataFrame, *, feature_columns: lis
     Feature warm-up NaNs must be trimmed before the first fold's fed range — non-finite fed features raise rather than
     silently producing NaN posteriors.
     """
-    if identity_axis != MarketAxis.VOLATILITY:
+    if identity_axis != Axis.VOLATILITY:
         raise NotImplementedError(
             f"state identity for axis {identity_axis} not wired yet; only VOLATILITY (vol-rank) is supported. "
             f"Add the matching label_util mapper when another identity axis is needed."

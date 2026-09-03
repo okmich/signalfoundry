@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from okmich_quant_research.features.registry import Axis
 from okmich_quant_research.features.hmm_screener import (
     HmmScreenerConfig,
     nearest_duplicate_vif,
@@ -82,7 +83,7 @@ def test_diagnostic_default_removes_nothing_but_still_scores() -> None:
     assert list(Xf.columns) == list(X.columns)
     scored = report.detail["nearest_duplicate_vif"]
     assert scored["a"] is not None and scored["a"] > SEVERE_VIF, "diagnostic mode must populate scores"
-    assert HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2).max_vif == float("inf")
+    assert HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2).max_vif == float("inf")
 
 
 def test_opt_in_removes_only_the_redundant_feature() -> None:
@@ -220,7 +221,7 @@ def test_helper_validates_min_obs() -> None:
 
 def test_config_validates_the_ceiling() -> None:
     with pytest.raises(ValueError, match="max_vif"):
-        HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, max_vif=0.5)
+        HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, max_vif=0.5)
 
 
 # --------------------------------------------------------------------- integration (the baseline concern)
@@ -247,7 +248,7 @@ def test_redundant_baseline_feature_warns_and_is_excluded_from_every_subset() ->
         out["dupe_feat"] = persistent + rng.normal(0, persistent.std() * 0.02, size=len(out))  # corr ~1
         return out
 
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=T,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=T,
                                random_state=0, min_persistence=0.0, max_vif=SEVERE_VIF)
     screener = HmmFeatureScreener(config, raw, fe)
 

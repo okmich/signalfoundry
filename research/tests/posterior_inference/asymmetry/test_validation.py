@@ -4,7 +4,7 @@ import pytest
 
 from okmich_quant_research.posterior_inference.asymmetry import (
     AxisProbe,
-    MarketAxis,
+    Axis,
     PosteriorStream,
     ValidationVerdict,
     incremental_residual,
@@ -63,7 +63,7 @@ def test_rejects_baseline_only_separation() -> None:
     stream = _one_hot_stream(states, T, fold_ids=fold_ids)
     report = validate_outcomes(stream, [AxisProbe("vol", 1,forward, b)], min_coverage=100.0)
     assert report.verdicts["vol"] == ValidationVerdict.REJECTED
-    raw = report.table[(report.table.kind == "raw") & (report.table.market_axis == "vol")]
+    raw = report.table[(report.table.kind == "raw") & (report.table["axis"] == "vol")]
     assert raw.t_hac.abs().max() > 3.0              # raw separation is real — and still rejected
 
 
@@ -132,10 +132,10 @@ def test_validate_stream_builds_probes_and_judges() -> None:
     probs = np.zeros((T, 3))
     probs[np.arange(T), states] = 1.0
     stream = PosteriorStream(probs=probs, state_names=["low", "mid", "high"], index=idx)
-    report = validate_stream(stream, prices, axes=[MarketAxis.VOLATILITY], horizons=[2, 4], min_coverage=50.0)
+    report = validate_stream(stream, prices, axes=[Axis.VOLATILITY], horizons=[2, 4], min_coverage=50.0)
     assert "volatility" in report.verdicts
     assert set(report.table.kind) == {"raw", "incremental"}
-    assert "volatility" in set(report.focal_summary.market_axis)
+    assert "volatility" in set(report.focal_summary["axis"])
 
 
 def test_bonferroni_t_deflates_with_more_tests() -> None:

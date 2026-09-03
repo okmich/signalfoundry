@@ -6,7 +6,7 @@ from okmich_quant_ml.hmm import DistType
 
 from okmich_quant_research.posterior_inference.asymmetry import (
     HmmFitSpec,
-    MarketAxis,
+    Axis,
     PosteriorStream,
     WalkForwardWindow,
     frozen_artifact_posteriors,
@@ -57,7 +57,7 @@ def test_non_volatility_identity_not_yet_supported() -> None:
     fit = HmmFitSpec(dist_type=DistType.NORMAL, n_states=2, max_iter=5)
     with pytest.raises(NotImplementedError):
         walk_forward_filtered_posteriors(data, feature_columns=["f_trend", "f_vol"], fit=fit,
-                                         window=WalkForwardWindow(train=100, oos=100), identity_axis=MarketAxis.TREND)
+                                         window=WalkForwardWindow(train=100, oos=100), identity_axis=Axis.DIRECTIONAL)
 
 
 def test_requires_close_column() -> None:

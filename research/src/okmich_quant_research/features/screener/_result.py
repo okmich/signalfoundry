@@ -58,8 +58,6 @@ class ScreenerResult:
     stage_reports: List[StageReport] = field(default_factory=list)
     icir_scores: dict = field(default_factory=dict)
     stage1_scores: dict = field(default_factory=dict)
-    cluster_assignments: dict = field(default_factory=dict)
-    cluster_representatives: dict = field(default_factory=dict)
     boruta_groups: dict = field(default_factory=dict)
 
     def summary(self) -> pd.DataFrame:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import List
 
 # ── Signal type taxonomy ──────────────────────────────────────────────────────
@@ -45,6 +46,67 @@ R_CRISIS   = "crisis"
 MARKET_REGIMES = (R_TRENDING, R_RANGING, R_VOLATILE, R_LOW_VOL, R_CRISIS)
 
 
+# ── Measured invariance taxonomy ──────────────────────────────────────────────
+# Two exact, model-free transforms of the price path decide what a feature actually measures. They are
+# applied in LOG-PRICE space about the first close, so they are exact on log-returns rather than
+# approximate:
+#
+#   reflect:  p' = c0**2 / p          # every log-return negated; DECREASING, so high/low MUST swap
+#   rescale:  p' = c0 * (p/c0)**c     # every log-deviation multiplied by c; order-preserving
+#
+# Parity comes from reflection, scale class from rescaling. Crossed, they define the three PRICE-PATH
+# axes (see registry._axis):
+#
+#                 scale-carrying        scale-free
+#     odd         DIRECTIONAL           DIRECTIONAL
+#     even        VOLATILITY            PATH_STRUCTURE
+#
+# These stamps are MEASURED, never declared -- see okmich_quant_research.features.invariance, which
+# produces them, and registry/_invariance.csv, which carries them.
+
+
+class Parity(StrEnum):
+    """Behaviour of a feature under reflection of the price path."""
+
+    ODD = "odd"              # corr(f_reflected, f) ~ -1: knows WHICH WAY
+    EVEN = "even"            # corr(f_reflected, f) ~ +1: knows only HOW MUCH
+    ONE_SIDED = "one-sided"  # f_reflected matches a DIFFERENT column ~ +1: half of an odd pair
+    MIXED = "mixed"          # none of the above: confounds direction with magnitude -- a defect
+    UNSCORED = "unscored"    # measurement attempted but not trustworthy (degenerate / too few obs)
+
+
+class ScaleClass(StrEnum):
+    """Behaviour of a feature under rescaling of the price path's log-deviations."""
+
+    CARRYING = "scale-carrying"  # exponent ~ 1: the feature's spread tracks move size
+    FREE = "scale-free"          # exponent ~ 0: normalised, size-invariant
+    PARTIAL = "partial"          # between the two bands
+    UNSCORED = "unscored"
+
+
+@dataclass(frozen=True)
+class FeatureInvariance:
+    """A measured invariance stamp for one feature.
+
+    ``conjugate`` is the reflection partner and is set IFF ``parity`` is ``ONE_SIDED`` -- e.g.
+    ``momentum.minus_di`` carries ``conjugate="momentum.plus_di"``. ``measured_on`` records the corpus,
+    bar count and date the stamp came from, because a stamp without provenance is just another
+    assertion.
+    """
+
+    parity: Parity
+    scale_class: ScaleClass
+    conjugate: str = ""
+    measured_on: str = ""
+
+    def __post_init__(self):
+        if (self.parity is Parity.ONE_SIDED) != bool(self.conjugate):
+            raise ValueError(
+                f"conjugate must be set iff parity is ONE_SIDED; got parity={self.parity!r}, "
+                f"conjugate={self.conjugate!r}"
+            )
+
+
 @dataclass
 class FeatureEntry:
     """Metadata record for a single feature function."""
@@ -70,6 +132,10 @@ class FeatureEntry:
     needs_benchmark: bool = False   # requires peer/benchmark data
 
     notes: str = ""
+
+    # Measured invariance stamp; ``None`` means never measured (NOT "measured and found neutral").
+    # Populated at import time from registry/_invariance.csv -- see registry._invariance.
+    invariance: FeatureInvariance | None = None
 
     def __post_init__(self):
         assert self.signal_type in SIGNAL_TYPES, (

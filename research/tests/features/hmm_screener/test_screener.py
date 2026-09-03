@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from okmich_quant_research.features.registry import Axis
 from okmich_quant_research.features.hmm_screener import (
     HmmFeatureScreener,
     HmmScreenerConfig,
@@ -50,7 +51,7 @@ def _feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
 def test_screener_end_to_end_direction_axis_returns_populated_result() -> None:
     raw = _make_synthetic_ohlc(T=2000)
     config = HmmScreenerConfig(
-        signal_type="trend",
+        axis=Axis.DIRECTIONAL,
         algo="hmm_lambda",
         n_states=2,
         data_size=2000,
@@ -85,7 +86,7 @@ def test_screener_rejects_missing_close_column_at_construction() -> None:
     def fe(df):
         return df.copy()
 
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=T)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=T)
     with pytest.raises(ValueError, match="'close'"):
         HmmFeatureScreener(config, raw, fe)
 
@@ -96,7 +97,7 @@ def test_screener_rejects_unknown_candidate_feature() -> None:
     def fe(df):
         return df.copy()  # produces no new columns
 
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, fe)
     with pytest.raises(ValueError, match="feature_engineering did not produce"):
         screener.screen(["nonexistent_feature"])
@@ -104,7 +105,7 @@ def test_screener_rejects_unknown_candidate_feature() -> None:
 
 def test_screener_ablation_generates_expected_subsets() -> None:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
     # 2 candidates, baseline = [a]:
@@ -124,7 +125,7 @@ def test_screener_ablation_generates_expected_subsets() -> None:
 
 def test_screener_exhaustive_generates_all_subsets() -> None:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
     subsets = screener._generate_subsets(
@@ -161,7 +162,7 @@ def _make_subset_eval(features=("a",), axis_sep=1.0, secondary=2.0, honesty=0.1,
 
 def test_screener_classify_fragile_on_infinite_balance_ratio() -> None:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
     # State collapse: one or more states never emitted -> balance ratio is +inf.
@@ -172,7 +173,7 @@ def test_screener_classify_fragile_on_infinite_balance_ratio() -> None:
 
 def test_screener_classify_fragile_on_insufficient_significant_states() -> None:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2,
                                data_size=200, min_significant_states=2)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
@@ -184,7 +185,7 @@ def test_screener_classify_fragile_on_insufficient_significant_states() -> None:
 
 def test_screener_classify_fragile_excluded_from_pareto_frontier() -> None:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2,
                                data_size=200, min_significant_states=2)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
@@ -203,7 +204,7 @@ def test_screener_classify_trap_supersedes_fragile_check_only_when_healthy() -> 
     # would otherwise be a trap by honesty is classified FRAGILE if its state
     # structure is also degenerate.
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2,
                                data_size=200, min_significant_states=2, honesty_trap_rate=0.4)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
     evs = [
@@ -235,7 +236,7 @@ def test_screener_passthrough_collision_emits_warning_and_keeps_engineered_value
     # The engineered "close" here is a z-score of iid synthetic log-returns (persistence score ~0.013), so
     # enabling the floor would legitimately drop it before subset generation and the collision could never
     # occur. This test is about passthrough-name collision, which is orthogonal to persistence.
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2,
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2,
                                data_size=400, random_state=42)
     screener = HmmFeatureScreener(config, raw, fe)
     result = screener.screen(["close", "log_rets_smooth_24"], strategy=ScreenStrategy.ABLATION,
@@ -254,7 +255,7 @@ def test_screener_passthrough_collision_emits_warning_and_keeps_engineered_value
 def test_screener_result_fragile_property_and_repr() -> None:
     """`result.fragile` and `__repr__` both expose the FRAGILE count alongside keepers / traps."""
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
     # Synthetic evaluations: one keeper, one trap, one fragile, one dominated.
@@ -282,7 +283,7 @@ def test_screener_result_fragile_property_and_repr() -> None:
 def test_subset_coherence_warnings_are_per_subset() -> None:
     """Off-axis / unregistered-feature warnings name only the subset(s) that actually contain the offending feature."""
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     screener = HmmFeatureScreener(config, raw, _feature_engineering)
 
     # Features not in the registry get a "not in FeatureRegistry" warning ONLY on subsets that include them.
@@ -302,7 +303,7 @@ def test_subset_coherence_warnings_are_per_subset() -> None:
 
 def _screener_for_prior() -> HmmFeatureScreener:
     raw = _make_synthetic_ohlc(T=200)
-    config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
     return HmmFeatureScreener(config, raw, _feature_engineering)
 
 
@@ -428,7 +429,7 @@ GREEDY_COLS = ["g_a", "g_b", "g_c", "g_d"]
 
 def _greedy_screener(**cfg_kw) -> HmmFeatureScreener:
     raw = _make_synthetic_ohlc(T=600)
-    base = dict(signal_type="trend", algo="hmm_lambda", n_states=2, data_size=600, random_state=42)
+    base = dict(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=600, random_state=42)
     base.update(cfg_kw)
     return HmmFeatureScreener(HmmScreenerConfig(**base), raw, _greedy_fe)
 

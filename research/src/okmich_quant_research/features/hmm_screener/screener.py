@@ -10,7 +10,7 @@ Workflow:
     ... )
     >>> reg = FeatureRegistry()
     >>> candidates = reg.candidates_for("regime", min_relevance="HIGH").names()
-    >>> config = HmmScreenerConfig(signal_type="trend", algo="hmm_lambda", n_states=4)
+    >>> config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=4)
     >>> screener = HmmFeatureScreener(config, raw_data, feature_engineering_fn)
     >>> result = screener.screen(candidates, strategy=ScreenStrategy.GREEDY_FORWARD)
     >>> result.results_             # ranked DataFrame
@@ -26,6 +26,12 @@ Implementation notes:
     * Pareto classification is preceded by a structural quality gate (``min_significant_states``, ``max_balance_ratio``);
       subsets failing either are marked ``FRAGILE`` and excluded from the frontier.
     * Off-axis coherence warnings are computed per-subset, so a warning names only the feature(s) actually contaminating that subset.
+    * Axis membership is decided by ``registry.is_eligible`` -- feature TAG plus MEASURED invariance --
+      not by a name or a hand-kept list. A feature whose behaviour contradicts its namespace is caught
+      here rather than silently screened.
+    * Python warnings raised inside an evaluator (notably ``label_util``'s ranking fallbacks) are
+      captured onto the subset instead of escaping to stderr, where once-per-location dedup made most
+      of them invisible.
 """
 from __future__ import annotations
 
@@ -41,10 +47,10 @@ import pandas as pd
 from okmich_quant_ml.hmm import InferenceMode
 from okmich_quant_ml.posterior_inference import top_prob
 
-from ..registry import FeatureRegistry
+from ..registry import Axis, FeatureEntry, FeatureRegistry, PRICE_PATH_AXES, Parity, is_eligible
 from ..screener._stage0 import stage0_variance_filter
 from ..screener._result import StageReport
-from ._config import HmmScreenerConfig, ScreenStrategy, build_hmm
+from ._config import HmmScreenerConfig, OneSidedPolicy, ScreenStrategy, build_hmm
 from ._evaluators import get_evaluator
 from ._persistence import stage0b_persistence_filter
 from ._collinearity import stage0c_collinearity_filter
@@ -54,6 +60,11 @@ from ._result import (AxisEvaluation, GreedyStep, GreedyStopReason, HmmScreenerR
 
 
 _PASSTHROUGH_COLUMNS = ("open", "high", "low", "close", "tick_volume", "volume")
+
+#: Prefix marking a lone-one-sided-feature warning, so the Phase-A gate can recognise its own message
+#: without re-deriving it. Matching on a substring of prose would silently stop working the day the
+#: wording changes.
+_ONE_SIDED_TAG = "one_sided: "
 
 
 class HmmFeatureScreener:
@@ -87,6 +98,15 @@ class HmmFeatureScreener:
                  registry: FeatureRegistry | None = None):
         if "close" not in raw_data.columns:
             raise ValueError("raw_data must contain a 'close' column for axis evaluators.")
+        if config.axis is Axis.LIQUIDITY and not config.has_real_volume:
+            raise ValueError(
+                "Axis.LIQUIDITY requires real traded volume or order-flow data, and the feed has not "
+                "been declared to provide it. Pass has_real_volume=True only if the volume column is "
+                "genuinely traded volume. On MT5 feeds (FXPIG included) 'tick_volume' is a tick COUNT, "
+                "not volume: screening liquidity on it measures quote activity, and the resulting axis "
+                "is not liquidity. The library has no feed metadata, so this cannot be inferred from "
+                "the data -- it is the caller's assertion to make."
+            )
         self.config = config
         self.raw_data = (raw_data.iloc[-config.data_size:].copy()
                          if len(raw_data) > config.data_size else raw_data.copy())
@@ -150,6 +170,7 @@ class HmmFeatureScreener:
         filtered_X, collinearity_report = stage0c_collinearity_filter(
             filtered_X, max_vif=self.config.max_vif, verbose=False)
         surviving = list(filtered_X.columns)
+        self._report_measurement_coverage(surviving)
 
         # A hand-supplied baseline is privileged: under ABLATION every add-one subset is
         # ``baseline + candidate``, so a bad baseline feature contaminates almost the whole search
@@ -358,6 +379,9 @@ class HmmFeatureScreener:
         # Coherence check raises immediately if config.raise_on_off_axis is set;
         # otherwise the offending feature names accumulate as warnings on this subset.
         per_subset_warnings = self._validate_subset_coherence(subset)
+        # Runs before the fit so a RAISE policy costs nothing, and so the warning is attached even if
+        # the fit later fails: "this subset cannot express direction" is true regardless of the fit.
+        per_subset_warnings += self._check_one_sided(subset)
         try:
             # Join engineered features to raw OHLC on index; drop rows where any of
             # the required columns is NaN. This guarantees evaluators receive the
@@ -398,7 +422,12 @@ class HmmFeatureScreener:
             tp = top_prob(gamma)
             honesty = float((tp > self.config.honesty_threshold).mean())
             balance_ratio = self._state_balance_ratio(state_labels, self.config.n_states)
-            axis_eval = self._call_evaluator(subset, gamma, state_labels, joined)
+            axis_eval, evaluator_warnings = self._call_evaluator(gamma, state_labels, joined)
+            per_subset_warnings += evaluator_warnings
+            # Sub-cell composition rides along on every row: it is the only visible signal that a
+            # DIRECTIONAL subset might be partitioning magnitude rather than direction.
+            raw_details = dict(axis_eval.raw_details)
+            raw_details["subset_cells"] = self._subset_cells(subset)
 
             return SubsetEvaluation(
                 features=subset,
@@ -411,7 +440,7 @@ class HmmFeatureScreener:
                 pareto_status=ParetoStatus.DOMINATED,  # placeholder; set in _classify
                 axis_separation_range=axis_eval.axis_separation_range,
                 warnings=tuple(per_subset_warnings),
-                raw_details=axis_eval.raw_details,
+                raw_details=raw_details,
                 elapsed_sec=float(time.time() - t0),
                 error=None,
             )
@@ -433,43 +462,66 @@ class HmmFeatureScreener:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-    def _call_evaluator(self, subset: tuple[str, ...], gamma: np.ndarray,
-                       state_labels: np.ndarray, evaluator_df: pd.DataFrame) -> AxisEvaluation:
-        evaluator = get_evaluator(self.config.signal_type)
-        kwargs: dict = {"respect_sessions": self.config.respect_session_boundaries}
-        if self.config.signal_type == "momentum":
-            kwargs["is_directional"] = self._infer_is_directional(subset)
-        return evaluator(gamma=gamma, state_labels=state_labels, raw_data=evaluator_df,
-                         horizons=self.config.horizons, **kwargs)
+    def _call_evaluator(self, gamma: np.ndarray, state_labels: np.ndarray,
+                        evaluator_df: pd.DataFrame) -> tuple[AxisEvaluation, list[str]]:
+        """Run the axis evaluator, CAPTURING any Python warnings it raises.
 
-    def _infer_is_directional(self, subset: tuple[str, ...]) -> bool:
-        """Read the registry: if >=50% of subset features are directional, treat as directional axis."""
-        flags = []
-        for name in subset:
-            try:
-                entry = self.registry.get(name)
-                flags.append(entry.directional)
-            except (KeyError, ValueError):
-                continue
-        if not flags:
-            return True  # default to directional when nothing is registered
-        return (sum(flags) / len(flags)) >= 0.5
+        ``label_util``'s mappers signal real problems through ``warnings.warn`` -- the ranking fallback
+        when a method produced too few distinct signs, monotonicity re-ranking, regimes disappearing
+        after a dropna. Those were escaping to stderr, where ``__warningregistry__``'s once-per-location
+        dedup meant that on a several-hundred-subset screen only the FIRST occurrence was ever printed
+        and no output row recorded any of them. Captured here, they reach ``SubsetEvaluation.warnings``
+        and the results frame.
+        """
+        evaluator = get_evaluator(self.config.axis)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            evaluation = evaluator(gamma=gamma, state_labels=state_labels, raw_data=evaluator_df,
+                                   horizons=self.config.horizons,
+                                   primary_horizon=self.config.effective_primary_horizon,
+                                   respect_sessions=self.config.respect_session_boundaries)
+        return evaluation, [f"evaluator_warning: {w.message}" for w in caught]
 
     # ----------------------------------------------------------- axis coherence
 
-    def _validate_subset_coherence(self, subset: tuple[str, ...]) -> list[str]:
-        """Per-subset off-axis check.
+    def _resolve_entries(self, subset: tuple[str, ...]) -> dict[str, FeatureEntry | None]:
+        """Resolve each subset column to its registry entry once, ``None`` when unresolvable.
 
-        Iterates only over features actually in ``subset`` so the resulting warnings name the contaminating feature,
-        not the whole candidate pool.
-        Raises ``ValueError`` immediately if ``config.raise_on_off_axis`` is set.
+        Three per-subset checks need the same lookups (coherence, the one-sided guard, the sub-cell
+        report). Resolving in one place keeps them from drifting apart and collapses three near-identical
+        try/except loops into one.
         """
-        warns: list[str] = []
+        resolved: dict[str, FeatureEntry | None] = {}
         for f in subset:
             try:
-                entry = self.registry.get(f)
-            except (KeyError, ValueError) as e:
-                warns.append(f"'{f}' not in FeatureRegistry: {type(e).__name__}; skipping coherence check")
+                resolved[f] = self.registry.get(f)
+            except (KeyError, ValueError):
+                resolved[f] = None
+        return resolved
+
+    def _validate_subset_coherence(self, subset: tuple[str, ...]) -> list[str]:
+        """Per-subset off-axis check, decided by tag AND measured invariance.
+
+        Iterates only over features actually in ``subset`` so the resulting warnings name the
+        contaminating feature, not the whole candidate pool. Raises ``ValueError`` immediately if
+        ``config.raise_on_off_axis`` is set.
+
+        Emits REJECTIONS only. ``is_eligible`` also returns subset-blind advisories -- "carries no
+        invariance stamp", "is ONE-SIDED" -- and those deliberately do NOT come out here:
+
+          * an unstamped feature is a property of the POOL, identical on every subset containing it, so
+            repeating it per row would put a line on nearly every row (67 of the 116 DIRECTIONAL-eligible
+            catalogue entries are unstamped) and drown the findings that are subset-specific. It is
+            reported once per screen instead, from ``_report_measurement_coverage``.
+          * a ONE-SIDED feature is only unsafe when its conjugate is ABSENT, which ``is_eligible`` cannot
+            know because it sees one feature at a time. Emitting it here told a subset holding BOTH
+            halves -- which is perfectly safe -- to "pair it with its conjugate". ``_check_one_sided``
+            owns that message because it is the only one with subset context.
+        """
+        warns: list[str] = []
+        for f, entry in self._resolve_entries(subset).items():
+            if entry is None:
+                warns.append(f"'{f}' not in FeatureRegistry; skipping coherence check")
                 continue
             if entry.signal_type not in self._allowed_signal_types:
                 msg = (f"'{f}' has signal_type='{entry.signal_type}', not in allowed "
@@ -477,7 +529,98 @@ class HmmFeatureScreener:
                 warns.append(msg)
                 if self.config.raise_on_off_axis:
                     raise ValueError(msg)
+                continue
+            ok, reason = is_eligible(entry, self.config.axis)
+            if not ok:
+                msg = f"'{f}' is not eligible for axis={self.config.axis.value}: {reason}"
+                warns.append(msg)
+                if self.config.raise_on_off_axis:
+                    raise ValueError(msg)
         return warns
+
+    def _report_measurement_coverage(self, surviving: list[str]) -> None:
+        """Warn ONCE per screen about candidates the invariance gate could not fully judge.
+
+        A coverage gap is a property of the pool, not of a subset, so it is reported here rather than
+        repeated on every row. Unstamped is NOT the same finding as unmeasurable: the first means the
+        probe never covered this feature, the second means it was measured and the measurement could not
+        be trusted. Both leave the feature admitted on its tag alone, which is weaker than the axis
+        claims to be, so both are worth saying out loud.
+        """
+        if self.config.axis not in PRICE_PATH_AXES:
+            return
+        unregistered, unstamped = [], []
+        for f, entry in self._resolve_entries(tuple(surviving)).items():
+            if entry is None:
+                unregistered.append(f)
+            elif entry.invariance is None:
+                unstamped.append(f)
+        if unstamped:
+            warnings.warn(
+                f"{len(unstamped)} of {len(surviving)} surviving candidates carry no measured invariance "
+                f"stamp, so they were admitted to axis={self.config.axis.value} on their signal_type tag "
+                f"alone: {sorted(unstamped)}. Run okmich_quant_research.features.invariance.probe_invariance "
+                f"over this pool to close the gap -- an unmeasured feature is not a validated one.",
+                UserWarning, stacklevel=3)
+        if unregistered:
+            warnings.warn(
+                f"{len(unregistered)} of {len(surviving)} surviving candidates are not in the "
+                f"FeatureRegistry, so neither the tag gate nor the invariance gate could be applied to "
+                f"them: {sorted(unregistered)}.", UserWarning, stacklevel=3)
+
+    def _check_one_sided(self, subset: tuple[str, ...]) -> list[str]:
+        """Flag ONE_SIDED features in a DIRECTIONAL subset whose conjugate is absent.
+
+        The highest-impact check here. ``momentum.minus_di`` won the trend axis on 11 of 14 FX symbols,
+        and it is half of an odd pair: reflected, it maps onto ``plus_di``, not onto its own negation.
+        Its high state means "strong move THIS way"; its low state pools "the other way" WITH "no move
+        at all". So a K=2 split on it alone never was an up/down partition, and no separation metric
+        could have revealed that.
+
+        A one-sided feature is fine WITH its conjugate in the same subset -- the pair spans the axis --
+        so only lone ones are flagged. The clean fix is the canonical odd combination:
+        ``momentum.di_spread``, ``timothymasters.trend.aroon_diff``.
+        """
+        if self.config.axis is not Axis.DIRECTIONAL:
+            return []
+        warns: list[str] = []
+        present = set(subset)
+        for f, entry in self._resolve_entries(subset).items():
+            if entry is None:
+                continue
+            inv = entry.invariance
+            if inv is None or inv.parity is not Parity.ONE_SIDED:
+                continue
+            if inv.conjugate and inv.conjugate in present:
+                continue
+            msg = (f"{_ONE_SIDED_TAG}'{f}' is ONE-SIDED (conjugate '{inv.conjugate}' absent from this "
+                   f"subset). Its low state pools 'the other way' with 'no move at all', so a "
+                   f"{self.config.n_states}-state split on it is not a direction partition. Use the "
+                   f"canonical odd spread, or include the conjugate.")
+            if self.config.one_sided_policy is OneSidedPolicy.RAISE:
+                raise ValueError(msg)
+            warns.append(msg)
+        return warns
+
+    def _subset_cells(self, subset: tuple[str, ...]) -> dict[str, int]:
+        """Sub-cell composition of a subset: scale-carrying vs scale-free vs unstamped.
+
+        DIRECTIONAL is deliberately ONE axis spanning two invariance sub-cells. But a K=2
+        normal-emission HMM fitted on a subset mixing signed-drift (scale-carrying) and
+        normalised-direction (scale-free) features can partition on move MAGNITUDE rather than
+        direction, and no separation metric would show it. Reporting the composition on every row is
+        what makes that risk visible instead of merely possible.
+        """
+        cells: dict[str, int] = {}
+        for entry in self._resolve_entries(subset).values():
+            if entry is None:
+                key = "unregistered"
+            elif entry.invariance is None:
+                key = "unstamped"
+            else:
+                key = entry.invariance.scale_class.value
+            cells[key] = cells.get(key, 0) + 1
+        return cells
 
     # --------------------------------------------------------- helpers / output
 
@@ -497,6 +640,12 @@ class HmmFeatureScreener:
         """Phase-A gate: structural degeneracy that should pre-empt Pareto comparison."""
         if ev.error is not None:
             return False  # errors are routed separately to DOMINATED
+        if (self.config.one_sided_policy is OneSidedPolicy.EXCLUDE
+                and any(w.startswith(_ONE_SIDED_TAG) for w in ev.warnings)):
+            # A lone one-sided feature is a STRUCTURAL defect in what the subset can express, which is
+            # exactly what this gate is for: the separation number may look fine while measuring
+            # "moving strongly one way" against "everything else".
+            return True
         if not np.isfinite(ev.state_balance_ratio):
             return True
         if ev.state_balance_ratio > self.config.max_balance_ratio:
