@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from okmich_quant_research.features.registry import Axis
 from okmich_quant_research.features.hmm_screener import (
     AXIS_EVALUATORS,
     AxisEvaluation,
@@ -115,7 +116,9 @@ def test_screener_end_to_end_liquidity_axis() -> None:
         return out
 
     config = HmmScreenerConfig(
-        signal_type="liquidity",
+        axis=Axis.LIQUIDITY,
+        # The synthetic fixture supplies a real volume column, so the capability is genuinely present.
+        has_real_volume=True,
         algo="hmm_lambda",
         n_states=2,
         data_size=2000,

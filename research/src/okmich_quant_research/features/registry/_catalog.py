@@ -9,6 +9,7 @@ Shorthand used in this file:
     Horizon    : I=intraday, S=short, ME=medium, LG=long, A=any
     Regime     : TR=trending, RA=ranging, VO=volatile, LV=low_vol, CR=crisis
 """
+from ._invariance import INVARIANCE_STAMPS, apply_invariance
 from ._schema import FeatureEntry, CRITICAL as C, HIGH as H, MEDIUM as M, LOW as L, NONE as N, H_INTRADAY as I, \
     H_SHORT as S, H_MEDIUM as ME, H_LONG as LG, H_ANY as A, R_TRENDING as TR, R_RANGING as RA, \
     R_VOLATILE as VO, R_LOW_VOL as LV, R_CRISIS as CR
@@ -535,6 +536,12 @@ _MOMENTUM = [
     _fe("minus_di", "momentum", "trend",
         "Negative Directional Indicator component of ADX",
         rr=H, ret=M, dr=H, hor=ME, wbi=[TR], dir_=True),
+    _fe("di_spread", "momentum", "trend",
+        "plus_di minus minus_di -- the canonical ODD combination of the one-sided DI pair",
+        rr=H, ret=M, dr=H, hor=ME, wbi=[TR], dir_=True,
+        notes="plus_di/minus_di are each ONE_SIDED under reflection (each maps onto the other, not onto "
+              "its own negation), so a K=2 split on either alone is not an up/down partition. Prefer this "
+              "spread on the DIRECTIONAL axis. Mirrors timothymasters.trend.aroon_diff."),
     # William Blau
     _fe("true_strength_index", "momentum", "momentum", "Blau True Strength Index with signal line",
         rr=M, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe", notes="Returns tsi and signal columns"),
@@ -1025,3 +1032,13 @@ CATALOG: list[FeatureEntry] = (
     + _TBM
     + _STATS_OPTIMAL_SEARCH
 )
+
+# Attach the MEASURED invariance stamps (registry/_invariance.csv). Done once here, at module import,
+# rather than inside FeatureRegistry.__init__: CATALOG is a module-level singleton, so stamping it per
+# registry construction would be a repeated global side effect for no gain.
+#
+# UNSTAMPED_MEASUREMENTS are stamped names with no catalog entry. They are kept rather than raised on:
+# the measurement corpus is a screening RECIPE pool, whose columns are not one-to-one with catalogue
+# entries (a recipe may build a column the catalogue does not describe). A name appearing here is a
+# coverage gap worth looking at, not a failure.
+UNSTAMPED_MEASUREMENTS: list[str] = apply_invariance(CATALOG, INVARIANCE_STAMPS)

@@ -9,7 +9,8 @@ consume *forward-looking* outcomes, so they are offline-only and must never be c
   * ``sources``    — posterior-stream generators (walk-forward filtering refit; frozen artifact), all causal/filtering.
   * ``funnel``     — the confirmer: validates screener candidate feature-subsets end to end.
 """
-from .forward_axes import MarketAxis, build_forward_outcomes, forward_axis_series
+from ...features.registry import Axis
+from .forward_axes import build_forward_outcomes, forward_axis_series
 from .funnel import CandidateResult, confirm_candidates
 from .profiler import ForwardOutcome, bartlett_hac_variance, forward_outcome_by_state
 from .sources import HmmFitSpec, WalkForwardWindow, frozen_artifact_posteriors, walk_forward_filtered_posteriors
@@ -26,7 +27,7 @@ __all__ = [
     "ForwardOutcome",
     "forward_outcome_by_state",
     "bartlett_hac_variance",
-    "MarketAxis",
+    "Axis",
     "forward_axis_series",
     "build_forward_outcomes",
     "PosteriorStream",

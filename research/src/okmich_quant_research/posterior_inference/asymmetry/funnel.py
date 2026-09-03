@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .forward_axes import MarketAxis
+from ...features.registry import Axis
 from .sources import HmmFitSpec, WalkForwardWindow, walk_forward_filtered_posteriors
 from .validation import ValidationReport, ValidationVerdict, validate_stream
 
@@ -34,9 +34,9 @@ class CandidateResult:
 
 
 def confirm_candidates(candidates: list[list[str]], data: pd.DataFrame, *, fit: HmmFitSpec, window: WalkForwardWindow,
-                       axes: list[MarketAxis], horizons: list[int], min_coverage: float = 200.0,
+                       axes: list[Axis], horizons: list[int], min_coverage: float = 200.0,
                        t_threshold: float = 2.0, min_stable_fraction: float = 0.6,
-                       identity_axis: MarketAxis = MarketAxis.VOLATILITY) -> list[CandidateResult]:
+                       identity_axis: Axis = Axis.VOLATILITY) -> list[CandidateResult]:
     """Walk-forward + validate each candidate feature-subset; return per-candidate results.
 
     Winners are ``[r for r in results if r.confirmed_axes]`` — candidates with an incremental, fold-stable, overlap-

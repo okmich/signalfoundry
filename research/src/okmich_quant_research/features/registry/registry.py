@@ -24,8 +24,11 @@ from typing import List, Optional
 
 import pandas as pd
 
+from ._axis import Axis, is_eligible
 from ._schema import (
     FeatureEntry,
+    Parity,
+    ScaleClass,
     RELEVANCE_LEVELS,
     SIGNAL_TYPES,
     HORIZONS,
@@ -86,8 +89,33 @@ class _FeatureView:
         return _FeatureView([e for e in self._entries if regime in e.works_best_in])
 
     def directional(self) -> "_FeatureView":
-        """Features whose sign carries BUY/SELL meaning."""
+        """Features whose sign carries BUY/SELL meaning.
+
+        NOTE this is the hand-DECLARED flag. For the measured answer use ``by_parity(Parity.ODD)`` —
+        the two disagree: ``timothymasters.trend.aroon_up`` is declared non-directional yet measures
+        ONE_SIDED (half of an odd pair), and ``momentum.plus_di``/``minus_di`` are declared directional
+        yet neither is odd on its own.
+        """
         return _FeatureView([e for e in self._entries if e.directional])
+
+    def by_parity(self, *parities: Parity) -> "_FeatureView":
+        """Features whose MEASURED parity is one of ``parities``. Unstamped features never match."""
+        wanted = set(parities)
+        return _FeatureView([e for e in self._entries if e.invariance is not None and e.invariance.parity in wanted])
+
+    def by_scale_class(self, *scale_classes: ScaleClass) -> "_FeatureView":
+        """Features whose MEASURED scale class is one of ``scale_classes``. Unstamped never match."""
+        wanted = set(scale_classes)
+        return _FeatureView([e for e in self._entries
+                             if e.invariance is not None and e.invariance.scale_class in wanted])
+
+    def eligible_for(self, axis: Axis) -> "_FeatureView":
+        """Features admissible on ``axis``, decided by tag + measured invariance (``_axis.is_eligible``).
+
+        There is no hand-maintained membership list behind this: an unmeasured feature is admitted on
+        the tag gate alone, and a feature whose measured behaviour contradicts its name is rejected.
+        """
+        return _FeatureView([e for e in self._entries if is_eligible(e, axis)[0]])
 
     def causal_only(self) -> "_FeatureView":
         """Features that use only past/current bar data."""
@@ -166,6 +194,9 @@ class _FeatureView:
                 "needs_spread":       e.needs_spread,
                 "needs_benchmark":    e.needs_benchmark,
                 "works_best_in":      ", ".join(e.works_best_in),
+                "parity":             e.invariance.parity.value if e.invariance else None,
+                "scale_class":        e.invariance.scale_class.value if e.invariance else None,
+                "conjugate":          e.invariance.conjugate if e.invariance else "",
                 "notes":              e.notes,
             })
         return pd.DataFrame(rows)

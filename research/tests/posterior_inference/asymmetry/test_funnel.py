@@ -6,7 +6,7 @@ from okmich_quant_ml.hmm import DistType
 from okmich_quant_research.posterior_inference.asymmetry import (
     CandidateResult,
     HmmFitSpec,
-    MarketAxis,
+    Axis,
     WalkForwardWindow,
     confirm_candidates,
 )
@@ -29,7 +29,7 @@ def test_confirm_candidates_runs_and_reports() -> None:
     fit = HmmFitSpec(dist_type=DistType.NORMAL, n_states=2, random_state=0, max_iter=8)
     window = WalkForwardWindow(train=150, oos=75, step=75, lead_in=40)
     results = confirm_candidates([["f_trend", "f_vol"], ["f_vol"]], data, fit=fit, window=window,
-                                 axes=[MarketAxis.VOLATILITY], horizons=[5], min_coverage=20.0)
+                                 axes=[Axis.VOLATILITY], horizons=[5], min_coverage=20.0)
 
     assert len(results) == 2
     assert all(isinstance(r, CandidateResult) for r in results)
@@ -44,7 +44,7 @@ def test_confirm_candidates_captures_bad_subset() -> None:
     fit = HmmFitSpec(dist_type=DistType.NORMAL, n_states=2, max_iter=5)
     window = WalkForwardWindow(train=150, oos=75)
     results = confirm_candidates([["does_not_exist"]], data, fit=fit, window=window,
-                                 axes=[MarketAxis.VOLATILITY], horizons=[5])
+                                 axes=[Axis.VOLATILITY], horizons=[5])
 
     assert len(results) == 1
     assert results[0].report is None
