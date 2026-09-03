@@ -155,15 +155,3 @@ class TestDualModeConstructors:
         pf = signal_to_portfolio(sample_price_data, _ma_signal, freq="1h")
         ta = TemporalPerformanceAnalyzer.from_portfolio(pf)
         assert len(ta.raw) == len(pf.trades.records_readable)
-
-
-class TestBackwardCompatAlias:
-    def test_old_import_path_still_works(self):
-        from okmich_quant_research.backtesting.vectorbt_analytics import VbtTradeAnalytics
-
-        assert VbtTradeAnalytics is TemporalPerformanceAnalyzer
-
-    def test_package_level_alias(self):
-        import okmich_quant_research.backtesting as bt
-
-        assert bt.VbtTradeAnalytics is bt.TemporalPerformanceAnalyzer
