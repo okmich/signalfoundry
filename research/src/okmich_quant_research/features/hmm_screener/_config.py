@@ -12,7 +12,7 @@ from ..registry import AXIS_PRIMARY_HORIZON, AXIS_SIGNAL_TYPES, Axis, SIGNAL_TYP
 class OneSidedPolicy(StrEnum):
     """What a DIRECTIONAL screen does with a lone ONE_SIDED feature.
 
-    A one-sided feature (``momentum.minus_di``, ``timothymasters.trend.aroon_up``, ...) maps onto its
+    A one-sided feature (``momentum.minus_di``, ``timothymasters.single.trend.aroon_up``, ...) maps onto its
     CONJUGATE under reflection rather than onto its own negation. Its high state means "strong move THIS
     way"; its low state pools "the other way" WITH "no move at all". A K=2 split on one alone is
     therefore NOT an up/down partition -- and ``momentum.minus_di`` is the feature that won the trend
@@ -25,7 +25,7 @@ class OneSidedPolicy(StrEnum):
     There is deliberately no SUBSTITUTE policy. Silently swapping a feature for its spread mid-search
     would corrupt the ``seen``/``evaluated`` bookkeeping GREEDY_FORWARD's beam relies on, and would make
     the reported subset differ from the subset actually fitted. Substitute by putting the spread
-    (``momentum.di_spread``, ``timothymasters.trend.aroon_diff``) in the candidate pool instead.
+    (``momentum.di_spread``, ``timothymasters.single.trend.aroon_diff``) in the candidate pool instead.
     """
     WARN = "warn"
     EXCLUDE = "exclude"

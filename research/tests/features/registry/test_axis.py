@@ -6,6 +6,7 @@ from okmich_quant_research.features.registry import (AXIS_PRIMARY_HORIZON, AXIS_
                                                      INVARIANCE_STAMPS, PRICE_PATH_AXES, Parity,
                                                      SIGNAL_TYPES, ScaleClass, UNSTAMPED_MEASUREMENTS,
                                                      is_eligible)
+from okmich_quant_research.features.registry._invariance import apply_invariance
 
 
 @pytest.fixture(scope="module")
@@ -166,8 +167,8 @@ def test_no_hand_maintained_membership_list_exists():
 @pytest.mark.parametrize("feature,conjugate", [
     ("momentum.minus_di", "momentum.plus_di"),
     ("momentum.plus_di", "momentum.minus_di"),
-    ("timothymasters.trend.aroon_down", "timothymasters.trend.aroon_up"),
-    ("timothymasters.trend.aroon_up", "timothymasters.trend.aroon_down"),
+    ("timothymasters.single.trend.aroon_down", "timothymasters.single.trend.aroon_up"),
+    ("timothymasters.single.trend.aroon_up", "timothymasters.single.trend.aroon_down"),
 ])
 def test_measured_one_sided_pairs_are_stamped_with_their_conjugates(reg, feature, conjugate):
     """These four are the registry-level defect the work order exists to fix, and ``minus_di`` is the
@@ -181,7 +182,7 @@ def test_measured_one_sided_pairs_are_stamped_with_their_conjugates(reg, feature
 
 def test_canonical_odd_spreads_are_stamped_odd(reg):
     """The fix for a one-sided pair: the spread, which is odd by construction."""
-    for feature in ("momentum.di_spread", "timothymasters.trend.aroon_diff"):
+    for feature in ("momentum.di_spread", "timothymasters.single.trend.aroon_diff"):
         assert reg.get(feature).invariance.parity is Parity.ODD
 
 
@@ -223,6 +224,73 @@ def test_conjugates_are_symmetric_and_resolvable(reg):
         partner = reg.get(stamp.conjugate)
         assert partner.invariance.parity is Parity.ONE_SIDED
         assert partner.invariance.conjugate == name
+
+
+# ── the conjugate check inside apply_invariance ───────────────────────────────────────────────────
+#
+# The stamp file is refreshed by re-running the probe, so the cases below are the shapes a BAD refresh
+# actually produces — a half-applied rename of the qualified names is what shipped once already. The
+# check raises at import time, unlike UNSTAMPED_MEASUREMENTS, and the asymmetry is the point: a stamp
+# naming nothing is a corpus artefact nobody can look up, but a one-sided stamp sitting on a SHIPPED
+# entry whose partner will not resolve makes the screener's one-sided guard fire on the subsets that
+# already hold BOTH halves -- flagging as fragile the very pairing it exists to bless.
+
+def _one_sided(conjugate):
+    return FeatureInvariance(Parity.ONE_SIDED, ScaleClass.FREE, conjugate=conjugate, measured_on="unit")
+
+
+def test_a_healthy_one_sided_pair_applies_cleanly():
+    up, down = _entry("trend", name="up"), _entry("trend", name="down")
+    stamps = {"unit.up": _one_sided("unit.down"), "unit.down": _one_sided("unit.up")}
+    assert apply_invariance([up, down], stamps) == []
+    assert up.invariance.conjugate == "unit.down"
+    assert down.invariance.conjugate == "unit.up"
+
+
+def test_a_conjugate_naming_no_catalog_entry_raises():
+    up = _entry("trend", name="up")
+    with pytest.raises(ValueError, match="not a catalogued feature"):
+        apply_invariance([up], {"unit.up": _one_sided("unit.missing")})
+
+
+def test_a_conjugate_that_is_catalogued_but_unstamped_raises():
+    """The exact half-renamed stamp file that shipped: one half matched the catalogue, the other half's
+    row still carried the pre-rename name, so the partner entry existed but nothing stamped it."""
+    up, down = _entry("trend", name="up"), _entry("trend", name="down")
+    with pytest.raises(ValueError, match="carries no invariance stamp"):
+        apply_invariance([up, down], {"unit.up": _one_sided("unit.down")})
+
+
+def test_a_conjugate_stamped_with_another_parity_raises():
+    up, down = _entry("trend", name="up"), _entry("trend", name="down")
+    stamps = {"unit.up": _one_sided("unit.down"),
+              "unit.down": FeatureInvariance(Parity.ODD, ScaleClass.FREE)}
+    with pytest.raises(ValueError, match="not 'one-sided'"):
+        apply_invariance([up, down], stamps)
+
+
+def test_a_conjugate_pointing_at_a_third_feature_raises():
+    """Asymmetry misdirects the guard rather than silencing it: a subset holding ``up`` and ``down``
+    spans the axis, but ``down``'s stamp demands ``other``, so the guard flags a sound pair anyway."""
+    up, down, other = (_entry("trend", name=n) for n in ("up", "down", "other"))
+    stamps = {"unit.up": _one_sided("unit.down"), "unit.down": _one_sided("unit.other"),
+              "unit.other": _one_sided("unit.down")}
+    with pytest.raises(ValueError, match="points back to"):
+        apply_invariance([up, down, other], stamps)
+
+
+def test_an_uncatalogued_one_sided_stamp_is_reported_not_raised():
+    """A recipe-pool column the catalogue never described stays a coverage gap: no entry carries the
+    stamp, so there is no guard for the unresolvable conjugate to disarm."""
+    assert apply_invariance([], {"unit.up": _one_sided("unit.down")}) == ["unit.up"]
+
+
+def test_the_check_runs_after_every_stamp_is_attached():
+    """Order-independence, asserted because the natural implementation gets it wrong: checking inside
+    the apply loop would fail a perfectly good pair whenever the partner's row comes second."""
+    up, down = _entry("trend", name="up"), _entry("trend", name="down")
+    reversed_order = {"unit.down": _one_sided("unit.up"), "unit.up": _one_sided("unit.down")}
+    assert apply_invariance([up, down], reversed_order) == []
 
 
 def test_registry_query_surface_reflects_measurement(reg):

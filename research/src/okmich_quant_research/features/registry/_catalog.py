@@ -68,8 +68,12 @@ _MICROSTRUCTURE_PRICE_STRUCTURE = [
         "Ratio of current range to rolling average range — detects compression", rr=H, ret=M, dr=L, hor=S, wbi=[LV, RA]),
     _fe("price_path_fractal_dimension",    "microstructure.price_structure", "regime",
         "Fractal dimension of the price path — complexity measure", rr=H, ret=L, dr=N, hor=ME, wbi=[TR, RA]),
+    # ot="dataframe": returns ['gap', 'gap_fill_ratio'], not one series. Measured 2026-09-04, the two
+    # columns do not share an invariance: 'gap' is ODD (a signed distance) and 'gap_fill_ratio' is EVEN
+    # (a magnitude ratio), so no single per-entry stamp describes this entry -- see the invariance probe.
     _fe("close_open_gap_analysis",         "microstructure.price_structure", "price_structure",
-        "Gap characterisation: gap size normalised by ATR", rr=M, ret=M, dr=H, hor=I, wbi=[VO], dir_=True),
+        "Gap characterisation: signed gap normalised by ATR, plus the fill ratio", rr=M, ret=M, dr=H,
+        hor=I, wbi=[VO], dir_=True, ot="dataframe"),
     _fe("return_spread_cross_correlation", "microstructure.price_structure", "information",
         "Rolling cross-correlation between returns and spread changes", rr=H, ret=M, dr=L, hor=S, wbi=[CR, VO], spread=True),
 ]
@@ -541,7 +545,7 @@ _MOMENTUM = [
         rr=H, ret=M, dr=H, hor=ME, wbi=[TR], dir_=True,
         notes="plus_di/minus_di are each ONE_SIDED under reflection (each maps onto the other, not onto "
               "its own negation), so a K=2 split on either alone is not an up/down partition. Prefer this "
-              "spread on the DIRECTIONAL axis. Mirrors timothymasters.trend.aroon_diff."),
+              "spread on the DIRECTIONAL axis. Mirrors timothymasters.single.trend.aroon_diff."),
     # William Blau
     _fe("true_strength_index", "momentum", "momentum", "Blau True Strength Index with signal line",
         rr=M, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe", notes="Returns tsi and signal columns"),
@@ -551,8 +555,12 @@ _MOMENTUM = [
         "Blau Directional Trend Index — smoothed directional bias", rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
     _fe("directional_efficiency_index",  "momentum", "regime",
         "Blau Directional Efficiency Index", rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
+    # ot="dataframe": returns a 6-tuple of Series, not one series. Two of the six are the bull/bear
+    # divergence flags, which measure ONE_SIDED as a conjugate pair (each maps onto the other under
+    # reflection, not onto its own negation), so the entry has no single stamp.
     _fe("slope_divergence_tsi", "momentum", "momentum",
-        "TSI slope divergence — momentum divergence detector", rr=M, ret=H, dr=H, hor=ME, dir_=True),
+        "TSI slope divergence — momentum divergence detector (6 outputs)", rr=M, ret=H, dr=H, hor=ME,
+        dir_=True, ot="dataframe"),
     _fe("tick_volume_indicator", "momentum", "momentum",
         "Blau Ergodic Tick Volume Indicator — double-EMA volume oscillator bounded [-1, +1] (or [-100, +100] with as_percent)",
         rr=M, ret=M, dr=M, hor=S, wbi=[TR], dir_=True, vol=True, ot="dataframe",
@@ -579,9 +587,11 @@ _MOMENTUM = [
         "EWMA velocity — exponentially weighted dP/dt", rr=M, ret=H, dr=H, hor=ME, wbi=[TR], dir_=True),
     # Aggregate & cross-sectional
     _fe("aggregate_m","momentum", "composite",
-        "David Varadi's Aggregate M++ multi-timeframe momentum", rr=L, ret=H, dr=H, hor=ME, dir_=True),
+        "David Varadi's Aggregate M++: trend leg (slow HLC rank) blended with an inverted "
+        "fast HLC rank as the mean-reversion leg", rr=L, ret=H, dr=H, hor=ME, dir_=True),
     _fe("aggregate_m_components", "momentum", "composite",
-        "David Varadi Aggregate M component bundle before final aggregation",
+        "David Varadi Aggregate M component bundle before final aggregation "
+        "(fast_rank reported raw; raw_m consumes it inverted)",
         rr=L, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
     _fe("dvo", "momentum", "momentum",
         "David Varadi DV oscillator: short-term mean-reversion pressure from HLC ranks",
@@ -1040,5 +1050,7 @@ CATALOG: list[FeatureEntry] = (
 # UNSTAMPED_MEASUREMENTS are stamped names with no catalog entry. They are kept rather than raised on:
 # the measurement corpus is a screening RECIPE pool, whose columns are not one-to-one with catalogue
 # entries (a recipe may build a column the catalogue does not describe). A name appearing here is a
-# coverage gap worth looking at, not a failure.
+# coverage gap worth looking at, not a failure. A one-sided stamp that DID land on a catalogue entry but
+# whose conjugate cannot be resolved back to one is the opposite case and raises here — see
+# _invariance._check_conjugate_pairs for why that asymmetry is deliberate.
 UNSTAMPED_MEASUREMENTS: list[str] = apply_invariance(CATALOG, INVARIANCE_STAMPS)

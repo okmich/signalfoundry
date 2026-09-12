@@ -47,13 +47,20 @@ def test_config_rejects_unknown_axis() -> None:
 def test_effective_allowed_signal_types_defaults_to_the_axis_tag_set() -> None:
     """Was ``frozenset({signal_type})``, which only worked while axis and tag were one string.
 
-    DIRECTIONAL legitimately draws on trend, momentum AND regime — only 9 of the 23 candidates in the
-    measured trend pool were tagged ``trend``, so the old default flagged as "off-axis" exactly the
-    cross-namespace features that turned out to be on-axis.
+    DIRECTIONAL legitimately draws on several tags — only 9 of the 23 candidates in the measured trend
+    pool were tagged ``trend``, so the old default flagged as "off-axis" exactly the cross-namespace
+    features that turned out to be on-axis.
+
+    The set grew again 2026-09-04 to include ``price_structure`` and ``order_flow``. Not a preference:
+    over 220 measured stamps their odd shares are 93% and 90%, against 9% for ``regime`` which was
+    already in the set, and 57 features measuring ODD were being held off the axis by their family
+    label alone. The literal below is pinned so widening the set stays a deliberate act with evidence
+    behind it rather than something that drifts.
     """
     c = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=4)
     assert c.effective_allowed_signal_types == AXIS_SIGNAL_TYPES[Axis.DIRECTIONAL]
-    assert {"trend", "momentum", "regime"} == set(c.effective_allowed_signal_types)
+    assert {"trend", "momentum", "regime", "price_structure", "order_flow"} == set(
+        c.effective_allowed_signal_types)
 
 
 def test_effective_allowed_signal_types_explicit_override() -> None:

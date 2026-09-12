@@ -92,7 +92,7 @@ class _FeatureView:
         """Features whose sign carries BUY/SELL meaning.
 
         NOTE this is the hand-DECLARED flag. For the measured answer use ``by_parity(Parity.ODD)`` —
-        the two disagree: ``timothymasters.trend.aroon_up`` is declared non-directional yet measures
+        the two disagree: ``timothymasters.single.trend.aroon_up`` is declared non-directional yet measures
         ONE_SIDED (half of an odd pair), and ``momentum.plus_di``/``minus_di`` are declared directional
         yet neither is odd on its own.
         """

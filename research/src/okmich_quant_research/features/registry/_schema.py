@@ -73,6 +73,23 @@ class Parity(StrEnum):
     ONE_SIDED = "one-sided"  # f_reflected matches a DIFFERENT column ~ +1: half of an odd pair
     MIXED = "mixed"          # none of the above: confounds direction with magnitude -- a defect
     UNSCORED = "unscored"    # measurement attempted but not trustworthy (degenerate / too few obs)
+    HETEROGENEOUS = "heterogeneous"  # multi-output entry whose COLUMNS differ; no per-entry verdict
+
+    # HETEROGENEOUS is not a defect and is not a gap. It is the measured fact that a multi-output entry
+    # (``output_type="dataframe"``) emits columns of differing invariance -- ``momentum.
+    # core_momentum_features`` returns 50 columns spanning odd, even and one-sided -- so no single
+    # per-entry stamp is DEFINABLE. Measured 2026-09-04: 17 of the 50 dataframe entries are like this;
+    # the other 20 measured entries agree across every column and carry an ordinary stamp.
+    #
+    # It exists because the alternatives are both wrong. Leaving such an entry unstamped makes
+    # ``is_eligible`` say "carries no invariance stamp", i.e. "never measured", when it was measured
+    # exhaustively. Stamping it from one column asserts something false about the others -- and that was
+    # already live: trend.bollinger_band, trend.channels.envelope and trend.zscore_trend_features each
+    # carried an odd/scale-free stamp describing whichever column the original recipe happened to
+    # ``select``, so changing the select silently invalidated the stamp while the gate kept admitting it.
+    #
+    # The per-COLUMN verdicts live in ``_invariance_columns.csv``; ``is_eligible`` reads them to say how
+    # the columns split and to reject only when NO column is admissible on the axis.
 
 
 class ScaleClass(StrEnum):

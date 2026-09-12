@@ -136,6 +136,14 @@ def _percent_rank_hlc(close_series: pd.Series, high_series: pd.Series, low_serie
     NaN values in the pool are excluded (denominator = count of non-NaN pool values).
     Returns NaN when close[t] is NaN or all pool values are NaN.
     Positions t < period-1 are NaN (warm-up).
+
+    Deliberate deviation from the published AmiBroker `PercentRankHLC`
+    (wisestocktrader.com/indicators/1901-aggregate-m-indicator-for-amibroker-afl):
+    that version loops `for i = 0 to Periods` — i.e. lags 0..period, which is period+1
+    bars — while normalising by `Periods*3-1`, the pool size for period bars. Numerator
+    and denominator disagree by one bar, so it can return > 100 (measured: 16% of bars
+    at period=10, max 106.9). This implementation uses lags 0..period-1, which matches
+    the 3*period-1 denominator exactly and stays bounded in [0, 100].
     """
     if not isinstance(period, (int, np.integer)) or period < 1:
         raise ValueError(f"period must be a positive integer, got {period!r}")
@@ -189,10 +197,16 @@ def aggregate_m_components(ohlcv: pd.DataFrame, slow_period: int = 252, fast_per
     """Compute all Aggregate M++ components as a DataFrame.
 
     Returns a DataFrame with four columns:
-    - slow_rank : percent rank of close vs HLC pool over slow_period bars
-    - fast_rank : percent rank of close vs HLC pool over fast_period bars
-    - raw_m     : weighted blend of slow_rank and fast_rank, before EMA smoothing
+    - slow_rank : percent rank of close vs HLC pool over slow_period bars (trend leg)
+    - fast_rank : percent rank of close vs HLC pool over fast_period bars, reported RAW
+                  (un-inverted) for diagnostics; raw_m consumes it inverted
+    - raw_m     : weighted blend of slow_rank and (100 - fast_rank), before EMA smoothing
     - agg_m     : exponentially smoothed raw_m — identical to aggregate_m() output
+
+    Note the asymmetry: `fast_rank` is exposed as the plain percent rank so it can be read
+    on its own scale, but it enters `raw_m` inverted. To reconstruct raw_m from the columns:
+
+        raw_m = (slow_rank * trend_weight + (100 - fast_rank) * (100 - trend_weight)) / 100
 
     Parameters are identical to aggregate_m(). aggregate_m() is a thin wrapper
     over this function that returns only the agg_m column.
@@ -213,7 +227,11 @@ def aggregate_m_components(ohlcv: pd.DataFrame, slow_period: int = 252, fast_per
 
     hlc_slow = _percent_rank_hlc(close_col, high_col, low_col, slow_period)
     hlc_fast = _percent_rank_hlc(close_col, high_col, low_col, fast_period)
-    raw_m = (hlc_slow * trend_weight + hlc_fast * (100 - trend_weight)) / 100.0
+    # The fast leg is INVERTED. Aggregate M blends a trend leg (slow rank: high = sustained
+    # uptrend = bullish) with a mean-reversion leg (fast rank inverted: recently oversold =
+    # bullish). Without the inversion both legs measure the same direction, the mean-reversion
+    # component vanishes, and `trend_weight` degenerates into reweighting two correlated ranks.
+    raw_m = (hlc_slow * trend_weight + (100.0 - hlc_fast) * (100 - trend_weight)) / 100.0
 
     n = len(close_col)
     agg_m_arr = np.full(n, np.nan)
@@ -252,7 +270,21 @@ def aggregate_m_components(ohlcv: pd.DataFrame, slow_period: int = 252, fast_per
 def aggregate_m(ohlcv: pd.DataFrame, slow_period: int = 252, fast_period: int = 10, current_bar_weight: int = 60,
                 trend_weight: int = 50, high_column: str = "high", low_column: str = "low",
                 close_column: str = "close") -> pd.Series:
-    """Calculate David Varadi's Aggregate M++ Mean Reversion Oscillator.
+    """Calculate David Varadi's Aggregate M++ oscillator.
+
+    Combines a trend leg and a mean-reversion leg so the signal does not have to choose
+    between them (Varadi, "Trend or Mean Reversion: Why Make a Choice?", CSS Analytics,
+    2009-11-05):
+
+        slow_rank = percent rank of close vs the HLC pool over slow_period bars
+        fast_rank = percent rank of close vs the HLC pool over fast_period bars
+        raw_m     = (slow_rank * tw + (100 - fast_rank) * (100 - tw)) / 100
+        agg_m     = EMA(raw_m, alpha=current_bar_weight/100)
+
+    A high reading therefore means "in a sustained uptrend AND short-term oversold" —
+    the trend leg rises with sustained strength, the inverted fast leg rises as recent
+    price pulls back. Both legs are bullish-positive, so agg_m is directional: high =
+    long, low = short, 50 = neutral.
 
     Parameters
     ----------
@@ -274,7 +306,25 @@ def aggregate_m(ohlcv: pd.DataFrame, slow_period: int = 252, fast_period: int = 
     Returns
     -------
     pd.Series
-        Aggregate M++ values on a [0, 100] scale.
+        Aggregate M++ values on a [0, 100] scale, centred at 50.
+
+    Notes
+    -----
+    Two deliberate deviations from the published AmiBroker reference
+    (wisestocktrader.com/indicators/1901-aggregate-m-indicator-for-amibroker-afl):
+
+    1. Percent-rank pool. The AFL `PercentRankHLC` loops over period+1 bars while
+       normalising by the period-bar pool size (3*period-1), so it can exceed 100.
+       See `_percent_rank_hlc` for detail. This implementation is self-consistent.
+    2. Smoothing. The AFL computes `AggM = 0.4*raw[t-1] + 0.6*raw[t]` — a 2-tap FIR
+       over the RAW series, despite the author describing it as exponential smoothing.
+       This implementation uses a true recursive EMA (corr +0.997 with the 2-tap
+       version, max divergence ~7.6 pts), which is smoother and tolerates NaN gaps.
+
+    The AFL's `rank_Short = 1 - PercentRankHLC(...)` mixes a unit-scale inversion into a
+    0-100 series; that is a pure -49.5 level shift, which is why the source plots against
+    +/-50 gridlines. The inversion itself is intentional and is reproduced here as
+    `100 - fast_rank`, preserving the [0, 100] scale.
     """
     return aggregate_m_components(
         ohlcv, slow_period=slow_period, fast_period=fast_period,

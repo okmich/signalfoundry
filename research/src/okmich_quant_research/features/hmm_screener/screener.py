@@ -579,7 +579,7 @@ class HmmFeatureScreener:
 
         A one-sided feature is fine WITH its conjugate in the same subset -- the pair spans the axis --
         so only lone ones are flagged. The clean fix is the canonical odd combination:
-        ``momentum.di_spread``, ``timothymasters.trend.aroon_diff``.
+        ``momentum.di_spread``, ``timothymasters.single.trend.aroon_diff``.
         """
         if self.config.axis is not Axis.DIRECTIONAL:
             return []

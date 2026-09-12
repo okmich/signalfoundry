@@ -418,11 +418,48 @@ class TestAggregateMComponents:
         expected = _reference_percent_rank_hlc(ohlcv["close"], ohlcv["high"], ohlcv["low"], 5)
         np.testing.assert_allclose(result["fast_rank"].to_numpy(), expected, rtol=1e-12, equal_nan=True)
 
-    def test_raw_m_is_weighted_blend(self, ohlcv):
+    def test_raw_m_is_weighted_blend_with_inverted_fast_leg(self, ohlcv):
         trend_weight = 60
         result = aggregate_m_components(ohlcv, slow_period=50, fast_period=5, trend_weight=trend_weight)
-        expected_raw = (result["slow_rank"] * trend_weight + result["fast_rank"] * (100 - trend_weight)) / 100.0
+        expected_raw = (result["slow_rank"] * trend_weight + (100.0 - result["fast_rank"]) * (100 - trend_weight)) / 100.0
         np.testing.assert_allclose(result["raw_m"].to_numpy(), expected_raw.to_numpy(), rtol=1e-12, equal_nan=True)
+
+    def test_trend_weight_zero_isolates_inverted_fast_leg(self, ohlcv):
+        """tw=0 puts all weight on the mean-reversion leg, which must be 100 - fast_rank.
+
+        Compared only past the slow-leg warm-up: raw_m gates on max(slow_period, fast_period)
+        regardless of the weights, so it stays NaN while slow_rank is NaN even at tw=0.
+        """
+        result = aggregate_m_components(ohlcv, slow_period=50, fast_period=5, trend_weight=0)
+        defined = result["raw_m"].notna()
+        assert defined.sum() > 0
+        expected = 100.0 - result.loc[defined, "fast_rank"].to_numpy()
+        np.testing.assert_allclose(result.loc[defined, "raw_m"].to_numpy(), expected, rtol=1e-12)
+
+    def test_trend_weight_hundred_isolates_slow_leg(self, ohlcv):
+        result = aggregate_m_components(ohlcv, slow_period=50, fast_period=5, trend_weight=100)
+        np.testing.assert_allclose(
+            result["raw_m"].to_numpy(), result["slow_rank"].to_numpy(), rtol=1e-12, equal_nan=True
+        )
+
+    def test_raw_m_falls_as_fast_rank_rises(self, ohlcv):
+        """Mean-reversion leg must enter with negative sign: holding the slow leg fixed,
+        a higher short-term rank (more overbought) must lower raw_m."""
+        result = aggregate_m_components(ohlcv, slow_period=50, fast_period=5, trend_weight=50)
+        valid = result.dropna()
+        residual = valid["raw_m"] - 0.5 * valid["slow_rank"]
+        corr = np.corrcoef(residual.to_numpy(), valid["fast_rank"].to_numpy())[0, 1]
+        assert corr < -0.99, f"fast leg is not inverted (corr={corr:+.4f})"
+
+    def test_matches_amibroker_reference_blend(self, ohlcv):
+        """Parity with the published AFL at the blend stage (raw_m), using the AFL's own
+        weights. Compared before smoothing because the EMA deliberately differs from the
+        AFL's 2-tap FIR; the pool convention uses our bounded variant in both legs."""
+        rank_long = _reference_percent_rank_hlc(ohlcv["close"], ohlcv["high"], ohlcv["low"], 50)
+        rank_short = _reference_percent_rank_hlc(ohlcv["close"], ohlcv["high"], ohlcv["low"], 5)
+        afl_value = (rank_long + (100.0 - rank_short)) / 2.0  # AFL: (rank_Long + rank_Short)/2
+        result = aggregate_m_components(ohlcv, slow_period=50, fast_period=5, trend_weight=50)
+        np.testing.assert_allclose(result["raw_m"].to_numpy(), afl_value, rtol=1e-12, equal_nan=True)
 
     def test_agg_m_matches_reference_ema(self, ohlcv):
         alpha = 0.70

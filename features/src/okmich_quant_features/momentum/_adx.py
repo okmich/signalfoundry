@@ -55,7 +55,7 @@ def di_spread(high: ArrayLike, low: ArrayLike, close: ArrayLike, period: int = 1
     at all", so a K=2 split on one alone is NOT an up/down partition. The spread is odd by
     construction and is what a directional label actually needs.
 
-    Mirrors ``timothymasters.trend.aroon_diff``, the equivalent combination for the Aroon pair.
+    Mirrors ``timothymasters.single.trend.aroon_diff``, the equivalent combination for the Aroon pair.
     """
     plus = plus_di(high, low, close, period=period)
     minus = minus_di(high, low, close, period=period)

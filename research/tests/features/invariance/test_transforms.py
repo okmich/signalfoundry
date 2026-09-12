@@ -48,9 +48,9 @@ def _feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
         "momentum.minus_di": mom.minus_di(high, low, close, period=14),
         "momentum.di_spread": mom.di_spread(high, low, close, period=14),
         "path_structure.efficiency_ratio": ps.efficiency_ratio(close, window=60),
-        "timothymasters.trend.aroon_up": pd.Series(tm_trend.aroon_up(hi_np, lo_np, period=25), index=df.index),
-        "timothymasters.trend.aroon_down": pd.Series(tm_trend.aroon_down(hi_np, lo_np, period=25), index=df.index),
-        "timothymasters.trend.aroon_diff": pd.Series(tm_trend.aroon_diff(hi_np, lo_np, period=25), index=df.index),
+        "timothymasters.single.trend.aroon_up": pd.Series(tm_trend.aroon_up(hi_np, lo_np, period=25), index=df.index),
+        "timothymasters.single.trend.aroon_down": pd.Series(tm_trend.aroon_down(hi_np, lo_np, period=25), index=df.index),
+        "timothymasters.single.trend.aroon_diff": pd.Series(tm_trend.aroon_diff(hi_np, lo_np, period=25), index=df.index),
     }, index=df.index)
 
 
@@ -154,7 +154,7 @@ def test_di_spread_is_odd_by_construction(probe):
 
 
 def test_aroon_diff_is_odd(probe):
-    assert probe.at["timothymasters.trend.aroon_diff", "refl_corr"] == pytest.approx(-1.0, abs=PARITY_TOL)
+    assert probe.at["timothymasters.single.trend.aroon_diff", "refl_corr"] == pytest.approx(-1.0, abs=PARITY_TOL)
 
 
 # ── scale classification ──────────────────────────────────────────────────────────────────────────
@@ -182,8 +182,8 @@ def test_scale_exponent_of_a_pure_return_series(raw):
 @pytest.mark.parametrize("feature,expected", [
     ("momentum.plus_di", "momentum.minus_di"),
     ("momentum.minus_di", "momentum.plus_di"),
-    ("timothymasters.trend.aroon_up", "timothymasters.trend.aroon_down"),
-    ("timothymasters.trend.aroon_down", "timothymasters.trend.aroon_up"),
+    ("timothymasters.single.trend.aroon_up", "timothymasters.single.trend.aroon_down"),
+    ("timothymasters.single.trend.aroon_down", "timothymasters.single.trend.aroon_up"),
 ])
 def test_conjugate_search_pairs_the_one_sided_families(probe, feature, expected):
     """The reflected column matches its PARTNER, not itself — this is what ONE_SIDED detection rests on.
