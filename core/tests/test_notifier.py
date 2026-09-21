@@ -74,7 +74,7 @@ class TestAsyncDispatcher:
 # ---------------------------------------------------------------------------
 
 
-def _make_notifier(strategy_name="TestStrategy"):
+def _make_notifier(strategy_name="TestStrategy", broker=""):
     """Return a TelegramNotifier with the HTTP client patched out."""
     with patch("okmich_quant_core.notification.telegram.requests.post") as mock_post:
         mock_post.return_value = MagicMock(status_code=200, raise_for_status=lambda: None)
@@ -82,6 +82,7 @@ def _make_notifier(strategy_name="TestStrategy"):
             bot_token="fake_token",
             chat_id="12345",
             strategy_name=strategy_name,
+            broker=broker,
         )
         # Replace the dispatcher's send_fn with a spy after construction
         sent = []
@@ -162,6 +163,94 @@ class TestTelegramNotifier:
         assert "<bad>" not in sent[0]
         assert "&lt;NoneType&gt;" in sent[0]
         assert "&amp;" in sent[0]
+
+
+# Every TelegramNotifier message type, as (expected bold label, call).
+_ALL_MESSAGES = [
+    ("🔵 OPENED", lambda n: n.on_trade_opened("EURUSD", "buy", 0.1, 1.1, 1.0, 1.2, 1001, 555)),
+    ("🟢 CLOSED", lambda n: n.on_trade_closed("EURUSD", 555, 12.5)),
+    ("🔴 CLOSED", lambda n: n.on_trade_closed("EURUSD", 555, -12.5)),
+    ("✏️ MODIFIED", lambda n: n.on_trade_modified("EURUSD", 555, 1.0, 1.2)),
+    ("🛑 TRADE FAILED", lambda n: n.on_trade_failed("EURUSD", "buy", "rejected")),
+    ("⚠️ ERROR", lambda n: n.on_error("", "boom")),
+    ("🚫 CIRCUIT BREAKER", lambda n: n.on_circuit_breaker_tripped("", 5)),
+    ("📡 CONNECTION LOST", lambda n: n.on_connection_lost("")),
+    ("✅ CONNECTION RESTORED", lambda n: n.on_connection_restored("")),
+]
+
+
+class TestTelegramNotifierSystemTag:
+    """The notifier's strategy_name (the sending system, e.g. SystemConfig.name) heads every message."""
+
+    @pytest.mark.parametrize("label, send", _ALL_MESSAGES, ids=[label for label, _ in _ALL_MESSAGES])
+    def test_system_tag_follows_label_on_every_message(self, label, send):
+        notifier, sent = _make_notifier(strategy_name="trend-hmm-live")
+        send(notifier)
+        notifier._dispatcher.flush()
+        assert sent[0].startswith(f"<b>{label}</b> [trend-hmm-live]")
+
+    @pytest.mark.parametrize("label, send", _ALL_MESSAGES, ids=[label for label, _ in _ALL_MESSAGES])
+    def test_no_system_name_means_no_empty_tag(self, label, send):
+        notifier, sent = _make_notifier(strategy_name="")
+        send(notifier)
+        notifier._dispatcher.flush()
+        assert "[]" not in sent[0]
+        assert not sent[0].startswith(f"<b>{label}</b> [")
+
+    def test_trade_message_tags_system_then_broker(self):
+        notifier, sent = _make_notifier(strategy_name="trend-hmm-live", broker="MT5")
+        notifier.on_trade_opened("EURUSD", "buy", 0.1, 1.0842, 1.08, 1.09, 1001, 123)
+        notifier._dispatcher.flush()
+        assert sent[0].startswith("<b>🔵 OPENED</b> [trend-hmm-live] [MT5] EURUSD buy 0.1L @ 1.0842\n")
+
+    def test_trade_failed_tags_system_then_strategy_then_broker(self):
+        notifier, sent = _make_notifier(strategy_name="trend-hmm-live", broker="MT5")
+        notifier.on_trade_failed("BTCUSD", "buy", "rejected", context={"strategy_name": "MyStrat"})
+        notifier._dispatcher.flush()
+        assert sent[0].startswith("<b>🛑 TRADE FAILED</b> [trend-hmm-live] [MyStrat] [MT5] BTCUSD buy\n")
+
+    def test_per_call_name_follows_system_name(self):
+        notifier, sent = _make_notifier(strategy_name="trend-hmm-live")
+        notifier.on_error("S1", "boom")
+        notifier._dispatcher.flush()
+        assert sent[0] == "<b>⚠️ ERROR</b> [trend-hmm-live] [S1]\nboom"
+
+    def test_per_call_name_equal_to_system_name_shown_once(self):
+        notifier, sent = _make_notifier(strategy_name="trend-hmm-live")
+        notifier.on_circuit_breaker_tripped("trend-hmm-live", 5)
+        notifier._dispatcher.flush()
+        assert sent[0] == "<b>🚫 CIRCUIT BREAKER</b> [trend-hmm-live] tripped after 5 errors"
+
+    def test_per_call_name_kept_when_no_system_name(self):
+        notifier, sent = _make_notifier(strategy_name="")
+        notifier.on_connection_lost("S1")
+        notifier._dispatcher.flush()
+        assert sent[0] == "<b>📡 CONNECTION LOST</b> [S1]"
+
+    def test_system_name_is_html_escaped(self):
+        notifier, sent = _make_notifier(strategy_name="S&P <live>")
+        notifier.on_trade_closed("US500", 7, 1.0)
+        notifier._dispatcher.flush()
+        assert "[S&amp;P &lt;live&gt;]" in sent[0]
+        assert "<live>" not in sent[0]
+
+
+class TestTelegramNotifierErrorEscaping:
+    def test_on_error_escapes_exception_text(self):
+        """str(exception) routinely contains '<'; unescaped, Telegram rejects the message and the alert is lost."""
+        notifier, sent = _make_notifier()
+        notifier.on_error("S1", "'<' not supported between instances of 'NoneType' and 'float' & <more>")
+        notifier._dispatcher.flush()
+        body = sent[0].split("\n", 1)[1]
+        assert "<" not in body and ">" not in body
+        assert "&lt;&#x27; not supported" in body
+        assert "&amp; &lt;more&gt;" in body
+
+    def test_on_error_escapes_strategy_name(self):
+        notifier, sent = _make_notifier(strategy_name="")
+        notifier.on_error("<S1>", "boom")
+        notifier._dispatcher.flush()
+        assert sent[0] == "<b>⚠️ ERROR</b> [&lt;S1&gt;]\nboom"
 
 
 class TestBaseNotifierDefaults:
