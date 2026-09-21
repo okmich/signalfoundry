@@ -47,7 +47,8 @@ import pandas as pd
 from okmich_quant_ml.hmm import InferenceMode
 from okmich_quant_ml.posterior_inference import top_prob
 
-from ..registry import Axis, FeatureEntry, FeatureRegistry, PRICE_PATH_AXES, Parity, is_eligible
+from ..registry import (Axis, FeatureEntry, FeatureRegistry, PRICE_PATH_AXES, Parity, is_eligible,
+                        stamp_for)
 from ..screener._stage0 import stage0_variance_filter
 from ..screener._result import StageReport
 from ._config import HmmScreenerConfig, OneSidedPolicy, ScreenStrategy, build_hmm
@@ -484,19 +485,24 @@ class HmmFeatureScreener:
 
     # ----------------------------------------------------------- axis coherence
 
-    def _resolve_entries(self, subset: tuple[str, ...]) -> dict[str, FeatureEntry | None]:
-        """Resolve each subset column to its registry entry once, ``None`` when unresolvable.
+    def _resolve_entries(self, subset: tuple[str, ...]) -> dict[str, tuple[FeatureEntry | None, str | None]]:
+        """Resolve each subset column to ``(entry, column)`` once, ``(None, None)`` when unresolvable.
 
         Three per-subset checks need the same lookups (coherence, the one-sided guard, the sub-cell
         report). Resolving in one place keeps them from drifting apart and collapses three near-identical
         try/except loops into one.
+
+        The COLUMN is carried out of here, not discarded. A subset names ``entry@column`` when its
+        recipe selected one output of a multi-output feature, and that column is what the invariance
+        gate has to judge -- an entry-only lookup made every such feature unresolvable and skipped the
+        gate entirely on 74% of keeper rows before this was fixed.
         """
-        resolved: dict[str, FeatureEntry | None] = {}
+        resolved: dict[str, tuple[FeatureEntry | None, str | None]] = {}
         for f in subset:
             try:
-                resolved[f] = self.registry.get(f)
+                resolved[f] = self.registry.resolve(f)
             except (KeyError, ValueError):
-                resolved[f] = None
+                resolved[f] = (None, None)
         return resolved
 
     def _validate_subset_coherence(self, subset: tuple[str, ...]) -> list[str]:
@@ -519,7 +525,7 @@ class HmmFeatureScreener:
             owns that message because it is the only one with subset context.
         """
         warns: list[str] = []
-        for f, entry in self._resolve_entries(subset).items():
+        for f, (entry, column) in self._resolve_entries(subset).items():
             if entry is None:
                 warns.append(f"'{f}' not in FeatureRegistry; skipping coherence check")
                 continue
@@ -530,7 +536,7 @@ class HmmFeatureScreener:
                 if self.config.raise_on_off_axis:
                     raise ValueError(msg)
                 continue
-            ok, reason = is_eligible(entry, self.config.axis)
+            ok, reason = is_eligible(entry, self.config.axis, column)
             if not ok:
                 msg = f"'{f}' is not eligible for axis={self.config.axis.value}: {reason}"
                 warns.append(msg)
@@ -550,10 +556,10 @@ class HmmFeatureScreener:
         if self.config.axis not in PRICE_PATH_AXES:
             return
         unregistered, unstamped = [], []
-        for f, entry in self._resolve_entries(tuple(surviving)).items():
+        for f, (entry, column) in self._resolve_entries(tuple(surviving)).items():
             if entry is None:
                 unregistered.append(f)
-            elif entry.invariance is None:
+            elif stamp_for(entry, column) is None:
                 unstamped.append(f)
         if unstamped:
             warnings.warn(
@@ -585,10 +591,10 @@ class HmmFeatureScreener:
             return []
         warns: list[str] = []
         present = set(subset)
-        for f, entry in self._resolve_entries(subset).items():
+        for f, (entry, column) in self._resolve_entries(subset).items():
             if entry is None:
                 continue
-            inv = entry.invariance
+            inv = stamp_for(entry, column)
             if inv is None or inv.parity is not Parity.ONE_SIDED:
                 continue
             if inv.conjugate and inv.conjugate in present:
@@ -612,13 +618,14 @@ class HmmFeatureScreener:
         what makes that risk visible instead of merely possible.
         """
         cells: dict[str, int] = {}
-        for entry in self._resolve_entries(subset).values():
+        for entry, column in self._resolve_entries(subset).values():
+            stamp = stamp_for(entry, column) if entry is not None else None
             if entry is None:
                 key = "unregistered"
-            elif entry.invariance is None:
+            elif stamp is None:
                 key = "unstamped"
             else:
-                key = entry.invariance.scale_class.value
+                key = stamp.scale_class.value
             cells[key] = cells.get(key, 0) + 1
         return cells
 

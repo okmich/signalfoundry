@@ -38,6 +38,17 @@ from ._schema import (
 from ._catalog import CATALOG
 
 
+def _segments_elided(given: list[str], actual: list[str]) -> bool:
+    """Do the ``given`` module segments appear in ``actual`` in order (gaps allowed)?
+
+    Lets a caller write ``timothymasters.momentum`` for catalogued ``timothymasters.single.momentum``
+    without the registry accepting an unrelated module that merely shares a function name. Order is
+    required, so ``momentum.timothymasters`` does not match.
+    """
+    it = iter(actual)
+    return all(seg in it for seg in given)
+
+
 class _FeatureView:
     """
     Chainable view over a list of FeatureEntry objects.
@@ -241,14 +252,42 @@ class FeatureRegistry(_FeatureView):
         """
         Look up a feature by name.
 
-        Accepts either a short name (``"vpin"``) or a qualified name
-        (``"microstructure.order_flow.vpin"``).  Raises ``KeyError`` if not
-        found; raises ``ValueError`` with disambiguation hint if the short
-        name matches multiple modules.
+        Accepts a short name (``"vpin"``), a qualified name
+        (``"microstructure.order_flow.vpin"``), an unambiguous partially-qualified
+        name (``"timothymasters.momentum.ppo"``), and any of those carrying a
+        column selector (``"candle.candle_features@range"``).  Raises ``KeyError``
+        if not found; raises ``ValueError`` with disambiguation hint if the name
+        matches multiple modules.
+
+        Use :meth:`resolve` when the column matters -- it is what decides eligibility
+        on a multi-output entry.
         """
-        if name in self._by_qualified:
-            return self._by_qualified[name]
-        matches = self._by_name.get(name, [])
+        return self.resolve(name)[0]
+
+    def resolve(self, name: str) -> tuple[FeatureEntry, str | None]:
+        """Resolve a feature name to ``(entry, column)``.
+
+        The ``entry@column`` form is how the rest of this package addresses ONE output of a
+        multi-output feature -- ``registry/_invariance_columns.csv`` is keyed exactly that way, and a
+        screener subset names the column its recipe selected. Resolving it HERE is what lets the
+        invariance gate judge the column that was actually used instead of skipping the feature
+        entirely; a lookup that understood only the bare qualified name silently disabled that gate
+        on every subset naming a column.
+
+        The partial fallback accepts a name whose module path has segments ELIDED --
+        ``timothymasters.momentum.ppo`` for catalogued ``timothymasters.single.momentum.ppo`` -- by
+        requiring the function name to match exactly and the given module segments to appear in the
+        catalogued module in order. It resolves only when exactly one entry matches, so it can never
+        quietly pick a different feature than the caller meant. A bare short name is the same rule with
+        no module segments to satisfy.
+        """
+        base, _, column = name.partition("@")
+        column = column or None
+        if base in self._by_qualified:
+            return self._by_qualified[base], column
+        *prefix, short = base.split(".")
+        matches = [e for e in self._by_name.get(short, [])
+                   if _segments_elided(prefix, e.module.split("."))]
         if not matches:
             raise KeyError(f"Feature {name!r} not found in registry.")
         if len(matches) > 1:
@@ -257,7 +296,7 @@ class FeatureRegistry(_FeatureView):
                 f"Ambiguous name {name!r} matches {len(matches)} entries. "
                 f"Use a qualified name: {options}"
             )
-        return matches[0]
+        return matches[0], column
 
     def all(self) -> list[FeatureEntry]:
         return list(self._entries)

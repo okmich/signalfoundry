@@ -63,7 +63,7 @@ from ._schema import FeatureEntry, FeatureInvariance, Parity, ScaleClass, SIGNAL
 class Axis(StrEnum):
     """A screening axis: the partition an axis-specific HMM is asked to separate."""
 
-    DIRECTIONAL = "directional"        # replaces trend + momentum
+    DIRECTIONAL = "directional"        # trend + momentum
     PATH_STRUCTURE = "path_structure"
     VOLATILITY = "volatility"
     LIQUIDITY = "liquidity"
@@ -146,6 +146,26 @@ def _column_admissible(stamp: FeatureInvariance, axis: Axis) -> bool:
     return scales is None or stamp.scale_class in scales
 
 
+def stamp_for(entry: FeatureEntry, column: str | None = None) -> FeatureInvariance | None:
+    """The invariance stamp that actually governs ``entry`` AS USED.
+
+    A multi-output entry carries no per-entry verdict -- ``HETEROGENEOUS`` says only "ask the column".
+    When the caller names one (``candle.candle_features@range``) and that column carries its own
+    measured stamp, that stamp is the one that decides. Falling back to the per-entry stamp keeps
+    every single-output feature on exactly the path it was always on.
+
+    Every consumer of a stamp goes through here, so the per-entry and per-column paths cannot drift --
+    the same reason ``_column_admissible`` is factored out of the eligibility rule.
+    """
+    if column is not None:
+        from ._invariance import COLUMN_STAMPS
+
+        stamp = COLUMN_STAMPS.get(entry.qualified_name, {}).get(column)
+        if stamp is not None:
+            return stamp
+    return entry.invariance
+
+
 def _split_summary(cols: dict[str, FeatureInvariance]) -> str:
     """e.g. "3 odd, 2 even" -- how a heterogeneous entry's columns divide."""
     counts: dict[str, int] = {}
@@ -154,7 +174,7 @@ def _split_summary(cols: dict[str, FeatureInvariance]) -> str:
     return ", ".join(f"{n} {p}" for p, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
-def is_eligible(entry: FeatureEntry, axis: Axis) -> tuple[bool, str]:
+def is_eligible(entry: FeatureEntry, axis: Axis, column: str | None = None) -> tuple[bool, str]:
     """Is ``entry`` admissible on ``axis``? Returns ``(ok, reason)``; ``reason`` is "" when ok and clean.
 
     Two gates. The TAG gate asks whether the feature's family is plausibly on-axis. The INVARIANCE gate
@@ -164,6 +184,12 @@ def is_eligible(entry: FeatureEntry, axis: Axis) -> tuple[bool, str]:
     The invariance gate applies only to the three PRICE-PATH axes; ``LIQUIDITY`` is tag-gated only (see
     the module docstring). An unstamped feature passes with a reason naming the gap, because "never
     measured" is not the same finding as "measured and wrong" and must not be silently treated as one.
+
+    ``column`` names ONE output of a multi-output entry and is the answer to the advisory this function
+    used to end on ("the verdict depends on which column is selected — name one"). Given a stamped
+    column, the verdict is that column's, not the entry's: ``candle.candle_features`` as a whole has no
+    parity, but its ``range`` column measures even/scale-carrying and so belongs to VOLATILITY and not
+    to DIRECTIONAL. Omit it and every single-output feature takes exactly the path it always took.
     """
     if entry.signal_type not in AXIS_SIGNAL_TYPES[axis]:
         return False, (f"signal_type={entry.signal_type!r} is not drawn on by {axis.value} "
@@ -172,9 +198,10 @@ def is_eligible(entry: FeatureEntry, axis: Axis) -> tuple[bool, str]:
     if axis not in PRICE_PATH_AXES:
         return True, ""
 
-    inv = entry.invariance
+    label = f"{entry.qualified_name}@{column}" if column is not None else entry.qualified_name
+    inv = stamp_for(entry, column)
     if inv is None:
-        return True, f"{entry.qualified_name} carries no invariance stamp; admitted on the tag gate alone"
+        return True, f"{label} carries no invariance stamp; admitted on the tag gate alone"
     # A multi-output entry whose columns differ has no per-entry verdict, so the per-entry rule below
     # cannot be applied to it. Judge it on its COLUMNS instead: reject only when NOT ONE of them is
     # admissible here, and otherwise admit with an advisory saying how they split. Rejecting outright
@@ -190,13 +217,13 @@ def is_eligible(entry: FeatureEntry, axis: Axis) -> tuple[bool, str]:
 
         cols = COLUMN_STAMPS.get(entry.qualified_name, {})
         if not cols:
-            return True, (f"{entry.qualified_name} emits columns of differing invariance and carries no "
+            return True, (f"{label} emits columns of differing invariance and carries no "
                           f"per-entry verdict; no per-column stamps are available to say how they split")
         ok_cols = sorted(c for c, st in cols.items() if _column_admissible(st, axis))
         if not ok_cols:
-            return False, (f"{entry.qualified_name} emits {len(cols)} columns and NONE is admissible on "
+            return False, (f"{label} emits {len(cols)} columns and NONE is admissible on "
                            f"{axis.value} ({_split_summary(cols)})")
-        return True, (f"{entry.qualified_name} emits {len(cols)} columns of differing invariance "
+        return True, (f"{label} emits {len(cols)} columns of differing invariance "
                       f"({_split_summary(cols)}); {len(ok_cols)} admissible on {axis.value}: "
                       f"{ok_cols}. The verdict depends on which column is selected — name one")
 
@@ -210,23 +237,23 @@ def is_eligible(entry: FeatureEntry, axis: Axis) -> tuple[bool, str]:
     # (parity=mixed, scale_class=unscored) was admitted to DIRECTIONAL "on the tag gate alone" while
     # the codebase already knew it belongs to no price-path axis.
     if inv.parity is Parity.MIXED:
-        return False, (f"{entry.qualified_name} tests MIXED — it confounds direction with magnitude, so "
+        return False, (f"{label} tests MIXED — it confounds direction with magnitude, so "
                        f"it belongs to no price-path axis. That is a defect in the feature, not a "
                        f"taxonomy gap")
     if inv.parity is Parity.UNSCORED or inv.scale_class is ScaleClass.UNSCORED:
-        return True, (f"{entry.qualified_name} invariance is UNSCORED (degenerate or too few "
+        return True, (f"{label} invariance is UNSCORED (degenerate or too few "
                       f"observations to measure); admitted on the tag gate alone")
 
     parities, scales = _AXIS_INVARIANCE_RULE[axis]
     if inv.parity not in parities:
-        return False, (f"{entry.qualified_name} tests {inv.parity.value}; {axis.value} requires "
+        return False, (f"{label} tests {inv.parity.value}; {axis.value} requires "
                        f"{sorted(p.value for p in parities)}")
     if scales is not None and inv.scale_class not in scales:
-        return False, (f"{entry.qualified_name} tests {inv.parity.value}/{inv.scale_class.value}; "
+        return False, (f"{label} tests {inv.parity.value}/{inv.scale_class.value}; "
                        f"{axis.value} requires {sorted(s.value for s in scales)}")
 
     if axis is Axis.DIRECTIONAL and inv.parity is Parity.ONE_SIDED:
-        return True, (f"{entry.qualified_name} is ONE-SIDED (conjugate {inv.conjugate!r}): its low state "
+        return True, (f"{label} is ONE-SIDED (conjugate {inv.conjugate!r}): its low state "
                       f"pools 'the other way' WITH 'no move at all', so a K=2 split on it alone is not "
                       f"an up/down partition. Pair it with its conjugate or use the canonical spread")
     return True, ""

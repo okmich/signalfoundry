@@ -20,6 +20,7 @@ from ._axis import (
     Axis,
     PRICE_PATH_AXES,
     is_eligible,
+    stamp_for,
 )
 from ._invariance import INVARIANCE_STAMPS, load_invariance_stamps
 from ._schema import (
@@ -61,6 +62,7 @@ __all__ = [
     "AXIS_PRIMARY_HORIZON",
     "PRICE_PATH_AXES",
     "is_eligible",
+    "stamp_for",
     # ── measured invariance ───────────────────────────────────────────────────
     "Parity",
     "ScaleClass",
