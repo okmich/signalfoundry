@@ -53,11 +53,15 @@ def account_env_path(account: str | None = None, env_dir: str | Path | None = No
     return Path(os.path.expanduser(os.path.expandvars(str(raw_dir)))) / f".env.{acct}"
 
 
-def load_account_env(account: str | None = None, env_dir: str | Path | None = None, *, override: bool = True) -> Path:
+def load_account_env(account: str | None = None, env_dir: str | Path | None = None, *, env_file: str | Path | None = None,
+                     override: bool = True) -> Path:
     """Load the account's broker env file into ``os.environ`` and return its path. Raises if it does not exist,
-    so a runner can never start against a different account's credentials by falling back to a default."""
-    path = account_env_path(account, env_dir)
+    so a runner can never start against a different account's credentials by falling back to a default.
+
+    ``env_file`` is a manual-run override (a runner's ``--env-file``): that file is loaded instead. The account
+    is still required for the log path, and the Supervisor's account check flags an override that disagrees."""
+    path = Path(env_file) if env_file is not None else account_env_path(account, env_dir)
     if not path.is_file():
-        raise AccountConfigError(f"broker env file not found for account {resolve_account(account)!r}: {path}")
+        raise AccountConfigError(f"broker env file not found: {path}")
     load_dotenv(dotenv_path=path, override=override)
     return path

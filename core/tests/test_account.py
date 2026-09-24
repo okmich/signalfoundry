@@ -114,3 +114,16 @@ def test_text_log_dir_requires_account_when_log_base_set(tmp_path, monkeypatch):
     monkeypatch.delenv("OKMICH_QUANT_ACCOUNT", raising=False)
     with pytest.raises(AccountConfigError):
         text_log_dir(cfg)
+
+
+def test_load_account_env_explicit_file_overrides(tmp_path, monkeypatch):
+    override = tmp_path / "custom.env"
+    override.write_text("LOGIN_ID=555\n", encoding="utf-8")
+    monkeypatch.delenv("LOGIN_ID", raising=False)
+    assert load_account_env(env_file=override) == override
+    assert os.environ["LOGIN_ID"] == "555"
+
+
+def test_load_account_env_explicit_missing_file_raises(tmp_path):
+    with pytest.raises(AccountConfigError, match="not found"):
+        load_account_env(env_file=tmp_path / "nope.env")
