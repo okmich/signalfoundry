@@ -15,7 +15,7 @@ from .base import (
     record_from_dict,
     schema_path,
 )
-from .identity import LogicalSystemIdentity, LogRootConfigError, RunnerIdentity
+from .identity import LogicalSystemIdentity, LogRootConfigError, RunnerIdentity, runner_log_dir
 from .jsonl import JsonlEventLogger
 from .runner_status import RunnerStatus
 from .text_log import setup_text_logger, text_log_dir
@@ -43,6 +43,8 @@ __all__ = [
     "UnknownSchemaMajorError",
     # runner-lifecycle channel (status file, read directly by the Supervisor)
     "RunnerStatus",
+    # a runner's own folder for files outside the contract channels
+    "runner_log_dir",
     # per-process text log (human-readable; resolves LOG_BASE, else the config dir)
     "setup_text_logger",
     "text_log_dir",

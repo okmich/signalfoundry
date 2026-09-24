@@ -94,7 +94,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
     (artefact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     # 4. Inference log: write n_log contract v1.0.0 ``bar`` records via the real JsonlEventLogger,
-    #    which lays them out at <log_base>/<strategy>/<symbol>/<timeframe>/inference/inference_<date>.jsonl.
+    #    which lays them out at <log_base>/<account>/<strategy>/<symbol>/<timeframe>/inference/inference_<date>.jsonl.
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     strategy_name = f"{symbol}_fl3_hmm"
@@ -102,7 +102,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
     runner = RunnerIdentity(runner_id="mon-test", runner_start_token="tok", broker="Deriv",
                             account_id="0", broker_session_id=None)
     factory = SystemRecordFactory(runner, logical, order_tag=1)
-    logger = JsonlEventLogger(logical, log_base=log_dir, fsync=False)
+    logger = JsonlEventLogger(logical, log_base=log_dir, account="test.demo", fsync=False)
     log_index = pd.date_range("2026-05-15T00:00:00Z", periods=n_log, freq="5min")
     live_posteriors = rng.dirichlet([1.0, 1.0, 1.0], size=n_log)
     live_logliks = rng.normal(loc=-2.0, scale=0.3, size=n_log)
@@ -123,7 +123,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
         symbols=(symbol,),
         artifact_base_dir=tmp_path / "artefacts",
         variant_with_lag=variant,
-        inference_log_base_dir=log_dir,
+        inference_log_base_dir=log_dir / "test.demo",  # the monitor reads one account's log tree
         strategy_name_template="{symbol}_fl3_hmm",
         raw_data_dir=raw_dir,
         output_dir=output_dir,

@@ -61,10 +61,10 @@ class JsonlEventLogger(BaseEventLogger):
     silently stop all subsequent heartbeats.
     """
 
-    def __init__(self, logical: LogicalSystemIdentity, log_base: str | Path | None = None, *,
+    def __init__(self, logical: LogicalSystemIdentity, log_base: str | Path | None = None, *, account: str | None = None,
                  fsync: bool = True, bar_queue_maxsize: int = _DEFAULT_BAR_QUEUE_MAXSIZE):
         self._logical = logical
-        self._base = _resolve_log_base(log_base)
+        self._base = _resolve_log_base(log_base, account)
         self._dir = self._dir_for(logical)
         # NB: the inference dir is created LAZILY on first write (see _write_line_locked), NOT here — so
         # the runner phase can rebind_logical() to the runner-root (e.g. the -multi suffix) without

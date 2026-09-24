@@ -132,7 +132,7 @@ def test_default_logger_constructed_when_none_injected(tmp_path):
     s = S(StrategyConfig(name="dh", symbol="EURUSD", timeframe=5, magic=1), BaseSignal(), log_base=tmp_path)
     try:
         assert isinstance(s.log_binding.logger, JsonlEventLogger)
-        assert s.log_binding.logger.directory == tmp_path / "dh" / "EURUSD" / "5" / "inference"
+        assert s.log_binding.logger.directory == tmp_path / "test.demo" / "dh" / "EURUSD" / "5" / "inference"
         assert s.log_binding.logical.logical_system_id == "dh/EURUSD/5"
     finally:
         s.cleanup()
@@ -318,7 +318,7 @@ def test_default_logger_emits_to_disk_end_to_end(tmp_path):
     s.cleanup()  # drains the bounded bar queue + closes the handle
 
     # exactly one inference file under the OPS §7 path, with one bar record
-    files = list((tmp_path / "dh" / "EURUSD" / "5" / "inference").glob("inference_*.jsonl"))
+    files = list((tmp_path / "test.demo" / "dh" / "EURUSD" / "5" / "inference").glob("inference_*.jsonl"))
     assert len(files) == 1
     lines = [json.loads(x) for x in files[0].read_text(encoding="utf-8").splitlines() if x.strip()]
     assert len(lines) == 1 and lines[0]["event"] == "bar" and lines[0]["outcome"] == "ok"

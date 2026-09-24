@@ -22,6 +22,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..account import resolve_account
+
 
 class LogRootConfigError(ValueError):
     """Raised when the inference-log root was not supplied by config or environment."""
@@ -53,13 +55,20 @@ def _validate_identity_token(kind: str, value: str) -> str:
     return s
 
 
-def _resolve_log_base(log_base: str | Path | None = None) -> Path:
-    """Resolve the inference-log root from an explicit value or ``OKMICH_QUANT_LOG_BASE``.
+def _resolve_log_base(log_base: str | Path | None = None, account: str | None = None) -> Path:
+    """Resolve this runner's log directory: ``<log_root>\\<account>`` (LOGGING_CONTRACT §10).
 
-    There is deliberately no hardcoded production fallback: deployment paths such as
-    ``D:\\quant_logs`` are ops examples, not portable source-code defaults. Shared by the bar
-    logger and the runner status writer so both resolve the root identically.
+    ``log_root`` is the explicit ``log_base`` or ``OKMICH_QUANT_LOG_BASE``; ``account`` is the explicit value or
+    ``OKMICH_QUANT_ACCOUNT``. Both are required, and the account is appended whichever way the root arrives, so
+    there is one layout everywhere. There is deliberately no hardcoded production fallback: deployment paths
+    such as ``D:\\quant_logs`` are ops examples, not portable source-code defaults. Shared by the bar logger,
+    the runner status writer and the text log so all resolve the same directory.
     """
+    return _resolve_log_root(log_base) / resolve_account(account)
+
+
+def _resolve_log_root(log_base: str | Path | None = None) -> Path:
+    """The bare log root (above the account level): an explicit value or ``OKMICH_QUANT_LOG_BASE``."""
     source = "explicit log_base"
     raw = log_base
     if raw is None:
@@ -128,6 +137,13 @@ def runner_strategy_root(strategy: str, *, multi: bool) -> str:
     if not multi or strategy.endswith("-multi"):
         return strategy
     return f"{strategy}-multi"
+
+
+def runner_log_dir(runner_root: str, log_base: str | Path | None = None, account: str | None = None) -> Path:
+    """A runner's own log folder, ``<log_base>/<account>/<runner_root>`` (beside ``status.json``). For files a
+    runner or strategy keeps outside the contract channels (text log, persisted state), so nothing is written
+    at the log root or outside the runner's account."""
+    return _resolve_log_base(log_base, account) / _path_safe(runner_root)
 
 
 @dataclass(frozen=True)

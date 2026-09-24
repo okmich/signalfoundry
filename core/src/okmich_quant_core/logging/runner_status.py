@@ -5,7 +5,7 @@ stopped, and did it disconnect?" is answered by reading one small file, not by t
 bar JSONL. So lifecycle does NOT go on the inference-log channel. Instead the runner writes a single
 ``status.json`` **atomically** (write tmp → fsync → ``os.replace``, last-write-wins) at the runner root:
 
-``<log_base>/<strategy>/status.json``   (``<strategy>-multi`` for a multi-trader)
+``<log_base>/<account>/<strategy>/status.json``   (``<strategy>-multi`` for a multi-trader)
 
 The Supervisor reads it directly for its stop/restart loop (clean-stop proof = ``state == "stopped"``
 + ``broker_disconnected: true``; restart detection = a changed ``runner_start_token``). Runner lifecycle
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from .base import LOG_SCHEMA_VERSION, _iso_utc
+from ..account import resolve_account
 from .identity import LogicalSystemIdentity, RunnerIdentity, _path_safe, _resolve_log_base
 
 _log = logging.getLogger(__name__)
@@ -51,11 +52,12 @@ class RunnerStatus:
     """
 
     def __init__(self, runner: RunnerIdentity, logical_systems: Iterable[LogicalSystemIdentity], *,
-                 log_base: str | Path | None = None, pid: int | None = None,
+                 log_base: str | Path | None = None, account: str | None = None, pid: int | None = None,
                  library_versions: Optional[Mapping[str, Any]] = None):
         self._runner = runner
         self._systems = list(logical_systems)
-        self._base = _resolve_log_base(log_base)
+        self._account = resolve_account(account)
+        self._base = _resolve_log_base(log_base, self._account)
         self._pid = os.getpid() if pid is None else pid
         self._library_versions = dict(library_versions or {})
         self._started_at: str | None = None
@@ -75,7 +77,7 @@ class RunnerStatus:
 
     @property
     def status_path(self) -> Path:
-        """The ONE runner-scoped status file at the runner root: ``<log_base>/<strategy>/status.json``
+        """The ONE runner-scoped status file at the runner root: ``<log_base>/<account>/<strategy>/status.json``
         (``<strategy>-multi`` for a multi-trader). Runner lifecycle is one process → one file, NOT
         mirrored per logical system (LOGGING_CONTRACT §7.1)."""
         return self._base / _path_safe(self._runner_root_strategy()) / "status.json"
@@ -88,6 +90,7 @@ class RunnerStatus:
             "runner_id": self._runner.runner_id,
             "runner_start_token": self._runner.runner_start_token,
             "pid": self._pid,
+            "account": self._account,
             "broker": self._runner.broker,
             "account_id": self._runner.account_id,
             "broker_session_id": self._runner.broker_session_id,

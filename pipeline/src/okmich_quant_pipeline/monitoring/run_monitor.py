@@ -44,7 +44,8 @@ def _glob_inference_logs(log_base: Path, strategy_name: str, symbol: str,
                          timeframe: int | None = None) -> list[Path]:
     """Return the OPS-path inference files for ONE logical system, sorted by date.
 
-    Path layout (LOGGING_CONTRACT §10 / OPS §7):
+    Path layout (LOGGING_CONTRACT §10 / OPS §7), ``log_base`` being one account's folder
+    (``<OKMICH_QUANT_LOG_BASE>/<account>``):
     ``<log_base>/<strategy>/<symbol>/<timeframe>/inference/inference_<YYYYMMDD>.jsonl``. Sorted
     lexicographically, which is chronological for the zero-padded ``YYYYMMDD`` filename suffix.
 

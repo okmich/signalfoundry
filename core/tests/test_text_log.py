@@ -24,8 +24,8 @@ def test_text_log_dir_uses_log_base_runner_root_for_single(tmp_path, monkeypatch
     cfg = _write_config(tmp_path / "live" / "rsi2" / "EURUSD" / "5",
                         {"strategy": {"name": "rsi2_mean_reversion", "symbol": "EURUSD", "timeframe": 5},
                          "strategies": []})
-    # single-trader -> <log_base>/<strategy>
-    assert text_log_dir(cfg) == log_base / "rsi2_mean_reversion"
+    # single-trader -> <log_base>/<account>/<strategy>
+    assert text_log_dir(cfg) == log_base / "test.demo" / "rsi2_mean_reversion"
 
 
 def test_text_log_dir_uses_multi_runner_root(tmp_path, monkeypatch):
@@ -33,8 +33,8 @@ def test_text_log_dir_uses_multi_runner_root(tmp_path, monkeypatch):
     monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(log_base))
     cfg = _write_config(tmp_path / "live" / "basket",
                         {"strategies": [{"name": "rsi2_mean_reversion", "symbol": "BTCUSD", "timeframe": 5}]})
-    # multi-trader -> <log_base>/<strategy>-multi (statutory suffix)
-    assert text_log_dir(cfg) == log_base / "rsi2_mean_reversion-multi"
+    # multi-trader -> <log_base>/<account>/<strategy>-multi (statutory suffix)
+    assert text_log_dir(cfg) == log_base / "test.demo" / "rsi2_mean_reversion-multi"
 
 
 def test_text_log_dir_falls_back_to_config_dir_when_unset(tmp_path, monkeypatch):
@@ -51,7 +51,7 @@ def test_setup_text_logger_writes_under_log_base(tmp_path, monkeypatch):
                         {"strategy": {"name": "rsi2", "symbol": "EURUSD", "timeframe": 5}})
     try:
         log_file = setup_text_logger(cfg)
-        assert log_file.parent == log_base / "rsi2"
+        assert log_file.parent == log_base / "test.demo" / "rsi2"
         assert log_file.name.startswith("z_system_log_") and log_file.suffix == ".log"
         logging.getLogger(__name__).info("hello")
         for h in logging.getLogger().handlers:

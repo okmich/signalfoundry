@@ -69,9 +69,9 @@ class _FakeSession:
 
 
 def _status(tmp_path, strategy="s") -> dict:
-    # Runner-scoped status: ONE file at the runner root <log_base>/<strategy>/status.json (a single
+    # Runner-scoped status: ONE file at the runner root <log_base>/<account>/<strategy>/status.json (a single
     # Trader → no -multi suffix; LOGGING_CONTRACT §7.1).
-    return json.loads((tmp_path / strategy / "status.json").read_text(encoding="utf-8"))
+    return json.loads((tmp_path / "test.demo" / strategy / "status.json").read_text(encoding="utf-8"))
 
 
 def test_startup_binds_strategies_and_writes_running_status(tmp_path):

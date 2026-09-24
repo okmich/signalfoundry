@@ -6,8 +6,10 @@ forensics) had no shared home — each runner hand-rolled it next to its ``confi
 live box is the read-only *artefact* tree (``LIVE_BASE``), not a log root. This module gives the text
 log one resolution rule that mirrors the structured layout:
 
-* ``OKMICH_QUANT_LOG_BASE`` set  -> ``<log_base>/<runner_strategy_root>/<prefix>_<ts>.log``
-  (beside ``status.json``; one text log per process, single or multi);
+* ``OKMICH_QUANT_LOG_BASE`` set  -> ``<log_base>/<account>/<runner_strategy_root>/<prefix>_<ts>.log``
+  (beside ``status.json``; one text log per process, single or multi). ``OKMICH_QUANT_ACCOUNT`` is then
+  required; it comes from the process environment (the Supervisor sets it), since this runs before the
+  runner loads its broker env file;
 * unset                          -> the config directory (dev / standalone fallback).
 """
 
@@ -20,7 +22,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .identity import _path_safe, runner_strategy_root
+from .identity import runner_log_dir, runner_strategy_root
 
 
 def _runner_strategy_root_from_config(config_path: Path) -> str:
@@ -36,13 +38,12 @@ def _runner_strategy_root_from_config(config_path: Path) -> str:
 
 
 def text_log_dir(config_path: str | Path) -> Path:
-    """The directory this runner's text log belongs in: ``<OKMICH_QUANT_LOG_BASE>/<runner_strategy_root>``
+    """The directory this runner's text log belongs in: ``<OKMICH_QUANT_LOG_BASE>/<account>/<runner_strategy_root>``
     when the env root is set, else the config directory (dev / standalone fallback)."""
     cp = Path(config_path)
     raw = os.environ.get("OKMICH_QUANT_LOG_BASE")
     if raw and raw.strip():
-        base = Path(os.path.expanduser(os.path.expandvars(raw.strip())))
-        return base / _path_safe(_runner_strategy_root_from_config(cp))
+        return runner_log_dir(_runner_strategy_root_from_config(cp))
     return cp.parent
 
 

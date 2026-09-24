@@ -26,7 +26,7 @@ import pandas as pd
 from .identity import LogicalSystemIdentity, RunnerIdentity
 
 
-LOG_SCHEMA_VERSION = "1.1.0"  # tracks LOGGING_CONTRACT.md; v1.1.0 moved runner lifecycle to status.json
+LOG_SCHEMA_VERSION = "2.0.0"  # tracks LOGGING_CONTRACT.md; v2.0.0 adds the <account> path level + status.json `account`
 
 _SCHEMA_DIR = Path(__file__).resolve().parent / "schema"
 

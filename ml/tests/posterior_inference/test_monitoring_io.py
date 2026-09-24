@@ -322,7 +322,7 @@ def test_read_inference_log_quarantines_missing_schema_version(tmp_path: Path) -
 def test_read_inference_log_quarantines_unknown_major(tmp_path: Path) -> None:
     path = tmp_path / "inference.jsonl"
     future = _make_record("2026-05-01T00:00:00", {"tsi": 0.1}, [0.7, 0.3], -1.0)
-    future["log_schema_version"] = "2.0.0"
+    future["log_schema_version"] = "3.0.0"
     good = _make_record("2026-05-01T00:05:00", {"tsi": 0.2}, [0.4, 0.6], -1.5)
     _write_jsonl(path, [future, good])
 
@@ -525,7 +525,7 @@ def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path) -> None:
     runner = RunnerIdentity(runner_id="r", runner_start_token="t", broker="B", account_id="A",
                             broker_session_id=None)
     factory = SystemRecordFactory(runner, logical, order_tag=1)
-    logger = JsonlEventLogger(logical, log_base=tmp_path, fsync=False)
+    logger = JsonlEventLogger(logical, log_base=tmp_path, account="test.demo", fsync=False)
     base_ts = pd.Timestamp("2026-05-01T00:00:00+00:00")
     for i in range(3):
         ts = base_ts + pd.Timedelta(minutes=5 * i)
@@ -535,7 +535,7 @@ def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path) -> None:
                                  extras={"probs": [0.7 - 0.1 * i, 0.2, 0.1 + 0.1 * i], "loglik": -2.0 - 0.1 * i}))
     logger.close()  # drains the bar queue
 
-    log_files = list((tmp_path / "E2E" / "EURUSD" / "5" / "inference").glob("inference_*.jsonl"))
+    log_files = list((tmp_path / "test.demo" / "E2E" / "EURUSD" / "5" / "inference").glob("inference_*.jsonl"))
     assert len(log_files) == 1
 
     frame = read_inference_log(log_files[0])
