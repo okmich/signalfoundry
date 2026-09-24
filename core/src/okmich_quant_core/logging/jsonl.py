@@ -33,11 +33,12 @@ _WRITER_SENTINEL = object()
 
 
 class JsonlEventLogger(BaseEventLogger):
-    """Conformant inference-log sink for LOGGING_CONTRACT v1.0.0 records.
+    """Conformant inference-log sink for LOGGING_CONTRACT v2.0.0 records.
 
-    **Path (§10, OPS §7).** ``<log_base>\\<strategy>\\<symbol>\\<timeframe>\\inference\\
+    **Path (§10, OPS §7).** ``<log_base>\\<account>\\<strategy>\\<symbol>\\<timeframe>\\inference\\
     inference_<YYYYMMDD>.jsonl`` where ``<log_base>`` is supplied explicitly or via
-    ``OKMICH_QUANT_LOG_BASE``. Missing/blank roots fail fast; deployment examples such as
+    ``OKMICH_QUANT_LOG_BASE`` and ``<account>`` is ``OKMICH_QUANT_ACCOUNT`` (required). Missing/blank values
+    fail fast; deployment examples such as
     ``D:\\quant_logs`` are never used as source-code fallbacks. Strategy / symbol / timeframe live
     in the **path**, not the filename. Append-only; the handle rotates when the UTC date flips. One
     logger per logical system → one file per symbol.
@@ -61,10 +62,10 @@ class JsonlEventLogger(BaseEventLogger):
     silently stop all subsequent heartbeats.
     """
 
-    def __init__(self, logical: LogicalSystemIdentity, log_base: str | Path | None = None, *, account: str | None = None,
+    def __init__(self, logical: LogicalSystemIdentity, log_base: str | Path | None = None, *,
                  fsync: bool = True, bar_queue_maxsize: int = _DEFAULT_BAR_QUEUE_MAXSIZE):
         self._logical = logical
-        self._base = _resolve_log_base(log_base, account)
+        self._base = _resolve_log_base(log_base)
         self._dir = self._dir_for(logical)
         # NB: the inference dir is created LAZILY on first write (see _write_line_locked), NOT here — so
         # the runner phase can rebind_logical() to the runner-root (e.g. the -multi suffix) without

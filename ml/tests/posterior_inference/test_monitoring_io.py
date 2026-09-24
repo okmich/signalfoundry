@@ -511,7 +511,7 @@ def test_load_baselines_rejects_non_mapping_block() -> None:
 
 # ---- end-to-end writer→reader contract --------------------------------------
 
-def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path) -> None:
+def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path, monkeypatch) -> None:
     """End-to-end: write contract v1.0.0 ``bar`` records via the conformant JsonlEventLogger, read
     them back via read_inference_log. Catches schema drift between the live writer and the reader.
     """
@@ -525,7 +525,8 @@ def test_jsonl_event_writer_round_trips_through_reader(tmp_path: Path) -> None:
     runner = RunnerIdentity(runner_id="r", runner_start_token="t", broker="B", account_id="A",
                             broker_session_id=None)
     factory = SystemRecordFactory(runner, logical, order_tag=1)
-    logger = JsonlEventLogger(logical, log_base=tmp_path, account="test.demo", fsync=False)
+    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "test.demo")
+    logger = JsonlEventLogger(logical, log_base=tmp_path, fsync=False)
     base_ts = pd.Timestamp("2026-05-01T00:00:00+00:00")
     for i in range(3):
         ts = base_ts + pd.Timedelta(minutes=5 * i)

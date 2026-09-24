@@ -52,12 +52,12 @@ class RunnerStatus:
     """
 
     def __init__(self, runner: RunnerIdentity, logical_systems: Iterable[LogicalSystemIdentity], *,
-                 log_base: str | Path | None = None, account: str | None = None, pid: int | None = None,
+                 log_base: str | Path | None = None, pid: int | None = None,
                  library_versions: Optional[Mapping[str, Any]] = None):
         self._runner = runner
         self._systems = list(logical_systems)
-        self._account = resolve_account(account)
-        self._base = _resolve_log_base(log_base, self._account)
+        self._account = resolve_account()
+        self._base = _resolve_log_base(log_base)
         self._pid = os.getpid() if pid is None else pid
         self._library_versions = dict(library_versions or {})
         self._started_at: str | None = None

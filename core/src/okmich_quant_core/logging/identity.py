@@ -55,16 +55,16 @@ def _validate_identity_token(kind: str, value: str) -> str:
     return s
 
 
-def _resolve_log_base(log_base: str | Path | None = None, account: str | None = None) -> Path:
+def _resolve_log_base(log_base: str | Path | None = None) -> Path:
     """Resolve this runner's log directory: ``<log_root>\\<account>`` (LOGGING_CONTRACT §10).
 
-    ``log_root`` is the explicit ``log_base`` or ``OKMICH_QUANT_LOG_BASE``; ``account`` is the explicit value or
-    ``OKMICH_QUANT_ACCOUNT``. Both are required, and the account is appended whichever way the root arrives, so
-    there is one layout everywhere. There is deliberately no hardcoded production fallback: deployment paths
+    ``log_root`` is the explicit ``log_base`` or ``OKMICH_QUANT_LOG_BASE``; ``account`` is ``OKMICH_QUANT_ACCOUNT``
+    (process environment only, so every channel of a runner resolves the same one). Both are required, and the
+    account is appended whichever way the root arrives, so there is one layout everywhere. There is deliberately no hardcoded production fallback: deployment paths
     such as ``D:\\quant_logs`` are ops examples, not portable source-code defaults. Shared by the bar logger,
     the runner status writer and the text log so all resolve the same directory.
     """
-    return _resolve_log_root(log_base) / resolve_account(account)
+    return _resolve_log_root(log_base) / resolve_account()
 
 
 def _resolve_log_root(log_base: str | Path | None = None) -> Path:
@@ -139,11 +139,11 @@ def runner_strategy_root(strategy: str, *, multi: bool) -> str:
     return f"{strategy}-multi"
 
 
-def runner_log_dir(runner_root: str, log_base: str | Path | None = None, account: str | None = None) -> Path:
+def runner_log_dir(runner_root: str, log_base: str | Path | None = None) -> Path:
     """A runner's own log folder, ``<log_base>/<account>/<runner_root>`` (beside ``status.json``). For files a
     runner or strategy keeps outside the contract channels (text log, persisted state), so nothing is written
     at the log root or outside the runner's account."""
-    return _resolve_log_base(log_base, account) / _path_safe(runner_root)
+    return _resolve_log_base(log_base) / _path_safe(runner_root)
 
 
 @dataclass(frozen=True)

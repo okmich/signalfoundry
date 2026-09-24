@@ -102,7 +102,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
     runner = RunnerIdentity(runner_id="mon-test", runner_start_token="tok", broker="Deriv",
                             account_id="0", broker_session_id=None)
     factory = SystemRecordFactory(runner, logical, order_tag=1)
-    logger = JsonlEventLogger(logical, log_base=log_dir, account="test.demo", fsync=False)
+    logger = JsonlEventLogger(logical, log_base=log_dir, fsync=False)
     log_index = pd.date_range("2026-05-15T00:00:00Z", periods=n_log, freq="5min")
     live_posteriors = rng.dirichlet([1.0, 1.0, 1.0], size=n_log)
     live_logliks = rng.normal(loc=-2.0, scale=0.3, size=n_log)
