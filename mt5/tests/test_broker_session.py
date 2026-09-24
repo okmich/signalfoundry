@@ -7,6 +7,7 @@ import okmich_quant_mt5.broker_session as bs
 def test_identity_from_env_and_proven_idempotent_disconnect(monkeypatch):
     monkeypatch.setenv("LOGIN_SERVER", "Deriv-Demo")
     monkeypatch.setenv("LOGIN_ID", "42")
+    monkeypatch.setattr(bs.mt5, "account_info", lambda: None)  # terminal cannot say -> env fallback
 
     calls = {"shutdown": 0}
     monkeypatch.setattr(bs.mt5, "shutdown", lambda: calls.__setitem__("shutdown", calls["shutdown"] + 1))
@@ -29,3 +30,23 @@ def test_disconnect_unproven_returns_false(monkeypatch):
     monkeypatch.setattr(bs, "is_mt5_connected", lambda: True)  # still connected → not proven
     sess = bs.MT5BrokerSession(broker="B", account_id="1", broker_session_id="s")
     assert sess.disconnect() is False
+
+
+class _Info:
+    def __init__(self, login):
+        self.login = login
+
+
+def test_account_id_is_the_terminals_login(monkeypatch):
+    monkeypatch.setenv("LOGIN_ID", "42")
+    monkeypatch.setattr(bs.mt5, "account_info", lambda: _Info(7))
+    assert bs.MT5BrokerSession(broker="B", broker_session_id="s").account_id == "7"
+
+
+def test_account_id_falls_back_to_env_when_terminal_errors(monkeypatch):
+    monkeypatch.setenv("LOGIN_ID", "42")
+
+    def boom():
+        raise RuntimeError("no terminal")
+    monkeypatch.setattr(bs.mt5, "account_info", boom)
+    assert bs.MT5BrokerSession(broker="B", broker_session_id="s").account_id == "42"

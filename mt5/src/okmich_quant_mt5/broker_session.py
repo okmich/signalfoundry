@@ -1,8 +1,9 @@
 """MT5 concrete of the broker-neutral :class:`okmich_quant_core.BrokerSession` (LOGGING_CONTRACT §7.4).
 
-Identity is sourced from the closest source of truth: ``broker`` / ``account_id`` from the runner's
-``.env`` login info (``LOGIN_SERVER`` / ``LOGIN_ID``), ``broker_session_id`` from the live
-``mt5.terminal_info()``. ``disconnect()`` performs ``mt5.shutdown()`` then verifies via
+Identity is sourced from the closest source of truth: ``account_id`` from the live terminal
+(``mt5.account_info().login``, falling back to the ``.env`` ``LOGIN_ID`` only when the terminal cannot say), so
+``status.json`` names the account the terminal is actually logged into and the Supervisor can check it against
+the account folder; ``broker`` from ``LOGIN_SERVER``; ``broker_session_id`` from the live ``mt5.terminal_info()``. ``disconnect()`` performs ``mt5.shutdown()`` then verifies via
 ``is_mt5_connected()`` so a ``shutdown`` record asserts ``broker_disconnected: true`` only when proven.
 """
 
@@ -24,9 +25,27 @@ class MT5BrokerSession:
     def __init__(self, broker: str | None = None, account_id: str | None = None,
                  broker_session_id: str | None = None):
         self._broker = broker if broker is not None else os.environ.get("LOGIN_SERVER", "")
-        self._account_id = account_id if account_id is not None else os.environ.get("LOGIN_ID", "")
+        self._account_id = account_id if account_id is not None else self._read_login()
         self._broker_session_id = broker_session_id if broker_session_id is not None else self._read_session_id()
         self._disconnected: bool | None = None  # cached proven result (idempotent)
+
+    @staticmethod
+    def _read_login() -> str:
+        """The login the terminal is actually on. Falls back to ``LOGIN_ID`` (with a warning) when the terminal
+        cannot report it; warns when the two disagree, since the terminal is the truth."""
+        env_login = os.environ.get("LOGIN_ID", "")
+        try:
+            info = mt5.account_info()
+        except Exception:
+            info = None
+        login = getattr(info, "login", None) if info is not None else None
+        if not login:
+            logger.warning("MT5BrokerSession: terminal did not report its login; using LOGIN_ID=%r from the env file",
+                           env_login)
+            return env_login
+        if env_login and str(login) != env_login:
+            logger.warning("MT5BrokerSession: terminal is logged into %s but the env file says LOGIN_ID=%s", login, env_login)
+        return str(login)
 
     @staticmethod
     def _read_session_id() -> str | None:
