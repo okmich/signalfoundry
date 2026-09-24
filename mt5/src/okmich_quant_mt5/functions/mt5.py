@@ -263,6 +263,25 @@ def get_positions(symbol, magic) -> List[Dict[str, Any]]:
     return [p._asdict() for p in positions if p.magic == magic]
 
 
+# symbol_info().filling_mode is a BITMASK of the policies the venue allows (MQL5 SYMBOL_FILLING_FOK = 1,
+# SYMBOL_FILLING_IOC = 2). The value a request carries is a different enum entirely (ORDER_FILLING_FOK = 0,
+# ORDER_FILLING_IOC = 1), so the two must never be compared directly. Omitting `type_filling` makes MT5 default
+# to FOK, which is silently fine on a venue that allows FOK and a permanent retcode 10030 on one that does not
+# (IC Markets allows IOC only; FXPIG allows both). FOK is preferred where allowed so venues that already fill
+# keep filling exactly as before.
+_FILLING_PREFERENCE = ((1, mt5.ORDER_FILLING_FOK), (2, mt5.ORDER_FILLING_IOC))
+
+
+def resolve_filling_mode(symbol: str) -> Optional[int]:
+    """The ORDER_FILLING_* value this symbol accepts, or None when the venue declares no market policy."""
+    info = mt5.symbol_info(symbol)
+    mask = getattr(info, "filling_mode", 0) if info is not None else 0
+    for bit, mode in _FILLING_PREFERENCE:
+        if mask & bit:
+            return mode
+    return None
+
+
 @with_retry(max_retries=3, initial_delay=1.0, backoff_factor=2.0)
 def open_position(symbol: str, order_type: Union[str, OrderType], volume: float, price: float = 0.0,
                   sl: float = 0.0, tp: float = 0.0, magic: int = 0, comment: str = "", **kwargs) -> Dict[str, Any]:
@@ -311,7 +330,10 @@ def open_position(symbol: str, order_type: Union[str, OrderType], volume: float,
         "magic": magic,
         "comment": comment,
     }
-    request.update(kwargs)
+    filling = resolve_filling_mode(symbol)
+    if filling is not None:
+        request["type_filling"] = filling
+    request.update(kwargs)  # an explicit caller-supplied type_filling still wins
 
     result = mt5.order_send(request)
     if result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -417,7 +439,10 @@ def close_position(ticket_id, **kwargs) -> bool:
         "type": order_type,
         "price": price,
     }
-    request.update(kwargs)
+    filling = resolve_filling_mode(position.symbol)
+    if filling is not None:
+        request["type_filling"] = filling
+    request.update(kwargs)  # an explicit caller-supplied type_filling still wins
 
     result = mt5.order_send(request)
     if result.retcode != mt5.TRADE_RETCODE_DONE:
