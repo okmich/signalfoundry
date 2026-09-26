@@ -29,6 +29,11 @@ from .timeutil import iso_z
 
 logger = logging.getLogger(__name__)
 
+#: The host's own slot in state.json (not a task kind: task kinds are enum values without a leading underscore).
+HOST_SLOT = "_host"
+#: How many consumed request ids the host remembers, so a request whose move to done\ failed is never applied twice.
+MAX_CONSUMED_IDS = 500
+
 
 class AdminNotifier(Protocol):
     def send_alert(self, level: AlertLevel, title: str, body: str) -> None:
@@ -130,6 +135,7 @@ class AdminHost:
         self._failing_tasks: set[str] = set()
         self._last_write_alert: datetime | None = None
         self._audit_ids: tuple[int | None, int | None] = (None, None)
+        self._consumed_ids: list[str] = []
         self._pending_events: list[tuple[str | None, AdminEvent, dict[str, Any]]] = []
 
     # ------------------------------------------------------------------------------------------ lifecycle
@@ -137,6 +143,7 @@ class AdminHost:
         self.admin_dir.mkdir(parents=True, exist_ok=True)
         self.inbox.directory.mkdir(parents=True, exist_ok=True)
         self._slots, self._state_load = load_state(self.state_path)
+        self._consumed_ids = list((self._slots.get(HOST_SLOT) or {}).get("consumed_request_ids") or [])
         for task in self.config.tasks:
             self._previous_outputs[task.kind.value] = self._read_output(task)
         self.audit.write(AdminEvent.ADMIN_STARTED, now=now, tasks=[t.kind.value for t in self.config.tasks],
@@ -188,7 +195,9 @@ class AdminHost:
                               valid_for_s=self.config.clock.valid_for_s, broker_label=self.identity.broker_label,
                               expected_login=self.identity.login, expected_server=self.identity.server,
                               first_cycle=self._first_cycle, state_load=str(self._state_load),
-                              previous_output=self._previous_outputs.get(kind) if self._first_cycle else None)
+                              # Until the task has a slot it may still be judging lost history, even if its first
+                              # cycle failed: keep telling it what output it found at start.
+                              previous_output=self._previous_outputs.get(kind) if kind not in self._slots else None)
             try:
                 result = task.on_cycle(ctx)
             except Exception as exc:
@@ -248,6 +257,11 @@ class AdminHost:
         consumed: list[PendingRequest] = []
         for item in self.inbox.pending():
             req = item.request
+            if req is not None and req.request_id in self._consumed_ids:
+                # Already applied in an earlier cycle; only its move to done\ failed. Retry the move, never the request.
+                self._finish_request(item, RequestOutcome.REJECTED, "duplicate: this request was already consumed", now,
+                                     req.task, alert=False)
+                continue
             if req is None:
                 self._finish_request(item, RequestOutcome.REJECTED, f"malformed request: {item.error}", now, None)
                 continue
@@ -278,12 +292,16 @@ class AdminHost:
             self._finish_request(item, outcome, why, now, req.task)
 
     def _finish_request(self, item: PendingRequest, outcome: RequestOutcome, why: str, now: datetime,
-                        task: str | None) -> None:
+                        task: str | None, alert: bool = True) -> None:
+        req = item.request
+        if req is not None and req.request_id not in self._consumed_ids:
+            self._consumed_ids = (self._consumed_ids + [req.request_id])[-MAX_CONSUMED_IDS:]
         try:
             self.inbox.complete(item, outcome, why, now)
         except OSError:
             logger.exception("could not move request %s to done", item.path.name)
-        req = item.request
+        if not alert:
+            return
         event = AdminEvent.REQUEST_APPLIED if outcome is RequestOutcome.APPLIED else AdminEvent.REQUEST_REJECTED
         self._pending_events.append((task, event, {"request": item.raw, "outcome": str(outcome), "reason": why}))
         who = f"{req.operator}: {req.kind}" if req is not None else item.path.name
@@ -293,6 +311,7 @@ class AdminHost:
     def _persist(self, now: datetime, results: dict[str, TaskResult]) -> None:
         """State first, then each task's output (spec §7.1 step 5). A failed output write keeps the old file, which
         ages toward stale: for the directive that falls back to NO_ENTRY_OPS at the readers, never to trade freely."""
+        self._slots[HOST_SLOT] = {"consumed_request_ids": list(self._consumed_ids)}
         try:
             save_state(self.state_path, self._slots, now)
         except OSError as exc:

@@ -124,3 +124,28 @@ def test_a_failed_forced_close_does_not_raise_or_spam_trade_failed(mt5_env):
         s.enforce_account_directive(datetime(2026, 9, 24, 13, 0))
     s.notifier.on_trade_failed.assert_not_called()
     assert s.notifier.on_account_event.call_count == 1                  # the failure, alerted once this episode
+
+
+def test_an_unanswered_terminal_query_is_a_failed_forced_close_not_a_success(mt5_env):
+    """R5: close_position raises ValueError when positions_get returns None (IPC failure), not only when it is gone."""
+    publish(mt5_env.live, AccountDirective.NO_OPS)
+    mt5_env.get_positions.return_value = [{"ticket": 21, "type": 0, "volume": 0.1, "price_open": 1.1, "profit": 0.0}]
+    mt5_env.close_position.side_effect = ValueError("Position 21 not found")
+    mt5_env.mt5.positions_get.return_value = None                  # the terminal did not answer
+    s = strategy()
+    s.notifier = Mock()
+    s.enforce_account_directive(datetime(2026, 9, 24, 13, 0))
+    assert not [o for o in ops(s) if o.op is GuardedOp.CLOSE_LONG]  # no false "forced" record
+    titles = [c.args[0] for c in s.notifier.on_account_event.call_args_list]
+    assert "FORCED close_long FAILED" in titles
+    mt5_env.mt5.positions_get.return_value = ()                    # answered: really gone
+    s.enforce_account_directive(datetime(2026, 9, 24, 13, 1))
+    assert [o.op for o in ops(s)] == [GuardedOp.CLOSE_LONG]
+
+
+def test_a_sizing_error_is_a_refused_entry_not_a_crash(mt5_env):
+    publish(mt5_env.live, AccountDirective.ALL_OPS)
+    s = strategy()
+    s.calculate_lot_size = Mock(side_effect=NotImplementedError("risk sizing not implemented"))
+    assert s.open_position("buy", 1.1) is False
+    mt5_env.open_position.assert_not_called()

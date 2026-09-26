@@ -125,7 +125,7 @@ def test_cycle_publishes_every_task_output_and_state(tmp_path):
     assert directive_of(host)["directive"] == "ALL_OPS"
     assert json.loads((host.admin_dir / "pending_order_cleanup.json").read_text())["cancelled_this_cycle"][0]["ticket"] == 1
     state = json.loads((host.admin_dir / "state.json").read_text())
-    assert set(state["tasks"]) == {"prop_guard", "pending_order_cleanup"}
+    assert set(state["tasks"]) == {"prop_guard", "pending_order_cleanup", "_host"}
     events = [e["event"] for e in audit_events(host)]
     assert events[0] == "admin_started" and "book_action" in events and events[-1] == "cycle"
     assert any(title == "BOOK ACTIONS: pending_order_cleanup" for title in notifier.titles())

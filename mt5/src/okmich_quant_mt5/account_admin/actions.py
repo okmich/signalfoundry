@@ -29,20 +29,32 @@ class Mt5BrokerActions:
         retcode = int(getattr(result, "retcode", -1))
         return retcode in self._done, f"{getattr(result, 'comment', '')} (retcode {retcode})", retcode
 
+    def _gone(self, rows) -> bool | None:
+        """An answered empty query is 'gone'; None is 'the terminal did not answer' (never read as gone)."""
+        if rows is None:
+            return None
+        return len(rows) == 0
+
     def cancel_pending(self, order: PendingOrder) -> BookActionResult:
-        if not self.mt5.orders_get(ticket=order.ticket):
+        gone = self._gone(self.mt5.orders_get(ticket=order.ticket))
+        if gone is None:
+            return BookActionResult(BookActionOutcome.FAILED, f"orders_get failed: {self.mt5.last_error()}")
+        if gone:
             return BookActionResult(BookActionOutcome.SKIPPED_FILLED, "no longer on the book")
         ok, detail, retcode = self._send({"action": int(getattr(self.mt5, "TRADE_ACTION_REMOVE", 8)),
                                           "order": int(order.ticket), "comment": ADMIN_COMMENT})
         if ok:
             return BookActionResult(BookActionOutcome.DONE, retcode=retcode)
-        if not self.mt5.orders_get(ticket=order.ticket):   # it filled or was removed while we asked
+        if self._gone(self.mt5.orders_get(ticket=order.ticket)):   # it filled or was removed while we asked
             return BookActionResult(BookActionOutcome.SKIPPED_FILLED, detail, retcode)
         return BookActionResult(BookActionOutcome.FAILED, detail, retcode)
 
     def close_position(self, position: Position) -> BookActionResult:
         live = self.mt5.positions_get(ticket=position.ticket)
-        if not live:
+        gone = self._gone(live)
+        if gone is None:
+            return BookActionResult(BookActionOutcome.FAILED, f"positions_get failed: {self.mt5.last_error()}")
+        if gone:
             return BookActionResult(BookActionOutcome.SKIPPED_CLOSED, "no longer on the book")
         live = live[0]
         tick = self.mt5.symbol_info_tick(position.symbol)
@@ -60,6 +72,6 @@ class Mt5BrokerActions:
         ok, detail, retcode = self._send(request)
         if ok:
             return BookActionResult(BookActionOutcome.DONE, retcode=retcode)
-        if not self.mt5.positions_get(ticket=position.ticket):
+        if self._gone(self.mt5.positions_get(ticket=position.ticket)):
             return BookActionResult(BookActionOutcome.SKIPPED_CLOSED, detail, retcode)
         return BookActionResult(BookActionOutcome.FAILED, detail, retcode)

@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SHARED_READ_S = 1.0
+IDENTITY_ATTEMPTS = 3
+IDENTITY_RETRY_S = 0.05
 FALLBACK_SOURCES = frozenset({DirectiveSource.STALE, DirectiveSource.INVALID, DirectiveSource.WRONG_ACCOUNT})
 _UNSET = object()
 
@@ -84,11 +86,16 @@ class _ProcessReader:
             # Ungoverned: one failed lookup, no terminal query.
             return DirectiveReading(AccountDirective.ALL_OPS, DirectiveSource.ABSENT, path=directive_path(base, account),
                                     detail="no directive file: this account is not governed")
-        try:
-            ident = identity()
-        except Exception:
-            logger.exception("directive guard: terminal identity query failed")
-            ident = None
+        ident = None
+        for attempt in range(IDENTITY_ATTEMPTS):   # one IPC hiccup must not read as a wrong account
+            try:
+                ident = identity()
+            except Exception:
+                logger.warning("directive guard: terminal identity query failed (attempt %d)", attempt + 1, exc_info=True)
+                ident = None
+            if ident:
+                break
+            time.sleep(IDENTITY_RETRY_S)
         login, server = ident if ident else (None, None)
         return read_directive(account=account, login=login, server=server, now=now)
 
@@ -254,6 +261,10 @@ class DirectiveGuard:
             return
         r = self.current()
         if r.directive is AccountDirective.ALL_OPS:
+            return
+        if not r.identity_known:
+            # Entries stay suppressed, but an unverified terminal is no ground for cancelling or closing anything.
+            logger.warning("%s: sweep skipped: the terminal could not report its account (%s)", self._label(), r.detail)
             return
         s = self.strategy
         try:

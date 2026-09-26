@@ -140,6 +140,9 @@ class DirectiveReading:
     file: DirectiveFile | None = None
     path: Path | None = None
     detail: str = ""
+    #: False when the reader's own terminal could not say which account it is on. The reading then suppresses
+    #: entries, but nothing irreversible may follow from it: an IPC hiccup is not evidence of a wrong account.
+    identity_known: bool = True
 
 
 def _resolve_live_base(live_base: str | Path | None) -> Path | None:
@@ -157,7 +160,8 @@ def _judge(file: DirectiveFile, path: Path, *, login: int | None, server: str | 
                                 f"heartbeat {iso_z(file.heartbeat_utc)} is in the future (reader clock {iso_z(now)})")
     if login is None or server is None:
         return DirectiveReading(fallback, DirectiveSource.WRONG_ACCOUNT, file, path,
-                                "the live terminal did not report its login/server; the directive's account cannot be verified")
+                                "the live terminal did not report its login/server; the directive's account cannot be verified",
+                                identity_known=False)
     if int(file.account.login) != int(login) or str(file.account.server) != str(server):
         return DirectiveReading(fallback, DirectiveSource.WRONG_ACCOUNT, file, path,
                                 f"directive is for {file.account.login}@{file.account.server}, terminal is on {login}@{server}")
@@ -221,7 +225,8 @@ def _read_by_terminal(base: Path, *, login: int | None, server: str | None, now:
     """
     if login is None or server is None:
         return DirectiveReading(AccountDirective.NO_ENTRY_OPS, DirectiveSource.WRONG_ACCOUNT,
-                                detail="outside an account folder and the terminal did not report its login/server")
+                                detail="outside an account folder and the terminal did not report its login/server",
+                                identity_known=False)
     matches: list[tuple[Path, DirectiveFile]] = []
     unreadable: list[str] = []
     for path in sorted(base.glob(f"*/{ADMIN_FOLDER}/{DIRECTIVE_FILE}")):

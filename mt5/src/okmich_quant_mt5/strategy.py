@@ -317,8 +317,12 @@ class BaseMt5Strategy(BaseStrategy):
         try:
             cancel_pending_order(int(ticket))
             return True, "cancelled"
-        except ValueError:
-            return True, "already gone"   # filled or removed meanwhile: nothing left to cancel
+        except ValueError as e:
+            # cancel_pending_order raises ValueError for "not found", but also when the query itself failed (None).
+            # Only an answered, empty query means the order is gone; an unanswered one is a failure to retry.
+            if mt5.orders_get(ticket=int(ticket)) == ():
+                return True, "already gone"
+            return False, f"could not confirm the order is gone: {e}"
         except Exception as e:
             return False, str(e)
 
@@ -336,9 +340,11 @@ class BaseMt5Strategy(BaseStrategy):
         try:
             close_position(ticket, **{"filling_mode": self.symbol_info_dict["filling_mode"]})
             return True, "closed"
-        except ValueError:
+        except ValueError as e:
+            if mt5.positions_get(ticket=int(ticket)) == ():   # answered and empty: it is closed already
+                return True, "already closed"
             self.clear_close_intent(ticket)
-            return True, "already closed"
+            return False, f"could not confirm the position is closed: {e}"
         except Exception as e:
             self.clear_close_intent(ticket)
             return False, str(e)
@@ -353,15 +359,16 @@ class BaseMt5Strategy(BaseStrategy):
             True if position opened successfully, False otherwise (including an entry the account directive refused)
         """
         op = GuardedOp.OPEN_LONG if _is_long(direction) else GuardedOp.OPEN_SHORT
-        if not self.guard_entry(op, detail=f"{direction} {self.calculate_lot_size()} lots @ {price}",
-                                signal_bar_utc=self._guard_signal_bar()):
-            return False
         custom_dict = {"filling_mode": self.symbol_info_dict["filling_mode"]}
         try:
+            volume = self.calculate_lot_size()   # once: a sizing hook may be stateful or query the terminal
+            if not self.guard_entry(op, detail=f"{direction} {volume} lots @ {price}",
+                                    signal_bar_utc=self._guard_signal_bar()):
+                return False
             open_position(
                 symbol=self.strategy_config.symbol,
                 order_type=direction,
-                volume=self.calculate_lot_size(),
+                volume=volume,
                 price=price,
                 magic=self.strategy_config.magic,
                 **custom_dict,

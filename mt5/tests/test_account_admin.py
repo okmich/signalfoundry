@@ -242,3 +242,14 @@ class _InstantClock:
 
     def next_start(self, previous, now):
         return now
+
+
+def test_an_unanswered_query_is_a_failed_cancel_not_a_fill():
+    """R5: orders_get returning None (IPC failure) must not read as 'filled or removed'."""
+    mt5 = FakeMt5()
+    src, actions = Mt5AccountSource(mt5, NY7), Mt5BrokerActions(mt5)
+    mt5.orders = [_order(1, datetime(2026, 9, 24, 12, 0, tzinfo=UTC))]
+    (o1,) = src.pending_orders()
+    mt5.orders_get = lambda ticket=None: None
+    result = actions.cancel_pending(o1)
+    assert result.outcome is BookActionOutcome.FAILED and mt5.sent == []

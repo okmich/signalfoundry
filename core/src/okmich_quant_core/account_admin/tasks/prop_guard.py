@@ -50,7 +50,7 @@ def _fresh_slot() -> dict[str, Any]:
             "high_water": {"equity": None, "equity_utc": None, "balance": None}, "latches": {}, "override": None,
             "sequence": 0, "episode": 0, "directive": None, "since_utc": None, "last_cycle_utc": None,
             "deal_cursor_utc": None, "recent_deals": [], "reported": {"obedience": [], "orphans": []},
-            "episode_orphans": 0, "degraded": False, "currency": None, "last_eval": None}
+            "episode_orphans": 0, "degraded": False, "currency": None, "last_eval": None, "last_holds": {}}
 
 
 def _net_after(deals: list[Deal], instant: datetime) -> float:
@@ -112,12 +112,18 @@ class PropGuardTask(AdminTask):
             levels = compute_levels(self.policy, float(slot["trading_day"]["base"]), float(slot["high_water"]["balance"]),
                                     float(slot["high_water"]["equity"]))
             holds = self._evaluate_levels(info.balance, info.equity, levels)
+            slot["last_holds"] = dict(holds)
             self._trip_latches(slot, result, holds, now, info.balance, info.equity)
             self._check_obedience(ctx, slot, result, new_deals, prev_directive, prev_since)
             slot["last_eval"] = {"levels": levels.to_dict(),
                                  "metrics": {"balance": round(info.balance, 2), "equity": round(info.equity, 2),
                                              "day_pnl": round(info.equity - levels.daily_base, 2),
                                              "total_pnl": round(info.equity - self.policy.initial_capital, 2)}}
+        else:
+            # The account cannot be read: what held at the last readable cycle is presumed to hold still. A breach
+            # configured without a latch must not loosen because the Admin went blind (spec §7.1: "stays stricter").
+            holds = {k: f"{v} (as of the last readable cycle)" for k, v in (slot.get("last_holds") or {}).items()
+                     if Condition(k) in self.policy.conditions}
         self._expire_override(slot, result, now)
         causes = self._causes(ctx, slot, holds, now)
         directive = max((d for _, d, _ in causes), key=lambda d: d.rank, default=AccountDirective.ALL_OPS)
@@ -203,8 +209,13 @@ class PropGuardTask(AdminTask):
         now = ctx.now
         t_d = day_boundary(self.policy, now)
         current = slot["trading_day"]
-        if current is not None and parse_utc(current["start_utc"]) == t_d:
-            return
+        if current is not None:
+            start = parse_utc(current["start_utc"])
+            # A real boundary is ~24 h after the last (23/25 h across DST). A policy edit that moves day_tz or
+            # day_start_hour shifts T_d by less than 12 h: it must neither re-base the day nor clear today's latches
+            # (spec §8.1), so the new boundary applies from the next genuine one.
+            if t_d <= start or (t_d - start) < timedelta(hours=12):
+                return
         last = parse_utc(slot["last_cycle_utc"]) if slot["last_cycle_utc"] else None
         window = ctx.valid_for_s
         observed = last is not None and last < t_d and (t_d - last).total_seconds() <= window \
@@ -412,6 +423,11 @@ class PropGuardTask(AdminTask):
             return RequestOutcome.REJECTED, f"unknown request kind {request.kind!r}"
         fields = request.fields
         if kind is RequestKind.RESET_LATCH:
+            if ctx.degraded:
+                # The condition cannot be re-checked while the account is unreadable; clearing the latch now would hold
+                # a breached limit open (spec §6.4). The operator retries once the Admin reads the account again.
+                return RequestOutcome.REJECTED, "the account is unreadable this cycle (degraded): a reset cannot be " \
+                                                "re-checked against it; retry when the Admin is healthy"
             target = str(fields.get("target") or "").strip()
             if not target:
                 return RequestOutcome.REJECTED, "reset_latch needs a target: a condition id or 'all'"
