@@ -22,6 +22,7 @@ from typing import Callable
 
 from ..account import LIVE_BASE_ENV_VAR, deployment_account
 from ..broker_session import BrokerSession
+from ..process_control import reenable_ctrl_c
 from ..logging import BarOutcome, JsonlEventLogger, LogicalSystemIdentity, RunnerIdentity, RunnerStatus, SystemRecordFactory
 from ..logging.identity import LogRootConfigError, _resolve_log_base, runner_log_dir
 from .clock import AdminClock
@@ -116,6 +117,7 @@ class AdminRunLoop:
         self._stop_requested = True
 
     def _install_signal_handlers(self) -> None:
+        reenable_ctrl_c()   # a parent that ignores Ctrl+C must not disable the Supervisor's graceful stop
         for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             sig = getattr(signal, name, None)
             if sig is None:

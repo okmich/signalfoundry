@@ -12,6 +12,7 @@ from .config import RunLoopConfig
 from .logging import RunnerIdentity, RunnerStatus
 from .logging.identity import runner_strategy_root
 from .multi_trader import MultiTrader
+from .process_control import reenable_ctrl_c
 from .trader import Trader
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,7 @@ class RunLoop:
         shutdown itself, which is unsafe from a signal handler and could deadlock if it fired mid-write.
         atexit covers a SystemExit / fatal escape; ``_shutdown`` is idempotent so multiple paths are safe.
         """
+        reenable_ctrl_c()   # a parent that ignores Ctrl+C must not disable the Supervisor's graceful stop (§9)
         atexit.register(self._shutdown, "atexit")
         try:
             signal.signal(signal.SIGTERM, self._request_stop)
