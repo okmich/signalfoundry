@@ -91,6 +91,15 @@ def _make_notifier(strategy_name="TestStrategy", broker=""):
 
 
 class TestTelegramNotifier:
+    def test_on_account_event_is_escaped_and_marked_by_level(self):
+        notifier, sent = _make_notifier(strategy_name="_account_admin")
+        notifier.on_account_event("DIRECTIVE CHANGED [icmarkets.demo]", "ALL_OPS -> NO_OPS; equity < floor & falling",
+                                  "critical")
+        notifier._dispatcher.flush()
+        assert len(sent) == 1
+        assert "🚨" in sent[0] and "DIRECTIVE CHANGED" in sent[0] and "[_account_admin]" in sent[0]
+        assert "&lt; floor &amp; falling" in sent[0]
+
     def test_on_trade_opened(self):
         notifier, sent = _make_notifier()
         notifier.on_trade_opened("EURUSD", "BUY", 0.1, 1.1234, 1.1200, 1.1300, 1001, 555)

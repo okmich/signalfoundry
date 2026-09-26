@@ -104,6 +104,13 @@ class TelegramNotifier(BaseNotifier):
         msg = f"<b>⚠️ ERROR</b>{self._tags(strategy_name)}\n{html.escape(str(error_message))}"
         self._dispatcher.dispatch(msg)
 
+    _ACCOUNT_EVENT_MARKS = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+
+    def on_account_event(self, title: str, message: str, level: str = "info"):
+        mark = self._ACCOUNT_EVENT_MARKS.get(str(level), "ℹ️")
+        msg = f"<b>{mark} {html.escape(str(title))}</b>{self._tags(self._broker)}\n{html.escape(str(message))}"
+        self._dispatcher.dispatch(msg)
+
     def on_circuit_breaker_tripped(self, strategy_name: str, consecutive_errors: int):
         msg = f"<b>🚫 CIRCUIT BREAKER</b>{self._tags(strategy_name)} tripped after {consecutive_errors} errors"
         self._dispatcher.dispatch(msg)
