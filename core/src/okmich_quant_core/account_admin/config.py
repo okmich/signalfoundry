@@ -19,7 +19,9 @@ from .enums import AdminTaskKind
 from .tasks.base import TASK_REGISTRY, AdminTask
 
 CONFIG_KIND = "account_admin"
-_HOST_KEYS = frozenset({"kind", "runner", "clock", "requests", "tasks", "name"})
+#: ``broker`` is the broker library's own section (e.g. the MT5 server clock); core passes it through untouched and the
+#: broker library validates it in stage 1.
+_HOST_KEYS = frozenset({"kind", "runner", "clock", "requests", "tasks", "name", "broker"})
 
 
 class AdminConfigError(ValueError):
