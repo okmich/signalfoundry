@@ -7,7 +7,9 @@ from typing import Any, Optional, final
 
 from .closed_trade import ClosedTrade, CloseReason
 from .config import StrategyConfig
-from .logging import BaseEventLogger, BarOutcome, JsonlEventLogger, LogBinding, LogicalSystemIdentity, RunnerIdentity
+from .directive_guard import DirectiveGuard, GuardPending, GuardPosition
+from .logging import (BaseEventLogger, BarOutcome, GuardedOp, JsonlEventLogger, LogBinding, LogicalSystemIdentity,
+                      RunnerIdentity)
 from .notification.base import BaseNotifier
 from .signal import BaseSignal
 
@@ -20,9 +22,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-#: Names a subclass MUST NOT override — the inference-log floor lives behind them (§5.1), and the
-#: closed-position observation seam behind ``sync_positions``.
-_SEALED_NAMES = frozenset({"run", "_emit_bar_record", "bind_runner_identity", "sync_positions"})
+#: Names a subclass MUST NOT override — the inference-log floor lives behind them (§5.1), the
+#: closed-position observation seam behind ``sync_positions``, and the account-directive guard behind
+#: ``guard_entry`` / ``enforce_account_directive`` (ACCOUNT_ADMIN_SPEC §10.1: built in, not opt-in).
+_SEALED_NAMES = frozenset({"run", "_emit_bar_record", "bind_runner_identity", "sync_positions", "guard_entry",
+                           "enforce_account_directive"})
 
 
 def _extract_tier1(ctx) -> dict:
@@ -107,6 +111,7 @@ class BaseStrategy(ABC):
         logical = LogicalSystemIdentity(strategy=config.name, symbol=config.symbol, timeframe_minutes=tf_min)
         logger_impl = inference_logger if inference_logger is not None else JsonlEventLogger(logical, log_base=log_base)
         self._log_binding = LogBinding(logical, logger_impl, order_tag=getattr(config, "magic", None))
+        self._directive_guard = DirectiveGuard(self)
 
     @staticmethod
     def _coerce_timeframe_minutes(timeframe) -> int:
@@ -122,6 +127,51 @@ class BaseStrategy(ABC):
             logger.warning("BaseStrategy: could not coerce timeframe %r to minutes; using 0. "
                            "A broker base class should pass timeframe_minutes explicitly.", timeframe)
             return 0
+
+    # ------------------------------------------------------------------ account-directive guard (ACCOUNT_ADMIN_SPEC §10)
+    #: A broker base class that implements the ``_guard_*`` hooks sets this. Without it the guard is inert, and the
+    #: broker must not run a system on a governed account (spec §10.1).
+    _GUARD_SUPPORTED = False
+
+    @final
+    def guard_entry(self, op: GuardedOp, *, detail: str, signal_bar_utc: Any = None) -> bool:
+        """The entry choke point: whether an opening or pending order may leave now. A broker base's order methods call
+        this before sending; a refused entry is recorded, logged and alerted by the guard. Never raises."""
+        try:
+            return self._directive_guard.allow_entry(op, detail=detail, signal_bar_utc=signal_bar_utc)
+        except Exception:
+            logger.exception("%s: directive guard failed on entry; refusing the entry", self.strategy_config.name)
+            return False
+
+    @final
+    def enforce_account_directive(self, run_dt: datetime) -> None:
+        """The forced sweep, called by the dispatch layer for EVERY strategy, circuit-broken ones included, before the
+        breaker check (spec §10.1): cancel own pending orders under a restrictive directive, close own positions under
+        NO_OPS. Never raises: closing must not depend on the strategy being healthy."""
+        try:
+            self._directive_guard.sweep()
+        except Exception:
+            logger.exception("%s: directive guard sweep failed", self.strategy_config.name)
+
+    def _guard_terminal_identity(self) -> tuple[int, str] | None:
+        """The live terminal's (login, server), or ``None`` when it cannot say. Broker hook."""
+        return None
+
+    def _guard_own_pending(self) -> list[GuardPending]:
+        """This strategy's own resting pending orders. Broker hook."""
+        return []
+
+    def _guard_cancel_pending(self, ticket: int) -> tuple[bool, str]:
+        """Cancel one own pending order: (done, why). Broker hook."""
+        return False, "not supported by this broker"
+
+    def _guard_own_positions(self) -> list[GuardPosition]:
+        """This strategy's own open positions. Broker hook."""
+        return []
+
+    def _guard_close_position(self, ticket: int, directive: str) -> tuple[bool, str]:
+        """Close one own position in full because of ``directive``: (done, why). Broker hook."""
+        return False, "not supported by this broker"
 
     @property
     def log_binding(self) -> LogBinding:

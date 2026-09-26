@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "okmich_quant_core/logging/schema/account_directive_applied.json",
+  "title": "LOGGING_CONTRACT account_directive_applied record (v2.1.0)",
+  "description": "The directive a system applies changed (LOGGING_CONTRACT §7.5, ACCOUNT_ADMIN_SPEC §10.3).",
+  "type": "object",
+  "properties": {
+    "log_schema_version": {"type": "string"},
+    "event": {"const": "account_directive_applied"},
+    "wall_clock_utc": {"type": "string", "format": "date-time"},
+    "runner_id": {"type": "string"},
+    "runner_start_token": {"type": "string"},
+    "logical_system_id": {"type": "string"},
+    "strategy": {"type": "string"},
+    "symbol": {"type": "string"},
+    "timeframe": {"type": "integer"},
+    "broker": {"type": "string"},
+    "account_id": {"type": "string"},
+    "broker_session_id": {"type": ["string", "null"]},
+    "order_tag": {"type": ["string", "integer", "null"]},
+    "directive": {"enum": ["ALL_OPS", "NO_ENTRY_OPS", "NO_OPS"]},
+    "directive_source": {"enum": ["absent", "file", "stale", "invalid", "wrong_account"]},
+    "directive_sequence": {"type": ["integer", "null"]},
+    "directive_episode": {"type": ["integer", "null"]},
+    "directive_reason": {"type": ["string", "null"]},
+    "previous_directive": {"enum": ["ALL_OPS", "NO_ENTRY_OPS", "NO_OPS", null]},
+    "previous_source": {"enum": ["absent", "file", "stale", "invalid", "wrong_account", null]}
+  },
+  "required": [
+    "log_schema_version", "event", "wall_clock_utc", "runner_id", "runner_start_token",
+    "logical_system_id", "strategy", "symbol", "timeframe", "broker", "account_id",
+    "directive", "directive_source"
+  ],
+  "not": {"anyOf": [{"required": ["volume"]}, {"required": ["price"]}, {"required": ["profit"]}, {"required": ["lots"]}]},
+  "additionalProperties": true
+}

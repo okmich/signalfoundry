@@ -17,7 +17,10 @@ import pytest
 
 from okmich_quant_core.base_strategy import BaseStrategy
 from okmich_quant_core.config import RunLoopConfig, StrategyConfig
-from okmich_quant_core.logging import BarOutcome, BaseEventLogger, LogEventType, RunnerIdentity, load_schema
+from okmich_quant_core.account_admin import (AccountDirective, DirectiveAccount, DirectiveFile, directive_path,
+                                             write_directive)
+from okmich_quant_core.directive_guard import PROCESS_READER, GuardPosition
+from okmich_quant_core.logging import BarOutcome, BaseEventLogger, GuardedOp, LogEventType, RunnerIdentity, load_schema
 from okmich_quant_core.multi_trader import MultiTrader
 from okmich_quant_core.run_loop import RunLoop
 from okmich_quant_core.signal import BaseSignal
@@ -86,8 +89,31 @@ def _assert_valid(record):
     jsonschema.validate(record.to_dict(), load_schema(record.envelope.event), format_checker=jsonschema.FormatChecker())
 
 
-def test_all_emitted_records_validate_against_schema(tmp_path):
-    s = _Strat(signal=_CtxSignal({"direction": 1, "confidence": 0.8, "features": {"f": 0.1},
+class _GuardedStrat(_Strat):
+    """A strategy on a broker that implements the directive-guard hooks, holding one position."""
+
+    _GUARD_SUPPORTED = True
+
+    def _guard_terminal_identity(self):
+        return 987654, "Deriv-Server-01"
+
+    def _guard_own_positions(self):
+        return [GuardPosition(ticket=5, long=True, detail="0.10 lots @ 1.1000, P&L -12.30")]
+
+    def _guard_close_position(self, ticket, directive):
+        return True, "closed"
+
+
+def test_all_emitted_records_validate_against_schema(tmp_path, monkeypatch):
+    # A NO_OPS directive for this terminal, found by terminal identity (the test process is in no account folder).
+    live = tmp_path / "live"
+    now = datetime.now(timezone.utc)
+    write_directive(directive_path(live, "deriv.demo"), DirectiveFile(
+        DirectiveAccount("deriv", "Deriv-Server-01", 987654, "USD"), AccountDirective.NO_OPS, "daily_loss: test",
+        ("daily_loss",), now, now, 240, 7, 3))
+    monkeypatch.setenv("OKMICH_QUANT_LIVE_BASE", str(live))
+    PROCESS_READER.reset()
+    s = _GuardedStrat(signal=_CtxSignal({"direction": 1, "confidence": 0.8, "features": {"f": 0.1},
                                    "extras": {"probs": [0.2, 0.8], "loglik": -2.0}}))
     rl = RunLoop(RunLoopConfig(), MultiTrader([s], max_consecutive_errors=2),
                  broker_session=_FakeSession(), runner_name="conf_sys", log_base=tmp_path)
@@ -101,6 +127,8 @@ def test_all_emitted_records_validate_against_schema(tmp_path):
     rl.trader.run(_dt())          # bar error (consecutive 2) -> circuit_breaker_tripped
     rl.trader.run(_dt())          # skipped_disabled bar
     rl.trader.enable_all()        # strategy_reenabled
+    assert s.guard_entry(GuardedOp.OPEN_LONG, detail="0.10 lots @ 1.1000") is False   # applied + op (suppressed)
+    rl.trader.check_positions(_dt())                                                   # op (forced close)
     rl._shutdown("operator")      # writes stopped status
 
     seen_events = set()
@@ -111,7 +139,7 @@ def test_all_emitted_records_validate_against_schema(tmp_path):
         if record.envelope.event is LogEventType.BAR:
             bar_outcomes.add(record.outcome)
 
-    # All three inference-log event types exercised + schema-validated end-to-end.
+    # Every inference-log event type exercised + schema-validated end-to-end (v2.1.0: the guard's two included).
     assert seen_events == set(LogEventType)
     # ...and every BarOutcome was actually emitted (the harness drives ok, error, AND the dispatch
     # layer's skipped_disabled bar — the schema's `event: bar` const doesn't prove the outcome enum
