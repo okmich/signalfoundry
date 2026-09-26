@@ -91,7 +91,7 @@ def test_all_emitted_records_validate_against_schema(tmp_path):
                                    "extras": {"probs": [0.2, 0.8], "loglik": -2.0}}))
     rl = RunLoop(RunLoopConfig(), MultiTrader([s], max_consecutive_errors=2),
                  broker_session=_FakeSession(), runner_name="conf_sys", log_base=tmp_path)
-    status_path = tmp_path / "test.demo" / "conf-multi" / "status.json"
+    status_path = tmp_path / "conf-multi" / "status.json"
 
     rl._startup()                 # writes running status
     jsonschema.validate(json.loads(status_path.read_text(encoding="utf-8")), load_schema("runner_status"), format_checker=jsonschema.FormatChecker())

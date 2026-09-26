@@ -13,4 +13,3 @@ import pytest
 @pytest.fixture(autouse=True)
 def _ops_log_base(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(tmp_path_factory.mktemp("quant_logs")))
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "test.demo")

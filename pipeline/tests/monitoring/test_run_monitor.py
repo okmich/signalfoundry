@@ -94,7 +94,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
     (artefact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     # 4. Inference log: write n_log contract v1.0.0 ``bar`` records via the real JsonlEventLogger,
-    #    which lays them out at <log_base>/<account>/<strategy>/<symbol>/<timeframe>/inference/inference_<date>.jsonl.
+    #    which lays them out at <log_base>/<strategy>/<symbol>/<timeframe>/inference/inference_<date>.jsonl.
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     strategy_name = f"{symbol}_fl3_hmm"
@@ -123,7 +123,7 @@ def _build_test_fixture(tmp_path: Path, symbol: str = "TESTSYM",
         symbols=(symbol,),
         artifact_base_dir=tmp_path / "artefacts",
         variant_with_lag=variant,
-        inference_log_base_dir=log_dir / "test.demo",  # the monitor reads one account's log tree
+        inference_log_base_dir=log_dir,
         strategy_name_template="{symbol}_fl3_hmm",
         raw_data_dir=raw_dir,
         output_dir=output_dir,

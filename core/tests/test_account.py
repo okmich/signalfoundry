@@ -1,160 +1,105 @@
-"""Tests for the account level (okmich_quant_core.account + the <log_base>/<account> resolution).
-
-The account comes from OKMICH_QUANT_ACCOUNT only (conftest sets it to test.demo), so every channel of one
-runner resolves the same folder.
-"""
+"""Tests for the account level: the log tree mirrors the live account folder a system is deployed in
+(okmich_quant_core.account.deployment_account + the <log_base>[/<account>] resolution)."""
 
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
-from okmich_quant_core import AccountConfigError, load_account_env, resolve_account, text_log_dir
-from okmich_quant_core.account import account_env_path, validate_account
+from okmich_quant_core import deployment_account, text_log_dir
+from okmich_quant_core.account import is_account
 from okmich_quant_core.logging import JsonlEventLogger, LogicalSystemIdentity, RunnerIdentity, RunnerStatus, runner_log_dir
 
 
+@pytest.mark.parametrize("value", ["fxify.demo", "deriv.live", "ib.paper", "ic_markets.demo"])
+def test_is_account(value):
+    assert is_account(value)
+
+
+@pytest.mark.parametrize("value", ["fxify", "Fxify.demo", "fxify.demo.x", "ctlpb_raw-multi", "_account_admin", ".archive"])
+def test_is_not_account(value):
+    assert not is_account(value)
+
+
+def _script(tmp_path, *parts):
+    path = tmp_path.joinpath("live", *parts, "run.py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("parts, want", [
+    (("fxify.demo", "ctlpb_raw-multi"), "fxify.demo"),                 # a multi-trader in an account
+    (("icmarkets.demo", "s", "EURUSD", "5"), "icmarkets.demo"),        # a single-trader in an account
+    (("fxify.demo", "_account_admin"), "fxify.demo"),                  # the Account Admin
+    (("ctlpb_raw-multi",), None),                                      # flat, pre-account deployment
+])
+def test_deployment_account_from_the_script_location(tmp_path, parts, want):
+    assert deployment_account(script=_script(tmp_path, *parts), live_base=tmp_path / "live") == want
+
+
+def test_no_account_outside_the_live_tree_or_without_a_live_base(tmp_path):
+    script = tmp_path / "lab" / "systems" / "x" / "run.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("", encoding="utf-8")
+    assert deployment_account(script=script, live_base=tmp_path / "live") is None
+    assert deployment_account(script=_script(tmp_path, "fxify.demo", "x"), live_base="") is None
+
+
+def test_live_base_comparison_ignores_case_on_windows(tmp_path):
+    script = _script(tmp_path, "fxify.demo", "x")
+    base = tmp_path / "live"
+    if str(base).upper() == str(base):
+        pytest.skip("path has no letters to case-fold")
+    import os
+    if os.path.normcase("A") != os.path.normcase("a"):
+        pytest.skip("case-sensitive filesystem")
+    assert deployment_account(script=script, live_base=str(base).upper()) == "fxify.demo"
+
+
+def test_default_script_is_the_running_main(monkeypatch, tmp_path):
+    """Under pytest the main script is not in a live tree, so everything logs flat, as before."""
+    monkeypatch.setenv("OKMICH_QUANT_LIVE_BASE", str(tmp_path / "live"))
+    assert deployment_account() is None
+
+
+# --- the three channels follow the deployment -------------------------------------------------
+
 @pytest.fixture
-def logical():
-    return LogicalSystemIdentity(strategy="s", symbol="EURUSD", timeframe_minutes=5)
+def deployed(monkeypatch, tmp_path):
+    """Pretend the running main script is <tmp>/live/fxify.demo/s-multi/run.py."""
+    script = _script(tmp_path, "fxify.demo", "s-multi")
+    monkeypatch.setenv("OKMICH_QUANT_LIVE_BASE", str(tmp_path / "live"))
+    monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(tmp_path / "logs"))
+    monkeypatch.setattr("okmich_quant_core.account._main_script", lambda: script)
+    return tmp_path
 
 
-# --- the account ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("value", ["fxify.demo", "deriv.live", "ib.paper", "ic_markets.demo", " fxify.demo "])
-def test_validate_account_accepts_env_stems(value):
-    assert validate_account(value) == value.strip()
-
-
-@pytest.mark.parametrize("value", ["fxify", "Fxify.demo", "fxify.demo.x", "../x", "fxify/demo", ".demo", "fxify.", "a b.demo"])
-def test_validate_account_rejects_non_stems(value):
-    with pytest.raises(AccountConfigError):
-        validate_account(value)
-
-
-def test_resolve_account_reads_env(monkeypatch):
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "deriv.live")
-    assert resolve_account() == "deriv.live"
-
-
-@pytest.mark.parametrize("value", [None, "", "   ", "fxify"])
-def test_resolve_account_required_and_valid(monkeypatch, value):
-    if value is None:
-        monkeypatch.delenv("OKMICH_QUANT_ACCOUNT", raising=False)
-    else:
-        monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", value)
-    with pytest.raises(AccountConfigError):
-        resolve_account()
-
-
-# --- account env file ----------------------------------------------------------------------
-
-def test_account_env_path_uses_env_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("OKMICH_QUANT_ENV_DIR", str(tmp_path))
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "fxify.demo")
-    assert account_env_path() == tmp_path / ".env.fxify.demo"
-
-
-def test_account_env_path_requires_env_dir(monkeypatch):
-    monkeypatch.delenv("OKMICH_QUANT_ENV_DIR", raising=False)
-    with pytest.raises(AccountConfigError, match="OKMICH_QUANT_ENV_DIR"):
-        account_env_path()
-
-
-def test_load_account_env_loads_the_accounts_file(tmp_path, monkeypatch):
-    (tmp_path / ".env.fxify.demo").write_text("LOGIN_ID=123\n", encoding="utf-8")
-    (tmp_path / ".env.icmarkets.demo").write_text("LOGIN_ID=999\n", encoding="utf-8")
-    monkeypatch.setenv("OKMICH_QUANT_ENV_DIR", str(tmp_path))
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "fxify.demo")
-    monkeypatch.delenv("LOGIN_ID", raising=False)
-    assert load_account_env() == tmp_path / ".env.fxify.demo"
-    assert os.environ["LOGIN_ID"] == "123"
-
-
-def test_load_account_env_missing_file_raises(tmp_path, monkeypatch):
-    monkeypatch.setenv("OKMICH_QUANT_ENV_DIR", str(tmp_path))
-    with pytest.raises(AccountConfigError, match="not found"):
-        load_account_env()
-
-
-def test_load_account_env_explicit_file_overrides(tmp_path, monkeypatch):
-    override = tmp_path / "custom.env"
-    override.write_text("LOGIN_ID=555\n", encoding="utf-8")
-    monkeypatch.delenv("LOGIN_ID", raising=False)
-    assert load_account_env(env_file=override) == override
-    assert os.environ["LOGIN_ID"] == "555"
-
-
-def test_load_account_env_explicit_missing_file_raises(tmp_path):
-    with pytest.raises(AccountConfigError, match="not found"):
-        load_account_env(env_file=tmp_path / "nope.env")
-
-
-def test_load_account_env_requires_the_account_even_with_an_explicit_file(tmp_path, monkeypatch):
-    """--env-file without OKMICH_QUANT_ACCOUNT must fail here, before the runner logs in to the broker."""
-    override = tmp_path / "custom.env"
-    override.write_text("LOGIN_ID=555\n", encoding="utf-8")
-    monkeypatch.delenv("OKMICH_QUANT_ACCOUNT", raising=False)
-    with pytest.raises(AccountConfigError, match="OKMICH_QUANT_ACCOUNT"):
-        load_account_env(env_file=override)
-
-
-@pytest.mark.parametrize("line", ["OKMICH_QUANT_ACCOUNT=deriv.live", "OKMICH_QUANT_LOG_BASE=D:/elsewhere", "okmich_quant_env_dir=x"])
-def test_load_account_env_refuses_ops_keys(tmp_path, monkeypatch, line):
-    """A broker env file must not re-point the runner's account or log root after logging has started."""
-    (tmp_path / ".env.fxify.demo").write_text(f"LOGIN_ID=1\n{line}\n", encoding="utf-8")
-    monkeypatch.setenv("OKMICH_QUANT_ENV_DIR", str(tmp_path))
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "fxify.demo")
-    with pytest.raises(AccountConfigError, match="OKMICH_QUANT_"):
-        load_account_env()
-    assert os.environ["OKMICH_QUANT_ACCOUNT"] == "fxify.demo"
-
-
-# --- <log_base>/<account> resolution ------------------------------------------------------
-
-def test_explicit_log_base_still_gets_the_account(tmp_path, logical):
-    logger = JsonlEventLogger(logical, log_base=tmp_path)
-    try:
-        assert logger.directory == tmp_path / "test.demo" / "s" / "EURUSD" / "5" / "inference"
-    finally:
-        logger.close()
-
-
-def test_logger_without_account_fails_fast(tmp_path, logical, monkeypatch):
-    monkeypatch.delenv("OKMICH_QUANT_ACCOUNT", raising=False)
-    with pytest.raises(AccountConfigError):
-        JsonlEventLogger(logical, log_base=tmp_path)
-
-
-def test_all_channels_resolve_the_same_account_folder(tmp_path, logical, monkeypatch):
-    """Text log, inference JSONL and status.json of one runner land in the same <log_base>/<account>/<root>."""
-    monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(tmp_path))
-    monkeypatch.setenv("OKMICH_QUANT_ACCOUNT", "deriv.live")
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"strategy": {"name": "s", "symbol": "EURUSD", "timeframe": 5}}), encoding="utf-8")
+def test_all_channels_mirror_the_account_folder(deployed):
+    logical = LogicalSystemIdentity(strategy="s-multi", symbol="EURUSD", timeframe_minutes=5)
+    cfg = deployed / "live" / "fxify.demo" / "s-multi" / "config.json"
+    cfg.write_text(json.dumps({"strategies": [{"name": "s", "symbol": "EURUSD", "timeframe": 5}]}), encoding="utf-8")
     logger = JsonlEventLogger(logical)
     rs = RunnerStatus(RunnerIdentity.generate(name="r", broker="b", account_id="1"), [logical])
     try:
-        root = tmp_path / "deriv.live" / "s"
+        root = deployed / "logs" / "fxify.demo" / "s-multi"
         assert text_log_dir(cfg) == root
-        assert logger.directory.parent.parent.parent == root
-        assert rs.status_path.parent == root
+        assert logger.directory == root / "EURUSD" / "5" / "inference"
+        assert rs.status_path == root / "status.json"
+        assert runner_log_dir("s-multi") == root
         rs.mark_started()
-        assert json.loads(rs.status_path.read_text(encoding="utf-8"))["account"] == "deriv.live"
+        assert json.loads(rs.status_path.read_text(encoding="utf-8"))["account"] == "fxify.demo"
     finally:
         logger.close()
 
 
-def test_runner_log_dir(tmp_path):
-    assert runner_log_dir("ctlpb_raw-multi", log_base=tmp_path) == tmp_path / "test.demo" / "ctlpb_raw-multi"
-
-
-def test_text_log_dir_requires_account_when_log_base_set(tmp_path, monkeypatch):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"strategy": {"name": "s", "symbol": "EURUSD", "timeframe": 5}}), encoding="utf-8")
-    monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(tmp_path / "logs"))
-    monkeypatch.delenv("OKMICH_QUANT_ACCOUNT", raising=False)
-    with pytest.raises(AccountConfigError):
-        text_log_dir(cfg)
+def test_flat_deployment_logs_flat(monkeypatch, tmp_path):
+    script = _script(tmp_path, "s-multi")
+    monkeypatch.setenv("OKMICH_QUANT_LIVE_BASE", str(tmp_path / "live"))
+    monkeypatch.setattr("okmich_quant_core.account._main_script", lambda: script)
+    logical = LogicalSystemIdentity(strategy="s-multi", symbol="EURUSD", timeframe_minutes=5)
+    rs = RunnerStatus(RunnerIdentity.generate(name="r", broker="b", account_id="1"), [logical], log_base=tmp_path / "logs")
+    rs.mark_started()
+    assert rs.status_path == tmp_path / "logs" / "s-multi" / "status.json"
+    assert json.loads(rs.status_path.read_text(encoding="utf-8"))["account"] is None

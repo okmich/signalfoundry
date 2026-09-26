@@ -37,8 +37,8 @@ class JsonlEventLogger(BaseEventLogger):
 
     **Path (§10, OPS §7).** ``<log_base>\\<account>\\<strategy>\\<symbol>\\<timeframe>\\inference\\
     inference_<YYYYMMDD>.jsonl`` where ``<log_base>`` is supplied explicitly or via
-    ``OKMICH_QUANT_LOG_BASE`` and ``<account>`` is ``OKMICH_QUANT_ACCOUNT`` (required). Missing/blank values
-    fail fast; deployment examples such as
+    ``OKMICH_QUANT_LOG_BASE``, and ``<account>`` is the account folder the system is deployed in (absent outside
+    one). A missing/blank root fails fast; deployment examples such as
     ``D:\\quant_logs`` are never used as source-code fallbacks. Strategy / symbol / timeframe live
     in the **path**, not the filename. Append-only; the handle rotates when the UTC date flips. One
     logger per logical system → one file per symbol.

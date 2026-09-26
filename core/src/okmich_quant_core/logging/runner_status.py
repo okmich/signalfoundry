@@ -5,7 +5,8 @@ stopped, and did it disconnect?" is answered by reading one small file, not by t
 bar JSONL. So lifecycle does NOT go on the inference-log channel. Instead the runner writes a single
 ``status.json`` **atomically** (write tmp → fsync → ``os.replace``, last-write-wins) at the runner root:
 
-``<log_base>/<account>/<strategy>/status.json``   (``<strategy>-multi`` for a multi-trader)
+``<log_base>/[<account>/]<strategy>/status.json``   (``<strategy>-multi`` for a multi-trader; ``<account>`` when
+deployed in an account folder of the live tree)
 
 The Supervisor reads it directly for its stop/restart loop (clean-stop proof = ``state == "stopped"``
 + ``broker_disconnected: true``; restart detection = a changed ``runner_start_token``). Runner lifecycle
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from .base import LOG_SCHEMA_VERSION, _iso_utc
-from ..account import resolve_account
+from ..account import deployment_account
 from .identity import LogicalSystemIdentity, RunnerIdentity, _path_safe, _resolve_log_base
 
 _log = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class RunnerStatus:
                  library_versions: Optional[Mapping[str, Any]] = None):
         self._runner = runner
         self._systems = list(logical_systems)
-        self._account = resolve_account()
+        self._account = deployment_account()  # the account folder it is deployed in; None outside one
         self._base = _resolve_log_base(log_base)
         self._pid = os.getpid() if pid is None else pid
         self._library_versions = dict(library_versions or {})

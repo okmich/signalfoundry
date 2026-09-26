@@ -194,13 +194,13 @@ def test_retired_logging_names_raise_migration_error():
 
 def test_runner_status_writes_running_then_stopped(runner, logical, tmp_path):
     rs = RunnerStatus(runner, [logical], log_base=tmp_path, pid=4321, library_versions={"okmich-quant-core": "0.7.0"})
-    status_path = tmp_path / "test.demo" / "deriv_hmm_posterior" / "status.json"
+    status_path = tmp_path / "deriv_hmm_posterior" / "status.json"
 
     rs.mark_started()
     running = json.loads(status_path.read_text(encoding="utf-8"))
     jsonschema.validate(running, load_schema("runner_status"), format_checker=jsonschema.FormatChecker())
     assert running["state"] == "running"
-    assert running["account"] == "test.demo"
+    assert running["account"] is None  # pytest is not deployed in an account folder: flat, as before
     assert running["runner_id"] == runner.runner_id and running["pid"] == 4321
     assert running["broker_disconnected"] is None and running["started_at"]
     assert running["logical_systems"][0]["symbol"] == "EURUSD"
@@ -222,14 +222,14 @@ def test_runner_status_multi_system_writes_one_file_at_runner_root(runner, tmp_p
     b = LogicalSystemIdentity(strategy="hmm-multi", symbol="GBPUSD", timeframe_minutes=5)
     rs = RunnerStatus(runner, [a, b], log_base=tmp_path)
     rs.mark_started()
-    root = tmp_path / "test.demo" / "hmm-multi" / "status.json"
+    root = tmp_path / "hmm-multi" / "status.json"
     assert root.is_file()
     payload = json.loads(root.read_text(encoding="utf-8"))
     assert payload["state"] == "running"
     assert {ls["symbol"] for ls in payload["logical_systems"]} == {"EURUSD", "GBPUSD"}
     # NOT mirrored into the per-symbol paths
-    assert not (tmp_path / "test.demo" / "hmm-multi" / "EURUSD" / "5" / "status.json").exists()
-    assert not (tmp_path / "test.demo" / "hmm-multi" / "GBPUSD" / "5" / "status.json").exists()
+    assert not (tmp_path / "hmm-multi" / "EURUSD" / "5" / "status.json").exists()
+    assert not (tmp_path / "hmm-multi" / "GBPUSD" / "5" / "status.json").exists()
 
 
 # --------------------------------------------------------------------------------------
@@ -318,7 +318,7 @@ def test_logger_uses_okmich_quant_log_base_env(logical, tmp_path, monkeypatch):
     monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(env_root))
     logger = JsonlEventLogger(logical)
     try:
-        assert logger.directory == env_root / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
+        assert logger.directory == env_root / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
     finally:
         logger.close()
 
@@ -329,7 +329,7 @@ def test_logger_explicit_log_base_overrides_env(logical, tmp_path, monkeypatch):
     monkeypatch.setenv("OKMICH_QUANT_LOG_BASE", str(env_root))
     logger = JsonlEventLogger(logical, log_base=explicit_root)
     try:
-        assert logger.directory == explicit_root / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
+        assert logger.directory == explicit_root / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
     finally:
         logger.close()
 
@@ -353,7 +353,7 @@ def test_logger_path_layout(logical, tmp_path, monkeypatch):
     try:
         f = SystemRecordFactory(_runner(), logical)
         logger.write(f.circuit_breaker_tripped(consecutive_errors=1))  # lifecycle = sync
-        expected = tmp_path / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
+        expected = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
         assert expected.is_file()
         line = json.loads(expected.read_text(encoding="utf-8").strip())
         assert line["event"] == "circuit_breaker_tripped"
@@ -365,7 +365,7 @@ def test_lifecycle_is_synchronous_bar_is_queued(logical, tmp_path, monkeypatch):
     monkeypatch.setattr("okmich_quant_core.logging.jsonl.datetime",
                         _FrozenDatetime(datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc)))
     logger = JsonlEventLogger(logical, log_base=tmp_path)
-    path = tmp_path / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
+    path = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
     try:
         f = SystemRecordFactory(_runner(), logical)
         # block the writer so the bar cannot be flushed yet
@@ -423,7 +423,7 @@ def test_drain_flushes_queued_bars(logical, tmp_path, monkeypatch):
     monkeypatch.setattr("okmich_quant_core.logging.jsonl.datetime",
                         _FrozenDatetime(datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc)))
     logger = JsonlEventLogger(logical, log_base=tmp_path)
-    path = tmp_path / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
+    path = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
     try:
         f = SystemRecordFactory(_runner(), logical)
         for _ in range(20):
@@ -439,7 +439,7 @@ def test_logger_rotates_on_utc_date_flip(logical, tmp_path, monkeypatch):
     clock = _FrozenDatetime(datetime(2026, 6, 1, 23, 59, tzinfo=timezone.utc))
     monkeypatch.setattr("okmich_quant_core.logging.jsonl.datetime", clock)
     logger = JsonlEventLogger(logical, log_base=tmp_path)
-    base = tmp_path / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
+    base = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference"
     try:
         f = SystemRecordFactory(_runner(), logical)
         logger.write(f.circuit_breaker_tripped(consecutive_errors=1))  # day 01
@@ -521,7 +521,7 @@ def test_writer_thread_survives_a_bad_bar_write(logical, tmp_path, monkeypatch):
     monkeypatch.setattr("okmich_quant_core.logging.jsonl.datetime",
                         _FrozenDatetime(datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc)))
     logger = JsonlEventLogger(logical, log_base=tmp_path)
-    path = tmp_path / "test.demo" / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
+    path = tmp_path / "deriv_hmm_posterior" / "EURUSD" / "5" / "inference" / "inference_20260601.jsonl"
     try:
         f = SystemRecordFactory(_runner(), logical)
         orig = logger._write_sync
