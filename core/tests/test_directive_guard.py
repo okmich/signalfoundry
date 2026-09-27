@@ -259,3 +259,14 @@ def test_the_guard_cannot_be_overridden():
         class Sneakier(Guarded):
             def enforce_account_directive(self, run_dt):
                 pass
+
+
+def test_classification_under_no_entry_ops(live):
+    """§14.4: a scale-in is an entry; a reversal closes and does not reopen; closing is never blocked (§14.3)."""
+    publish(live, AccountDirective.NO_ENTRY_OPS)
+    s = Guarded()
+    assert s.open(long=True) is False                                  # scale-in on the held long: suppressed
+    assert s.exit_by_own_rule(201) and s.positions == {}               # reversal, leg 1: the close goes through
+    assert s.open(long=False) is False                                 # reversal, leg 2: the open is suppressed
+    assert s.entries_sent == []
+    assert [o.op for o in s.records(LogEventType.ACCOUNT_DIRECTIVE_OP)] == [GuardedOp.OPEN_LONG, GuardedOp.OPEN_SHORT]
