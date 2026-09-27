@@ -52,13 +52,17 @@ def test_standard_viterbi_is_not_prefix_consistent(regime_data):
     Standard Viterbi's backward traceback rewrites earlier labels, so at least one bar must disagree
     between the live view and the completed-sequence view. If this ever passes, the fixture stopped
     exercising a path switch and the causal tests above are no longer proving anything.
+
+    Every prefix is scanned, not every 10th. Until 2026-09-27 VITERBI mode was really SMOOTHING, which rewrites
+    history at almost every bar, so a coarse grid always caught a rewrite. True Viterbi rewrites far more rarely: on
+    this fixture only the prefix ending at bar 75 disagrees with the full path.
     """
     model = PomegranateHMM(distribution_type=DistType.NORMAL, n_states=2,
                            inference_mode=InferenceMode.VITERBI)
     model.fit(regime_data)
     full = model.predict(regime_data)
     rewrote = any(not np.array_equal(model.predict(regime_data[: t + 1]), full[: t + 1])
-                  for t in range(20, len(regime_data), 10))
+                  for t in range(1, len(regime_data)))
     assert rewrote, "expected standard Viterbi to rewrite history; fixture no longer exercises a switch"
 
 
