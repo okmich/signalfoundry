@@ -50,6 +50,12 @@ def atomic_write_json(path: str | Path, payload: Mapping[str, Any], *, attempts:
     raise last_error if last_error is not None else OSError(f"could not replace {target}")
 
 
+def _reject_constant(name: str):
+    """Strict JSON: Python's json accepts NaN/Infinity, which the Admin's own writers refuse (allow_nan=False). A file
+    carrying them is malformed, not a value to act on."""
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
 def read_json_retry(path: str | Path, *, attempts: int = READ_ATTEMPTS, backoff_s: float = READ_BACKOFF_S) -> Any:
     """Read and parse ``path``, retrying a failed open or parse briefly.
 
@@ -60,7 +66,7 @@ def read_json_retry(path: str | Path, *, attempts: int = READ_ATTEMPTS, backoff_
     for attempt in range(max(1, attempts)):
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                return json.load(fh, parse_constant=_reject_constant)
         except FileNotFoundError:
             raise
         except (OSError, ValueError) as exc:

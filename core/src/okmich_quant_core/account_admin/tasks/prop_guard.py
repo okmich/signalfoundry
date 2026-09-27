@@ -21,7 +21,10 @@ from ..snapshot import Deal
 from ..state import StateLoad
 from ..timeutil import iso_z, parse_utc
 from .base import AdminTask, Alert, TaskContext, TaskEvent, TaskResult, register_task
-from .prop_guard_policy import PropPolicy, compute_levels, day_boundary, parse_prop_guard
+from zoneinfo import ZoneInfo
+
+from .prop_guard_policy import (PropPolicy, boundary_key, compute_levels, day_boundary, next_boundary_after,
+                                parse_prop_guard)
 
 SLOT_SCHEMA_VERSION = 1
 
@@ -98,40 +101,35 @@ class PropGuardTask(AdminTask):
         prev_since = parse_utc(slot["since_utc"]) if slot["since_utc"] else None
 
         self._handle_requests(ctx, slot, result)
-        self._track_degraded(ctx, slot, result)
 
+        degraded, degraded_reason = ctx.degraded, ctx.degraded_reason
         holds: dict[str, str] = {}      # cause id -> evidence text, for conditions holding this cycle
-        levels = None
-        if not ctx.degraded:
-            info = ctx.snapshot.info
-            slot["currency"] = info.currency
-            new_deals = self._new_deals(ctx, slot, result)
-            self._roll_day(ctx, slot, result, info.balance, info.equity)
-            self._update_high_water(slot, info.balance, info.equity, new_deals, now)
-            self._balance_operations(slot, result, new_deals, now)
-            levels = compute_levels(self.policy, float(slot["trading_day"]["base"]), float(slot["high_water"]["balance"]),
-                                    float(slot["high_water"]["equity"]))
-            holds = self._evaluate_levels(info.balance, info.equity, levels)
-            slot["last_holds"] = dict(holds)
-            self._trip_latches(slot, result, holds, now, info.balance, info.equity)
-            self._check_obedience(ctx, slot, result, new_deals, prev_directive, prev_since)
-            slot["last_eval"] = {"levels": levels.to_dict(),
-                                 "metrics": {"balance": round(info.balance, 2), "equity": round(info.equity, 2),
-                                             "day_pnl": round(info.equity - levels.daily_base, 2),
-                                             "total_pnl": round(info.equity - self.policy.initial_capital, 2)}}
-        else:
+        if not degraded:
+            # Work on a copy: a failed deal-history read half way through must leave no half-updated state. It makes
+            # the cycle degraded, like an unreadable account, rather than failing the task: a failed task stops
+            # publishing, and a stale directive would loosen NO_OPS to NO_ENTRY_OPS at every reader (spec §7.1).
+            work = copy.deepcopy(slot)
+            n_events, n_alerts = len(result.events), len(result.alerts)
+            try:
+                holds = self._readable_cycle(ctx, work, result, prev_directive, prev_since)
+                slot = work
+            except Exception as exc:
+                del result.events[n_events:], result.alerts[n_alerts:]
+                degraded, degraded_reason = True, f"account history unreadable: {type(exc).__name__}: {exc}"
+        self._track_degraded(degraded, degraded_reason, slot, result)
+        if degraded:
             # The account cannot be read: what held at the last readable cycle is presumed to hold still. A breach
             # configured without a latch must not loosen because the Admin went blind (spec §7.1: "stays stricter").
             holds = {k: f"{v} (as of the last readable cycle)" for k, v in (slot.get("last_holds") or {}).items()
                      if Condition(k) in self.policy.conditions}
         self._expire_override(slot, result, now)
-        causes = self._causes(ctx, slot, holds, now)
+        causes = self._causes(degraded, degraded_reason, slot, holds, now)
         directive = max((d for _, d, _ in causes), key=lambda d: d.rank, default=AccountDirective.ALL_OPS)
         reason = f"{causes[0][0]}: {causes[0][2]}" if causes else "no condition active"
 
         if directive != prev_directive:
             self._change_episode(ctx, slot, result, prev_directive, prev_since, directive, causes, reason)
-        if not ctx.degraded:
+        if not degraded:
             self._check_orphans(ctx, slot, result, directive)
 
         slot["sequence"] = int(slot["sequence"]) + 1
@@ -142,6 +140,28 @@ class PropGuardTask(AdminTask):
         result.summary = {"directive": str(directive), "causes": [c for c, _, _ in causes],
                           **(slot.get("last_eval") or {})}
         return result
+
+    def _readable_cycle(self, ctx: TaskContext, slot: dict[str, Any], result: TaskResult,
+                        prev_directive: AccountDirective | None, prev_since: datetime | None) -> dict[str, str]:
+        """Everything a readable cycle updates from the account. Returns the conditions holding now."""
+        now = ctx.now
+        info = ctx.snapshot.info
+        slot["currency"] = info.currency
+        new_deals = self._new_deals(ctx, slot, result)
+        self._roll_day(ctx, slot, result, info.balance, info.equity)
+        self._update_high_water(slot, info.balance, info.equity, new_deals, now)
+        self._balance_operations(slot, result, new_deals, now)
+        levels = compute_levels(self.policy, float(slot["trading_day"]["base"]), float(slot["high_water"]["balance"]),
+                                float(slot["high_water"]["equity"]))
+        holds = self._evaluate_levels(info.balance, info.equity, levels)
+        slot["last_holds"] = dict(holds)
+        self._trip_latches(slot, result, holds, now, info.balance, info.equity)
+        self._check_obedience(ctx, slot, result, new_deals, prev_directive, prev_since)
+        slot["last_eval"] = {"levels": levels.to_dict(),
+                             "metrics": {"balance": round(info.balance, 2), "equity": round(info.equity, 2),
+                                         "day_pnl": round(info.equity - levels.daily_base, 2),
+                                         "total_pnl": round(info.equity - self.policy.initial_capital, 2)}}
+        return holds
 
     # ------------------------------------------------------------------------------------------- start and state
     def _start_slot(self, ctx: TaskContext, result: TaskResult) -> dict[str, Any]:
@@ -193,14 +213,13 @@ class PropGuardTask(AdminTask):
         slot["deal_cursor_utc"] = iso_z(now)
         return new
 
-    def _track_degraded(self, ctx: TaskContext, slot: dict[str, Any], result: TaskResult) -> None:
-        if ctx.degraded != bool(slot.get("degraded")):
-            state = "entering" if ctx.degraded else "leaving"
-            result.events.append(TaskEvent(AdminEvent.ADMIN_DEGRADED, {"state": state, "reason": ctx.degraded_reason}))
-            result.alerts.append(Alert(AlertLevel.CRITICAL if ctx.degraded else AlertLevel.INFO,
-                                       f"ADMIN DEGRADED ({state})",
-                                       ctx.degraded_reason or "the account is readable and verified again"))
-        slot["degraded"] = ctx.degraded
+    def _track_degraded(self, degraded: bool, reason: str | None, slot: dict[str, Any], result: TaskResult) -> None:
+        if degraded != bool(slot.get("degraded")):
+            state = "entering" if degraded else "leaving"
+            result.events.append(TaskEvent(AdminEvent.ADMIN_DEGRADED, {"state": state, "reason": reason}))
+            result.alerts.append(Alert(AlertLevel.CRITICAL if degraded else AlertLevel.INFO, f"ADMIN DEGRADED ({state})",
+                                       reason or "the account is readable and verified again"))
+        slot["degraded"] = degraded
 
     # ------------------------------------------------------------------------------------------ day and marks
     def _roll_day(self, ctx: TaskContext, slot: dict[str, Any], result: TaskResult, balance: float, equity: float) -> None:
@@ -208,14 +227,21 @@ class PropGuardTask(AdminTask):
         Admin was running across the boundary; otherwise the base is taken from the balance and marked estimated."""
         now = ctx.now
         t_d = day_boundary(self.policy, now)
+        key = boundary_key(self.policy)
         current = slot["trading_day"]
         if current is not None:
             start = parse_utc(current["start_utc"])
-            # A real boundary is ~24 h after the last (23/25 h across DST). A policy edit that moves day_tz or
-            # day_start_hour shifts T_d by less than 12 h: it must neither re-base the day nor clear today's latches
-            # (spec §8.1), so the new boundary applies from the next genuine one.
-            if t_d <= start or (t_d - start) < timedelta(hours=12):
-                return
+            old = current.get("boundary") or key
+            if old == key:
+                if t_d <= start:
+                    return
+            else:
+                # The policy moved the day boundary. Today keeps its base and its latches until the day would have
+                # ended under the boundary it began with (spec §8.1); the new boundary applies from then on.
+                old_end = next_boundary_after(ZoneInfo(old["day_tz"]), int(old["day_start_hour"]), start)
+                if now < old_end:
+                    return
+                t_d = max(t_d, old_end)   # the new day starts where the old one ended
         last = parse_utc(slot["last_cycle_utc"]) if slot["last_cycle_utc"] else None
         window = ctx.valid_for_s
         observed = last is not None and last < t_d and (t_d - last).total_seconds() <= window \
@@ -231,7 +257,7 @@ class PropGuardTask(AdminTask):
             base, estimated = max(boundary_balance, boundary_equity), False
         slot["trading_day"] = {"start_utc": iso_z(t_d), "base": round(base, 2), "boundary_balance": round(boundary_balance, 2),
                                "boundary_equity": None if boundary_equity is None else round(boundary_equity, 2),
-                               "base_estimated": estimated}
+                               "base_estimated": estimated, "boundary": key}
         for cond, latch in list(slot["latches"].items()):
             if latch.get("scope") == LatchScope.TRADING_DAY.value:
                 del slot["latches"][cond]
@@ -306,7 +332,7 @@ class PropGuardTask(AdminTask):
             result.alerts.append(Alert(AlertLevel.INFO, "OVERRIDE EXPIRED",
                                        f"{ov['directive']} by {ov['operator']} ended at {ov['until_utc']}"))
 
-    def _causes(self, ctx: TaskContext, slot: dict[str, Any], holds: dict[str, str],
+    def _causes(self, degraded: bool, degraded_reason: str | None, slot: dict[str, Any], holds: dict[str, str],
                 now: datetime) -> list[tuple[str, AccountDirective, str]]:
         """Every active condition as (cause id, directive, evidence), most restrictive first (spec §6.6)."""
         causes: dict[str, tuple[AccountDirective, str]] = {}
@@ -324,8 +350,8 @@ class PropGuardTask(AdminTask):
         if ov is not None:
             causes[Condition.OVERRIDE.value] = (AccountDirective(ov["directive"]),
                                                 f"override by {ov['operator']} until {ov['until_utc']}: {ov.get('reason') or ''}")
-        if ctx.degraded:
-            causes[Condition.ADMIN_DEGRADED.value] = (_FIXED[Condition.ADMIN_DEGRADED], ctx.degraded_reason or "degraded")
+        if degraded:
+            causes[Condition.ADMIN_DEGRADED.value] = (_FIXED[Condition.ADMIN_DEGRADED], degraded_reason or "degraded")
         return sorted(((cid, d, t) for cid, (d, t) in causes.items()),
                       key=lambda c: (-c[1].rank, _PRIORITY.get(c[0], 50), c[0]))
 

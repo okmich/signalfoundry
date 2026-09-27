@@ -9,7 +9,7 @@ from okmich_quant_core.account_admin import (AccountDirective, DirectiveAccount,
                                              write_directive)
 from okmich_quant_core.base_strategy import BaseStrategy
 from okmich_quant_core.config import StrategyConfig
-from okmich_quant_core.directive_guard import PROCESS_READER, GuardPending, GuardPosition
+from okmich_quant_core.directive_guard import PROCESS_READER, GuardActionStatus, GuardPending, GuardPosition
 from okmich_quant_core.logging import BaseEventLogger, GuardedOp, GuardOutcome, LogEventType, RunnerIdentity
 from okmich_quant_core.multi_trader import MultiTrader
 from okmich_quant_core.signal import BaseSignal
@@ -91,16 +91,18 @@ class Guarded(BaseStrategy):
 
     def _guard_cancel_pending(self, ticket):
         self.pending.remove(ticket)
-        return True, "cancelled"
+        return GuardActionStatus.DONE, "cancelled"
 
     def _guard_own_positions(self):
         return [GuardPosition(t, long, "0.10 lots @ 1.1000, P&L -3.20") for t, long in self.positions.items()]
 
     def _guard_close_position(self, ticket, directive):
         if self.close_fails:
-            return False, "market closed"
+            return GuardActionStatus.FAILED, "market closed"
+        if ticket not in self.positions:
+            return GuardActionStatus.GONE, "already closed"
         self.positions.pop(ticket)
-        return True, "closed"
+        return GuardActionStatus.DONE, "closed"
 
     def records(self, event):
         return [r for r in self.rec.records if r.envelope.event is event]

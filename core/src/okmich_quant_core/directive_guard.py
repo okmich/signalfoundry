@@ -13,6 +13,7 @@ failed file lookup. Nothing here raises into the strategy: closing is never bloc
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
 import time
@@ -36,6 +37,14 @@ IDENTITY_ATTEMPTS = 3
 IDENTITY_RETRY_S = 0.05
 FALLBACK_SOURCES = frozenset({DirectiveSource.STALE, DirectiveSource.INVALID, DirectiveSource.WRONG_ACCOUNT})
 _UNSET = object()
+
+
+class GuardActionStatus(enum.StrEnum):
+    """What a broker hook's cancel or close achieved."""
+
+    DONE = "done"       # this call cancelled / closed it: a forced operation
+    GONE = "gone"       # it was already gone (filled, hit its SL/TP, removed): nothing was forced
+    FAILED = "failed"   # still there, or the terminal could not say: retried at the next sweep
 
 
 @dataclass(frozen=True)
@@ -285,12 +294,18 @@ class DirectiveGuard:
             op = GuardedOp.CLOSE_LONG if pos.long else GuardedOp.CLOSE_SHORT
             self._force(op, pos.ticket, pos.detail, r, lambda t=pos.ticket: s._guard_close_position(t, r.directive.value))
 
-    def _force(self, op: GuardedOp, ticket: int, detail: str, r: DirectiveReading, action: Callable[[], tuple[bool, str]]) -> None:
+    def _force(self, op: GuardedOp, ticket: int, detail: str, r: DirectiveReading,
+               action: Callable[[], tuple[GuardActionStatus, str]]) -> None:
         try:
-            ok, why = action()
+            status, why = action()
+            status = GuardActionStatus(status)
         except Exception as exc:
-            ok, why = False, f"{type(exc).__name__}: {exc}"
-        if ok:
+            status, why = GuardActionStatus.FAILED, f"{type(exc).__name__}: {exc}"
+        if status is GuardActionStatus.GONE:
+            # Filled or closed on its own (an SL/TP, a fill) just before the sweep: nothing was forced, nothing to record.
+            logger.info("%s: %s #%s not needed: %s", self._label(), op.value, ticket, why)
+            return
+        if status is GuardActionStatus.DONE:
             self._record_op(op, GuardOutcome.FORCED, r)
             logger.warning("%s: %s #%s FORCED by %s (%s): %s", self._label(), op.value, ticket, r.directive.value,
                            r.source.value, detail)

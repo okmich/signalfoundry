@@ -7,7 +7,7 @@ from typing import Any, Optional, final
 
 from .closed_trade import ClosedTrade, CloseReason
 from .config import StrategyConfig
-from .directive_guard import DirectiveGuard, GuardPending, GuardPosition
+from .directive_guard import DirectiveGuard, GuardActionStatus, GuardPending, GuardPosition
 from .logging import (BaseEventLogger, BarOutcome, GuardedOp, JsonlEventLogger, LogBinding, LogicalSystemIdentity,
                       RunnerIdentity)
 from .notification.base import BaseNotifier
@@ -161,17 +161,17 @@ class BaseStrategy(ABC):
         """This strategy's own resting pending orders. Broker hook."""
         return []
 
-    def _guard_cancel_pending(self, ticket: int) -> tuple[bool, str]:
-        """Cancel one own pending order: (done, why). Broker hook."""
-        return False, "not supported by this broker"
+    def _guard_cancel_pending(self, ticket: int) -> tuple[GuardActionStatus, str]:
+        """Cancel one own pending order: (DONE / GONE / FAILED, why). Broker hook."""
+        return GuardActionStatus.FAILED, "not supported by this broker"
 
     def _guard_own_positions(self) -> list[GuardPosition]:
         """This strategy's own open positions. Broker hook."""
         return []
 
-    def _guard_close_position(self, ticket: int, directive: str) -> tuple[bool, str]:
-        """Close one own position in full because of ``directive``: (done, why). Broker hook."""
-        return False, "not supported by this broker"
+    def _guard_close_position(self, ticket: int, directive: str) -> tuple[GuardActionStatus, str]:
+        """Close one own position in full because of ``directive``: (DONE / GONE / FAILED, why). Broker hook."""
+        return GuardActionStatus.FAILED, "not supported by this broker"
 
     @property
     def log_binding(self) -> LogBinding:

@@ -138,9 +138,9 @@ def test_an_unanswered_terminal_query_is_a_failed_forced_close_not_a_success(mt5
     assert not [o for o in ops(s) if o.op is GuardedOp.CLOSE_LONG]  # no false "forced" record
     titles = [c.args[0] for c in s.notifier.on_account_event.call_args_list]
     assert "FORCED close_long FAILED" in titles
-    mt5_env.mt5.positions_get.return_value = ()                    # answered: really gone
+    mt5_env.mt5.positions_get.return_value = ()                    # answered: gone on its own (SL/TP), not forced
     s.enforce_account_directive(datetime(2026, 9, 24, 13, 1))
-    assert [o.op for o in ops(s)] == [GuardedOp.CLOSE_LONG]
+    assert not ops(s) and "21" not in {k for k, v in s._open_trades.items() if v.get("close_intent")}
 
 
 def test_a_sizing_error_is_a_refused_entry_not_a_crash(mt5_env):
@@ -149,3 +149,21 @@ def test_a_sizing_error_is_a_refused_entry_not_a_crash(mt5_env):
     s.calculate_lot_size = Mock(side_effect=NotImplementedError("risk sizing not implemented"))
     assert s.open_position("buy", 1.1) is False
     mt5_env.open_position.assert_not_called()
+
+
+def test_the_clock_check_while_running_covers_a_book_of_pending_orders_only():
+    from zoneinfo import ZoneInfo
+    from okmich_quant_mt5.account_admin.app import ClockCheckedSource
+    from okmich_quant_mt5.account_admin.server_clock import ServerClock
+    from okmich_quant_mt5.account_admin.source import Mt5ReadError
+
+    true_clock = ServerClock(ZoneInfo("America/New_York"), 7.0)
+    now_server = true_clock.to_server_epoch(datetime.now(timezone.utc))
+    order = SimpleNamespace(ticket=1, symbol="EURUSD", magic=7, type=2, volume_current=0.1, price_open=1.05,
+                            time_setup=now_server - 60)
+    mt5 = SimpleNamespace(positions_get=lambda **k: (), orders_get=lambda **k: (order,), last_error=lambda: (1, "ok"),
+                          symbol_info_tick=lambda symbol: SimpleNamespace(time=now_server))
+    src = ClockCheckedSource(mt5, ServerClock(ZoneInfo("UTC"), 0.0))   # stated wrong: behind the broker
+    src.positions()
+    with pytest.raises(Mt5ReadError, match="server clock"):
+        src.pending_orders()

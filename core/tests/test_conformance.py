@@ -19,7 +19,7 @@ from okmich_quant_core.base_strategy import BaseStrategy
 from okmich_quant_core.config import RunLoopConfig, StrategyConfig
 from okmich_quant_core.account_admin import (AccountDirective, DirectiveAccount, DirectiveFile, directive_path,
                                              write_directive)
-from okmich_quant_core.directive_guard import PROCESS_READER, GuardPosition
+from okmich_quant_core.directive_guard import PROCESS_READER, GuardActionStatus, GuardPosition
 from okmich_quant_core.logging import BarOutcome, BaseEventLogger, GuardedOp, LogEventType, RunnerIdentity, load_schema
 from okmich_quant_core.multi_trader import MultiTrader
 from okmich_quant_core.run_loop import RunLoop
@@ -101,7 +101,7 @@ class _GuardedStrat(_Strat):
         return [GuardPosition(ticket=5, long=True, detail="0.10 lots @ 1.1000, P&L -12.30")]
 
     def _guard_close_position(self, ticket, directive):
-        return True, "closed"
+        return GuardActionStatus.DONE, "closed"
 
 
 def test_all_emitted_records_validate_against_schema(tmp_path, monkeypatch):

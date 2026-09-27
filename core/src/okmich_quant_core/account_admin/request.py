@@ -47,7 +47,10 @@ def _admin_dir(account: str, live_base: str | None) -> Path:
 
 def _until(args) -> str:
     if args.until:
-        return iso_z(parse_utc(args.until))
+        try:
+            return iso_z(parse_utc(args.until))
+        except ValueError as exc:
+            raise SystemExit(f"--until: {exc}") from exc
     m = _DURATION.match(args.for_ or "")
     if not m:
         raise SystemExit("give --until <ISO-8601 UTC> or --for <N>[s|m|h|d]")

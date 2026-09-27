@@ -85,12 +85,20 @@ class ClockCheckedSource(Mt5AccountSource):
         super().__init__(mt5, clock)
         self._recheck_s = recheck_s
         self._last_check: datetime | None = None
+        self._position_symbols: set[str] = set()
 
     def positions(self):
         rows = super().positions()
+        self._position_symbols = {p.symbol for p in rows}
+        return rows
+
+    def pending_orders(self):
+        """Read after positions each cycle (host order), so the check sees the symbols of both: the orders are exactly
+        what pending_order_cleanup ages on this clock."""
+        rows = super().pending_orders()
         now = datetime.now(timezone.utc)
         if self._last_check is None or (now - self._last_check).total_seconds() >= self._recheck_s:
-            symbols = sorted({p.symbol for p in rows})
+            symbols = sorted(self._position_symbols | {o.symbol for o in rows})
             problem = self.freshest_tick_problem(symbols, now) if symbols else None
             if problem:
                 raise Mt5ReadError(f"server clock contradicted by a live tick: {problem}")
@@ -171,44 +179,55 @@ def run_admin(script: str | Path, *, mt5_module: Any = None, max_cycles: int | N
         lock.acquire()
     except WriterLockHeld as exc:
         return _refuse(2, [str(exc)], notifier, account)
-    if mt5_module is None:
-        import MetaTrader5 as mt5_module
-    mt5 = mt5_module
-    if not mt5.initialize(path=str(env["TERMINAL_PATH"])):   # attach only: the Admin never calls login (invariant 6)
-        lock.release()
-        return _refuse(2, [f"could not attach to the terminal {env['TERMINAL_PATH']}: {mt5.last_error()}"], notifier, account)
-    info = mt5.account_info()
-    stage2: list[str] = []
-    if info is None:
-        stage2.append("the terminal did not report an account: bring its session up before starting the Admin")
-    elif int(info.login) != expected_login or str(info.server) != expected_server:
-        stage2.append(f"the terminal is logged into {info.login}@{info.server}, but .env.{account} governs "
-                      f"{expected_login}@{expected_server}")
-    source = ClockCheckedSource(mt5, server_clock)
-    if not stage2:
-        try:
-            symbols = sorted({p.symbol for p in source.positions()} | {o.symbol for o in source.pending_orders()})
-            problem = source.freshest_tick_problem(symbols, datetime.now(timezone.utc))
-            if problem:
-                stage2.append(f"the stated server clock is wrong: {problem}")
-        except Mt5ReadError as exc:
-            stage2.append(str(exc))
-    if stage2:
-        try:
-            mt5.shutdown()
-        finally:
+    mt5 = None
+    try:
+        if mt5_module is None:
+            import MetaTrader5 as mt5_module
+        mt5 = mt5_module
+        if not mt5.initialize(path=str(env["TERMINAL_PATH"])):   # attach only: the Admin never calls login (invariant 6)
             lock.release()
-        return _refuse(2, stage2, notifier, account)
+            return _refuse(2, [f"could not attach to the terminal {env['TERMINAL_PATH']}: {mt5.last_error()}"], notifier, account)
+        info = mt5.account_info()
+        stage2: list[str] = []
+        if info is None:
+            stage2.append("the terminal did not report an account: bring its session up before starting the Admin")
+        elif int(info.login) != expected_login or str(info.server) != expected_server:
+            stage2.append(f"the terminal is logged into {info.login}@{info.server}, but .env.{account} governs "
+                          f"{expected_login}@{expected_server}")
+        source = ClockCheckedSource(mt5, server_clock)
+        if not stage2:
+            try:
+                symbols = sorted({p.symbol for p in source.positions()} | {o.symbol for o in source.pending_orders()})
+                problem = source.freshest_tick_problem(symbols, datetime.now(timezone.utc))
+                if problem:
+                    stage2.append(f"the stated server clock is wrong: {problem}")
+            except Mt5ReadError as exc:
+                stage2.append(str(exc))
+        if stage2:
+            try:
+                mt5.shutdown()
+            finally:
+                lock.release()
+            return _refuse(2, stage2, notifier, account)
 
-    identity = AccountIdentity(account=deployment.account, broker_label=str(env.get("BROKER_NAME") or "").strip().lower()
-                               or deployment.account.split(".")[0], login=expected_login, server=expected_server)
-    host = AdminHost(config, identity=identity, admin_dir=deployment.admin_dir, log_dir=deployment.log_dir,
-                     live_account_dir=deployment.live_account_dir, log_account_dir=deployment.log_account_dir,
-                     source=source, actions=Mt5BrokerActions(mt5), notifier=notifier)
-    logger.info("Account Admin for %s (%s@%s): tasks %s; server clock %s %+gh", deployment.account, expected_login,
-                expected_server, [t.kind.value for t in config.tasks], server_clock.zone.key, server_clock.shift_h)
-    loop = AdminRunLoop(host, AdminClock(config.clock), broker_session=Mt5AdminSession(mt5, expected_server),
-                        writer_lock=lock)
+        identity = AccountIdentity(account=deployment.account, broker_label=str(env.get("BROKER_NAME") or "").strip().lower()
+                                   or deployment.account.split(".")[0], login=expected_login, server=expected_server)
+        host = AdminHost(config, identity=identity, admin_dir=deployment.admin_dir, log_dir=deployment.log_dir,
+                         live_account_dir=deployment.live_account_dir, log_account_dir=deployment.log_account_dir,
+                         source=source, actions=Mt5BrokerActions(mt5), notifier=notifier)
+        logger.info("Account Admin for %s (%s@%s): tasks %s; server clock %s %+gh", deployment.account, expected_login,
+                    expected_server, [t.kind.value for t in config.tasks], server_clock.zone.key, server_clock.shift_h)
+        loop = AdminRunLoop(host, AdminClock(config.clock), broker_session=Mt5AdminSession(mt5, expected_server),
+                            writer_lock=lock)
+    except Exception as exc:   # anything unforeseen in stage 2: detach, release, and say why, like any refusal
+        logger.exception("Account Admin stage 2 failed")
+        if mt5 is not None:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+        lock.release()
+        return _refuse(2, [f"startup failed: {type(exc).__name__}: {exc}"], notifier, account)
     try:
         reason = loop.run(max_cycles=max_cycles)
     finally:

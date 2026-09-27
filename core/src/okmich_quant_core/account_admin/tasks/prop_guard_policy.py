@@ -191,14 +191,29 @@ def parse_prop_guard(entry: Mapping[str, Any], prefix: str) -> tuple[PropPolicy 
                       obey_grace_s=obey_grace, max_override_s=max_override_s), []
 
 
-def day_boundary(policy: PropPolicy, now: datetime) -> datetime:
-    """``T_d``: the latest instant at or before ``now`` that is ``day_start_hour``:00 in ``day_tz`` (spec §6.3).
-    Built from the local date so a DST change moves the boundary with the zone, as the account's rules do."""
-    local = now.astimezone(policy.day_tz)
-    candidate = datetime.combine(local.date(), time(policy.day_start_hour), tzinfo=policy.day_tz)
+def boundary_at_or_before(zone: ZoneInfo, hour: int, now: datetime) -> datetime:
+    """The latest instant at or before ``now`` that is ``hour``:00 local time in ``zone``. Built from the local date so
+    a DST change moves the boundary with the zone, as the account's rules do."""
+    local = now.astimezone(zone)
+    candidate = datetime.combine(local.date(), time(hour), tzinfo=zone)
     if candidate > local:
-        candidate = datetime.combine(local.date() - timedelta(days=1), time(policy.day_start_hour), tzinfo=policy.day_tz)
+        candidate = datetime.combine(local.date() - timedelta(days=1), time(hour), tzinfo=zone)
     return candidate.astimezone(now.tzinfo)
+
+
+def next_boundary_after(zone: ZoneInfo, hour: int, start: datetime) -> datetime:
+    """The first boundary strictly after a boundary ``start`` (23, 24 or 25 h later across DST)."""
+    return boundary_at_or_before(zone, hour, start + timedelta(hours=26))
+
+
+def day_boundary(policy: PropPolicy, now: datetime) -> datetime:
+    """``T_d``: the latest instant at or before ``now`` that is ``day_start_hour``:00 in ``day_tz`` (spec §6.3)."""
+    return boundary_at_or_before(policy.day_tz, policy.day_start_hour, now)
+
+
+def boundary_key(policy: PropPolicy) -> dict:
+    """What defines the day boundary, stored with the trading day so a policy edit is recognised as one."""
+    return {"day_tz": policy.day_tz.key, "day_start_hour": policy.day_start_hour}
 
 
 @dataclass(frozen=True)

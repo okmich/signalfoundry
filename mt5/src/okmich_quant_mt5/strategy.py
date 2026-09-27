@@ -32,7 +32,7 @@ from .resilience import (
 )
 from okmich_quant_core import (StrategyConfig, BaseSignal, BaseStrategy, ClosedTrade, CloseReason, OrderType,
                                 PositionSizingType)
-from okmich_quant_core.directive_guard import GuardPending, GuardPosition
+from okmich_quant_core.directive_guard import GuardActionStatus, GuardPending, GuardPosition
 from okmich_quant_core.logging import GuardedOp
 from okmich_quant_core.price_buffer import PriceBuffer
 
@@ -313,25 +313,25 @@ class BaseMt5Strategy(BaseStrategy):
                                             f"{getattr(o, 'volume_current', '?')} lots @ {o.price_open}")
                 for o in rows if int(o.magic) == int(self.strategy_config.magic)]
 
-    def _guard_cancel_pending(self, ticket: int) -> tuple[bool, str]:
+    def _guard_cancel_pending(self, ticket: int) -> tuple[GuardActionStatus, str]:
         try:
             cancel_pending_order(int(ticket))
-            return True, "cancelled"
+            return GuardActionStatus.DONE, "cancelled"
         except ValueError as e:
             # cancel_pending_order raises ValueError for "not found", but also when the query itself failed (None).
             # Only an answered, empty query means the order is gone; an unanswered one is a failure to retry.
             if mt5.orders_get(ticket=int(ticket)) == ():
-                return True, "already gone"
-            return False, f"could not confirm the order is gone: {e}"
+                return GuardActionStatus.GONE, "already gone (filled or removed)"
+            return GuardActionStatus.FAILED, f"could not confirm the order is gone: {e}"
         except Exception as e:
-            return False, str(e)
+            return GuardActionStatus.FAILED, str(e)
 
     def _guard_own_positions(self) -> list[GuardPosition]:
         return [GuardPosition(int(p["ticket"]), int(p["type"]) == 0,
                               f"{p.get('volume')} lots @ {p.get('price_open')}, P&L {float(p.get('profit') or 0.0):+.2f}")
                 for p in get_positions(self.strategy_config.symbol, self.strategy_config.magic)]
 
-    def _guard_close_position(self, ticket: int, directive: str) -> tuple[bool, str]:
+    def _guard_close_position(self, ticket: int, directive: str) -> tuple[GuardActionStatus, str]:
         """Close in full because of the directive. The intent names the directive, so the reconciler reports the close
         as the directive's, not the system's own exit. No trade-failed notification here: the guard alerts a failing
         forced close once per episode, where close_position() would alert on every sweep."""
@@ -339,15 +339,15 @@ class BaseMt5Strategy(BaseStrategy):
         self.note_close_intent(ticket, reason)
         try:
             close_position(ticket, **{"filling_mode": self.symbol_info_dict["filling_mode"]})
-            return True, "closed"
+            return GuardActionStatus.DONE, "closed"
         except ValueError as e:
+            self.clear_close_intent(ticket)   # whatever closed it (an SL/TP, a fill), it was not the directive
             if mt5.positions_get(ticket=int(ticket)) == ():   # answered and empty: it is closed already
-                return True, "already closed"
-            self.clear_close_intent(ticket)
-            return False, f"could not confirm the position is closed: {e}"
+                return GuardActionStatus.GONE, "already closed"
+            return GuardActionStatus.FAILED, f"could not confirm the position is closed: {e}"
         except Exception as e:
             self.clear_close_intent(ticket)
-            return False, str(e)
+            return GuardActionStatus.FAILED, str(e)
 
     def open_position(self, direction, price):
         """

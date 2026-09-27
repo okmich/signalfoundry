@@ -159,8 +159,10 @@ class AdminRunLoop:
                 now = datetime.fromtimestamp(t, tz=timezone.utc)
                 try:
                     report = self.host.run_cycle(now)
+                    self.host.cycle_succeeded()
                 except Exception as exc:   # the host isolates tasks; this guards the host itself
                     logger.exception("Admin cycle raised")
+                    self.host.report_cycle_error(exc)
                     report = CycleReport(degraded=True, degraded_reason=f"cycle raised: {exc!r}")
                 minute = int(t // 60)
                 if minute != last_heartbeat_minute:

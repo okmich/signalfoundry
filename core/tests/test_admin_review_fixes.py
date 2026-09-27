@@ -86,7 +86,8 @@ def test_state_lost_still_trips_when_the_first_cycle_after_the_loss_fails(tmp_pa
                      admin_dir=admin, log_dir=tmp_path / "logs", live_account_dir=admin.parent, log_account_dir=None,
                      source=source, actions=source)
     host.start(now)
-    assert host.run_cycle(now).failed_tasks == ["prop_guard"]
+    first = host.run_cycle(now)                                    # history unreadable: a degraded cycle, not a failure
+    assert first.failed_tasks == [] and first.directive == "NO_ENTRY_OPS"
     host.run_cycle(now + timedelta(seconds=20))
     d = json.loads((admin / "directive.json").read_text())
     assert d["causes"] == ["state_lost"] and d["directive"] == "NO_ENTRY_OPS"

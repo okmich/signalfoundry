@@ -253,3 +253,13 @@ def test_an_unanswered_query_is_a_failed_cancel_not_a_fill():
     mt5.orders_get = lambda ticket=None: None
     result = actions.cancel_pending(o1)
     assert result.outcome is BookActionOutcome.FAILED and mt5.sent == []
+
+
+def test_an_unexpected_stage2_error_detaches_releases_and_refuses(tmp_path, monkeypatch):
+    run_py, admin, _ = _deploy(tmp_path, monkeypatch)
+    mt5 = FakeMt5()
+    monkeypatch.setattr(app_mod, "AdminHost", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert app_mod.run_admin(run_py, mt5_module=mt5) == app_mod.EXIT_STAGE2
+    assert mt5.calls[-1] == "shutdown"
+    from okmich_quant_core.account_admin import WriterLock
+    WriterLock(admin / "writer.lock").acquire()                        # released: a restart can take it

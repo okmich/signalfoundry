@@ -136,6 +136,7 @@ class AdminHost:
         self._last_write_alert: datetime | None = None
         self._audit_ids: tuple[int | None, int | None] = (None, None)
         self._consumed_ids: list[str] = []
+        self._last_cycle_error: str | None = None
         self._pending_events: list[tuple[str | None, AdminEvent, dict[str, Any]]] = []
 
     # ------------------------------------------------------------------------------------------ lifecycle
@@ -223,7 +224,8 @@ class AdminHost:
                 self._pending_events.append((kind, event.event, dict(event.fields)))
 
         self._persist(now, results)
-        self._complete_requests(now, consumed, results)
+        if self._complete_requests(now, consumed, results):
+            self._save_host_slot(now)   # a consumed id must survive a restart before the next cycle
         self._audit_cycle(now, report, results)
         self._report_book_actions(ports, alerts)
         for alert in alerts:
@@ -282,7 +284,9 @@ class AdminHost:
             consumed.append(item)
         return routed, consumed
 
-    def _complete_requests(self, now: datetime, consumed: list[PendingRequest], results: dict[str, TaskResult]) -> None:
+    def _complete_requests(self, now: datetime, consumed: list[PendingRequest], results: dict[str, TaskResult]) -> bool:
+        """Complete the routed requests; whether any was completed."""
+        completed = False
         for item in consumed:
             req = item.request
             result = results.get(req.task)
@@ -290,6 +294,15 @@ class AdminHost:
                 continue   # its task failed this cycle: the request stays in the inbox for the next one
             outcome, why = result.request_outcomes.get(req.request_id, (RequestOutcome.REJECTED, "the task did not answer"))
             self._finish_request(item, outcome, why, now, req.task)
+            completed = True
+        return completed
+
+    def _save_host_slot(self, now: datetime) -> None:
+        self._slots[HOST_SLOT] = {"consumed_request_ids": list(self._consumed_ids)}
+        try:
+            save_state(self.state_path, self._slots, now)
+        except (OSError, ValueError) as exc:
+            self._write_failed(now, "state.json", exc)
 
     def _finish_request(self, item: PendingRequest, outcome: RequestOutcome, why: str, now: datetime,
                         task: str | None, alert: bool = True) -> None:
@@ -298,12 +311,12 @@ class AdminHost:
             self._consumed_ids = (self._consumed_ids + [req.request_id])[-MAX_CONSUMED_IDS:]
         try:
             self.inbox.complete(item, outcome, why, now)
-        except OSError:
+        except (OSError, ValueError):
             logger.exception("could not move request %s to done", item.path.name)
-        if not alert:
-            return
         event = AdminEvent.REQUEST_APPLIED if outcome is RequestOutcome.APPLIED else AdminEvent.REQUEST_REJECTED
         self._pending_events.append((task, event, {"request": item.raw, "outcome": str(outcome), "reason": why}))
+        if not alert:
+            return
         who = f"{req.operator}: {req.kind}" if req is not None else item.path.name
         self._alert(AlertLevel.INFO if outcome is RequestOutcome.APPLIED else AlertLevel.WARNING,
                     f"REQUEST {outcome.value.upper()}", f"{who} ({task or 'n/a'}): {why}")
@@ -314,7 +327,7 @@ class AdminHost:
         self._slots[HOST_SLOT] = {"consumed_request_ids": list(self._consumed_ids)}
         try:
             save_state(self.state_path, self._slots, now)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self._write_failed(now, "state.json", exc)
         for task in self.config.tasks:
             result = results.get(task.kind.value)
@@ -352,6 +365,17 @@ class AdminHost:
             lines = [f"{r['outcome']}: {r['action']} #{r['ticket']} {r['symbol']} {r['volume']}L magic {r['magic']} "
                      f"({r['reason']})" for r in done]
             alerts.append(Alert(AlertLevel.WARNING, f"BOOK ACTIONS: {kind}", "\n".join(lines)))
+
+    def report_cycle_error(self, exc: BaseException) -> None:
+        """A cycle raised out of the host itself (a defect: tasks are isolated). Alert once per distinct error until a
+        cycle succeeds, so a wedged Admin is never silent."""
+        key = f"{type(exc).__name__}: {exc}"
+        if key != self._last_cycle_error:
+            self._last_cycle_error = key
+            self._alert(AlertLevel.CRITICAL, "ADMIN CYCLE FAILED", f"{key}. The directive goes stale if this repeats.")
+
+    def cycle_succeeded(self) -> None:
+        self._last_cycle_error = None
 
     def _alert(self, level: AlertLevel, title: str, body: str) -> None:
         log = logger.warning if level is not AlertLevel.INFO else logger.info
