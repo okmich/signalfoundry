@@ -76,7 +76,7 @@ def _scan_kernel(y: np.ndarray, segment: np.ndarray, min_window: int, max_window
                 fitted_at_t = sv / m - beta * sx / m        # in units anchored at y[t], so the residual is -fitted
                 out[t, _T_VALUE] = t_value
                 out[t, _WINDOW] = m
-                out[t, _R2] = cxv * cxv / (cxx * cvv) if cvv > 0 else 0.0
+                out[t, _R2] = min(cxv * cxv / (cxx * cvv), 1.0) if cvv > 0 else 0.0
                 out[t, _SLOPE] = beta
                 out[t, _LINE_GAP] = -fitted_at_t / resid_sd if resid_sd > 0 else 0.0
         if best_abs >= 0:
@@ -114,19 +114,24 @@ def _hysteresis_kernel(strength: np.ndarray, enter: float, exit_: float) -> np.n
     return out
 
 
-def _segments(prices: pd.Series | np.ndarray, n: int, break_gap: pd.Timedelta | None) -> np.ndarray:
+def _segments(prices: pd.Series | np.ndarray, n: int, break_gap) -> np.ndarray:
     if break_gap is None:
         return np.zeros(n, dtype=np.int64)
     if not (isinstance(prices, pd.Series) and isinstance(prices.index, pd.DatetimeIndex)):
         raise ValueError("break_gap requires a pd.Series with a DatetimeIndex")
-    if break_gap <= pd.Timedelta(0):
-        raise ValueError(f"break_gap must be positive, got {break_gap}")
+    try:
+        gap = pd.Timedelta(break_gap)
+    except (TypeError, ValueError) as error:
+        message = f"break_gap must be a duration such as a Timedelta or '30min', got {break_gap!r}"
+        raise ValueError(message) from error
+    if pd.isna(gap) or gap <= pd.Timedelta(0):
+        raise ValueError(f"break_gap must be positive, got {break_gap!r}")
     gaps = prices.index.to_series().diff().to_numpy()       # unit-safe: the index may be ns, us, s ...
-    return np.cumsum(gaps > break_gap.to_timedelta64()).astype(np.int64)
+    return np.cumsum(gaps > gap.to_timedelta64()).astype(np.int64)
 
 
 def trend_scan_features(prices: pd.Series | np.ndarray, min_window: int = 6, max_window: int = 72,
-                        log_prices: bool = True, break_gap: pd.Timedelta | None = None,
+                        log_prices: bool = True, break_gap: pd.Timedelta | str | None = None,
                         state_enter: float | None = None, state_exit: float = 0.0) -> pd.DataFrame:
     """Causal per-bar trend-scan features: the max-|t| straight line through the trailing prices.
 
@@ -140,7 +145,7 @@ def trend_scan_features(prices: pd.Series | np.ndarray, min_window: int = 6, max
         ts_r2         R² of the winning window: how closely the prices hug the line (0 = not at all, 1 = exactly).
         ts_window     Length in bars of the winning window. Piles up at max_window, which means "at least" that.
         ts_t_value    Signed OLS t-value of the winning slope. A strength score, not a significance test (see the
-                      module docstring). It is ±inf only for an exactly straight window.
+                      module docstring). It is ±inf only for a window straight to machine precision.
         ts_slope      Winning slope per bar (log-price units when log_prices=True): the speed of the trend.
                       Normalise by volatility before comparing instruments or regimes.
         ts_agreement  Share of the window lengths tried at this bar whose slope has the winner's sign. 1.0 = every
@@ -161,14 +166,19 @@ def trend_scan_features(prices: pd.Series | np.ndarray, min_window: int = 6, max
         min_window: Shortest window tried (>= 3, so the slope has a residual degree of freedom).
         max_window: Longest window tried (>= min_window). Anchor it to a wall-clock horizon, e.g. 72 bars of 5m = 6 h.
         log_prices: Fit the line to log(price) (default) or to the raw price.
-        break_gap: Optional largest allowed gap between consecutive stamps; needs a DatetimeIndex Series.
+        break_gap: Optional largest allowed gap between consecutive stamps (a Timedelta, datetime.timedelta or a
+            string such as "30min"); needs a DatetimeIndex Series.
         state_enter: Enables ts_state; strength needed to enter UP or DOWN, in (0, 1].
         state_exit: Strength below which UP (above which DOWN) falls back to NEUTRAL, in [0, state_enter].
 
     Raises:
-        ValueError: on invalid windows or thresholds, non-finite prices, non-positive prices with log_prices=True,
-            or break_gap without a DatetimeIndex Series.
+        ValueError: on non-integer or invalid windows, invalid thresholds, input that is not one-dimensional,
+            non-finite prices, non-positive prices with log_prices=True, or a non-positive break_gap or one given
+            without a DatetimeIndex Series.
     """
+    for name, window in (("min_window", min_window), ("max_window", max_window)):
+        if isinstance(window, bool) or not float(window).is_integer():
+            raise ValueError(f"{name} must be a whole number of bars, got {window!r}")
     if min_window < 3:
         raise ValueError(f"min_window must be >= 3, got {min_window}")
     if max_window < min_window:
@@ -179,6 +189,8 @@ def trend_scan_features(prices: pd.Series | np.ndarray, min_window: int = 6, max
         raise ValueError(f"state_exit must be in [0, state_enter], got {state_exit}")
 
     values = np.asarray(prices, dtype=np.float64)
+    if values.ndim != 1:
+        raise ValueError(f"prices must be one-dimensional (a Series or 1-D array), got shape {values.shape}")
     if not np.isfinite(values).all():
         raise ValueError("prices contains NaN or infinite values")
     if log_prices and (values <= 0).any():

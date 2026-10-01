@@ -1,3 +1,5 @@
+import datetime
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -39,12 +41,12 @@ def _reference_row(y: np.ndarray, t: int, min_window: int, max_window: int, firs
 
 
 class TestAgainstReference:
-    @pytest.mark.parametrize("t", [5, 9, 40, 71, 150, 299])
+    @pytest.mark.parametrize("t", [0, 4, 5, 9, 40, 71, 150, 299])
     def test_every_column_matches_independent_ols(self, t):
         prices = _random_walk()
         result = trend_scan_features(prices, min_window=6, max_window=48)
         row = result.iloc[t]
-        if t < 5:
+        if t < 5:                                                      # warmup: fewer than min_window bars
             assert row.isna().all()
             return
         expected = _reference_row(np.log(prices.to_numpy()), t, 6, 48)
@@ -94,6 +96,14 @@ class TestBreaks:
         result = trend_scan_features(prices, min_window=6, max_window=48)
         assert result.iloc[100:105].notna().all().all()
 
+    @pytest.mark.parametrize("gap", [pd.Timedelta(minutes=30), "30min", datetime.timedelta(minutes=30),
+                                     np.timedelta64(30, "m")])
+    def test_break_gap_accepts_any_duration_type(self, gap):
+        prices = _random_walk()
+        prices.index = prices.index.where(np.arange(len(prices)) < 100, prices.index + pd.Timedelta(days=2))
+        result = trend_scan_features(prices, max_window=48, break_gap=gap)
+        assert result.iloc[100:105].isna().all().all() and result.iloc[105:].notna().all().all()
+
     def test_break_gap_works_on_microsecond_index(self):
         prices = _random_walk()
         prices.index = prices.index.as_unit("us")
@@ -139,6 +149,15 @@ class TestBehaviour:
         assert isinstance(from_array.index, pd.RangeIndex)
         np.testing.assert_array_equal(from_array.to_numpy(), from_series.to_numpy())
 
+    def test_strength_never_leaves_unit_interval_on_exact_lines(self):
+        for prices in (np.exp(np.linspace(0, 1, 120)), np.exp(np.linspace(0, -1, 120)), np.linspace(1, 2, 120)):
+            result = trend_scan_features(prices, max_window=72).iloc[5:]
+            assert result["ts_r2"].between(0, 1).all() and result["ts_strength"].abs().le(1).all()
+
+    def test_empty_input(self):
+        result = trend_scan_features(pd.Series([], dtype=float), state_enter=0.5)
+        assert result.empty and list(result.columns) == SCAN_COLUMNS + ["ts_state"]
+
     def test_random_walk_integrity(self):
         result = trend_scan_features(_random_walk(n=2000, seed=11), max_window=72)
         assert list(result.columns) == SCAN_COLUMNS
@@ -182,7 +201,9 @@ class TestValidation:
     @pytest.mark.parametrize("kwargs", [{"min_window": 2}, {"min_window": 10, "max_window": 9},
                                         {"state_enter": 0.0}, {"state_enter": 1.2},
                                         {"state_enter": 0.5, "state_exit": 0.6},
-                                        {"state_enter": 0.5, "state_exit": -0.1}, {"break_gap": pd.Timedelta(0)}])
+                                        {"state_enter": 0.5, "state_exit": -0.1}, {"break_gap": pd.Timedelta(0)},
+                                        {"break_gap": "soon"}, {"break_gap": pd.NaT}, {"min_window": 6.5},
+                                        {"max_window": 48.5}, {"min_window": True}])
     def test_invalid_parameters(self, kwargs):
         with pytest.raises(ValueError):
             trend_scan_features(_random_walk(), **kwargs)
@@ -198,6 +219,15 @@ class TestValidation:
         with pytest.raises(ValueError):
             trend_scan_features(values)
         assert trend_scan_features(values, log_prices=False, max_window=24)["ts_direction"].iloc[-1] == 1
+
+    def test_two_dimensional_input_is_rejected(self):
+        with pytest.raises(ValueError, match="one-dimensional"):
+            trend_scan_features(_random_walk().to_frame())
+
+    def test_whole_number_floats_are_accepted(self):
+        prices = _random_walk()
+        pd.testing.assert_frame_equal(trend_scan_features(prices, min_window=6.0, max_window=48.0),
+                                      trend_scan_features(prices, min_window=6, max_window=48))
 
     def test_break_gap_needs_a_datetime_index(self):
         with pytest.raises(ValueError):
