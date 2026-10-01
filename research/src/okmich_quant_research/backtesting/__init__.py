@@ -6,6 +6,7 @@ from .utils import generate_seq_feature_func_for_training, generate_seq_features
 from .vectorbt_backtester import VectorBtBacktester
 from .regime_performance_analyzer import RegimePerformanceAnalyzer
 from .temporal_performance_analyzer import TemporalPerformanceAnalyzer
+from .excursion_lens import ExcursionLens, ExcursionConfig, EntryFill
 from .signal_adapter import signal_to_portfolio, positions_to_signals
 from .vbt_export import QuantframeExportMixin, FileFormat
 from .timing_significance import (
@@ -31,6 +32,9 @@ __all__ = [
     "VectorBtBacktester",
     "RegimePerformanceAnalyzer",
     "TemporalPerformanceAnalyzer",
+    "ExcursionLens",
+    "ExcursionConfig",
+    "EntryFill",
     "signal_to_portfolio",
     "positions_to_signals",
     "QuantframeExportMixin",
