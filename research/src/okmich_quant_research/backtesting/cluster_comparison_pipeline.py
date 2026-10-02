@@ -420,6 +420,16 @@ class ClusteringComparisonPipeline:
             print(f"\t❌ {model_key} failed on {sym}: {e}")
         return df, probs
 
+    def _excluded_present(self, df) -> List[str]:
+        """``columns_scaling_exclude`` narrowed to the columns ``df`` actually carries.
+
+        The config list is what the CALLER considers non-feature, and it is reasonable for it to name
+        every such column of the source parquet. ``get_data`` drops ``spread`` and ``real_volume``
+        before anything else sees the frame, so the two lists legitimately differ and selecting the
+        config list verbatim raises.
+        """
+        return [c for c in (self.pipeline_config.columns_scaling_exclude or []) if c in df.columns]
+
     def _attach_excluded_columns(self, df, block):
         """Join the excluded OHLC/volume columns onto `block`, keeping ONLY the block's own rows.
 
@@ -431,7 +441,7 @@ class ClusteringComparisonPipeline:
             return None
         if not self.pipeline_config.append_excluded_col_in_result:
             return block.copy()
-        excluded = [c for c in (self.pipeline_config.columns_scaling_exclude or []) if c in df.columns]
+        excluded = self._excluded_present(df)
         if not excluded:
             return block.copy()
         return df[excluded].join(block, how="right")
@@ -581,11 +591,13 @@ class ClusteringComparisonPipeline:
                 # are exactly the labelled ones.
                 self.test_output_dfs[sym] = self._attach_excluded_columns(df, output_df)
 
-            # Append excluded columns from the entire dataset
+            # Append excluded columns from the entire dataset. LEFT join, deliberately -- run()'s
+            # documented contract is a full-length frame with NaN train rows. Only the column list
+            # is intersected: `get_data` drops `spread` and `real_volume` on the way in, so a config
+            # naming either -- a reasonable thing to write, since both are columns of the parquet --
+            # raised KeyError here AFTER every model had already been fitted.
             if self.pipeline_config.append_excluded_col_in_result:
-                output_df = df[self.pipeline_config.columns_scaling_exclude].join(
-                    output_df
-                )
+                output_df = df[self._excluded_present(df)].join(output_df)
 
             # Save output (entire dataset)
             if self.pipeline_config.save_output_df:
@@ -673,11 +685,9 @@ class ClusteringComparisonPipeline:
                 sym, test_features, df_features_test, model_key
             )
 
-            # Append excluded columns from test set
+            # Append excluded columns from test set -- column list intersected, same reason as in run().
             if self.pipeline_config.append_excluded_col_in_result:
-                output_df = df_test[self.pipeline_config.columns_scaling_exclude].join(
-                    output_df
-                )
+                output_df = df_test[self._excluded_present(df_test)].join(output_df)
 
             output_dfs[sym] = (output_df, prob_matrix)
         return output_dfs
