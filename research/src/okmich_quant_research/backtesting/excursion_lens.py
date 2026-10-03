@@ -9,17 +9,19 @@ Per-trade definitions (``side`` = +1 long / -1 short; every excursion is >= 0):
     MAE        largest unrealized loss reached before the trade closed
     realized   what the trade banked (from its own entry/exit prices)
     giveback   MFE - realized: profit handed back before the exit
-    potential  peak favourable move FROM THE ENTRY, followed past the exit until the directional move ended. The move
-               ends at the first bar after the exit whose adverse extreme sits ``k`` ATR below the best favourable
-               price since entry (``k`` = the trade's ``move_end_col`` distance if given, else its stop distance, else
+    potential  peak favourable move FROM THE ENTRY until the directional move ended. The move ends at the first bar,
+               inside the trade or after it, whose adverse extreme sits ``k`` ATR below the best favourable price
+               since entry (``k`` = the trade's ``move_end_col`` distance if given, else its stop distance, else
                ``leg_retrace_atr``), or at the cap: end of the stamped day of the trade's LAST HELD bar,
                ``max_leg_bars`` after entry, or a data break after the exit. The cap never falls inside the trade.
+               If the move ended while the trade was open, a later rally is a NEW move: potential = MFE.
                potential >= MFE.
     extension  potential - MFE: how far the move kept going after the exit
     missed     potential - realized = giveback + extension ("you missed another 800 pts")
     trailing   what a ``k``-ATR trailing stop from the same entry would have banked: the live-achievable benchmark
                that splits ``missed`` into what a better exit rule could catch and what only hindsight could catch.
-               It always covers at least the real trade's holding period, gaps included.
+               It uses the same k-ATR retrace rule as potential and always covers at least the real trade's holding
+               period, gaps included.
 
 Three questions, each against a random baseline:
     entry_quality()  MFE/MAE ratio over FIXED windows after entry (so the exit cannot flatter the entry) and the share
@@ -27,23 +29,28 @@ Three questions, each against a random baseline:
     exit_quality()   realized vs giveback vs extension, the trailing-stop benchmark, and the drift AFTER the exit.
     stop_analysis()  MAE vs final result, the recovery curve P(win | MAE >= x), and stop candidates re-simulated on
                      the trade paths. The suggested stop is fitted on earlier trades and judged on later ones
-                     (walk-forward).
+                     (walk-forward, with trades still open at the test fold's start purged from training).
 
 Baselines:
     entries and after-exit drift  CIRCULAR SHIFT of the whole trade schedule by a random number of whole calendar
-                     days. Spacing, overlap, long/short sequence and hour of day are kept; only the alignment with price
-                     changes. Independent random bars would ignore that real trades overlap and repeat a side, which
-                     makes the bands far too narrow (a random-walk book of back-to-back trades fell outside its "95%"
-                     band 25% of the time). Same idea as ``timing_significance.circular_shift_null``.
+                     days, on the wall clock. Spacing, overlap, long/short sequence and hour of day are kept; only the
+                     alignment with price changes. Independent random bars would ignore that real trades overlap and
+                     repeat a side, which makes the bands far too narrow (a random-walk book of back-to-back trades
+                     fell outside its "95%" band 25% of the time). Same idea as
+                     ``timing_significance.circular_shift_null``.
     exit timing      random exits drawn from the strategy's own holding times, entries fixed.
     verdicts         each family of cells (horizons, barriers, after-exit offsets) is judged with ONE family-wise max-z
                      test (Westfall-Young) against the same null, so testing five cells does not buy five chances.
                      The per-cell bands in the tables and charts are point-wise. See ``significance()``.
 
+Timing vs fills: exit timing and after-exit drift are measured from the exit BAR's fill price (its close or open,
+plus spread for a short), for the real trades and the baselines alike. Slippage, an intrabar stop fill or a limit
+fill therefore never reads as good or bad timing; ``exit_quality()`` reports it separately as ``fill_effect_atr``.
+
 Causality: ATR is taken from the bar BEFORE the entry bar. ``potential`` and ``extension`` use hindsight by design.
 They are evaluation measures only and must never feed a strategy. Excursions use bar highs/lows (the bid); with
 ``spread`` a long buys at bid + spread and a short covers at bid + spread (pass ``spread`` only when the trade prices
-include it, so realized and path agree).
+include it, so realized and path agree; trades without prices are priced that way).
 
 Dual-mode, like its siblings:
     from okmich_quant_research.backtesting.excursion_lens import ExcursionLens
@@ -80,7 +87,7 @@ class ExcursionConfig:
     entry_fill: EntryFill = EntryFill.CLOSE
     leg_retrace_atr: float = 2.0  # move-end retrace when trades carry no stop price
     max_leg_bars: int = 500  # safety cap on how far past the entry the potential is followed
-    cap_at_day_end: bool = True  # potential stops at the end of the last held bar's stamped day (False for daily bars)
+    cap_at_day_end: bool | None = None  # cap the potential at the last held bar's day end; None -> only intraday bars
     horizons: tuple[int, ...] | None = None  # entry windows; None -> median hold x (0.25, 0.5, 1, 2, 4)
     barriers_atr: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0, 3.0)
     post_exit_bars: int | None = None  # after-exit window; None -> median holding bars
@@ -122,10 +129,17 @@ _MIN_STOP_COVERAGE = 0.5  # a stop level is a candidate only if it can be simula
 
 
 def _midrank(real: np.ndarray, null: np.ndarray) -> np.ndarray:
-    """Share of null draws below ``real``, ties counted half: a null identical to ``real`` sits at 0.5, not 0."""
+    """Share of FINITE null draws below ``real``, ties counted half (a null identical to ``real`` sits at 0.5).
+
+    Missing draws are left out, exactly as ``np.nanpercentile`` leaves them out of the band.
+    """
     real = np.atleast_1d(real)
     null = null.reshape(len(null), -1)
-    return np.mean(null < real[None, :], axis=0) + 0.5 * np.mean(null == real[None, :], axis=0)
+    finite = np.isfinite(null)
+    count = finite.sum(axis=0)
+    below = ((null < real[None, :]) & finite).sum(axis=0)
+    ties = ((null == real[None, :]) & finite).sum(axis=0)
+    return np.where(count > 0, (below + 0.5 * ties) / np.maximum(count, 1), np.nan)
 
 
 def _nanmean(values: np.ndarray) -> np.ndarray:
@@ -196,6 +210,7 @@ def _trade_kernel(e_idx, x_idx, side, p0, p1, atr, k_leg, cap_end, offset, open_
         first, last_in = e + offset, x + offset - 1
         held_end = min(max(last_in, e), n - 1)
         best, worst = 0.0, 0.0
+        ended_at = -1  # first held bar whose adverse extreme retraced k ATR from the best so far: the move ended there
         for q in range(nq):
             stop_out[i, q] = realized
         for j in range(first, min(last_in, n - 1) + 1):
@@ -204,15 +219,17 @@ def _trade_kernel(e_idx, x_idx, side, p0, p1, atr, k_leg, cap_end, offset, open_
                 if not stop_hit[i, q] and adv >= stop_grid[q] * a:
                     stop_out[i, q] = min(_price_f(s, open_[j], spr[j], ref), -stop_grid[q] * a)
                     stop_hit[i, q] = True
+            if ended_at < 0 and best + adv >= k_leg[i] * a:
+                ended_at = j
             best = max(best, f)
             worst = max(worst, adv)
         mfe[i] = max(best, realized, 0.0)
         mae[i] = max(worst, -realized, 0.0)
 
         b = mfe[i]
-        end = held_end
+        end = held_end if ended_at < 0 else ended_at
         exit_seg = seg[held_end]
-        if b - realized < k_leg[i] * a:  # the move had not already ended at the exit: follow it
+        if ended_at < 0 and b - realized < k_leg[i] * a:  # the move had not ended in the trade or at the exit
             j = x + offset
             while j <= cap_end[i] and j < n and seg[j] == exit_seg:
                 f, adv = _fav_adv(s, high[j], low[j], spr[j], ref)
@@ -247,15 +264,17 @@ def _trade_kernel(e_idx, x_idx, side, p0, p1, atr, k_leg, cap_end, offset, open_
 
 
 @njit(cache=True)
-def _window_excursions(ref, high, low, spr, seg, offset, horizons):
-    """Per bar and horizon: long MFE, long MAE, short MFE, short MAE (price units). NaN when a break cuts the window.
+def _window_excursions(targets, ref, high, low, spr, atr, seg, offset, horizons):
+    """For each target bar and horizon: long MFE, long MAE, short MFE, short MAE in units of that bar's ATR. NaN when
+    a break cuts the window or the bar has no positive ATR.
 
     A long buys at ref + spread and sells at the bid; a short sells at ref and covers at the bid + spread.
     """
-    n, nh = ref.shape[0], horizons.shape[0]
-    out = np.full((4, nh, n), np.nan)
-    for t in range(n):
-        if not np.isfinite(ref[t]):
+    n, nh, m = ref.shape[0], horizons.shape[0], targets.shape[0]
+    out = np.full((4, nh, m), np.nan)
+    for c in range(m):
+        t = targets[c]
+        if not (np.isfinite(ref[t]) and np.isfinite(atr[t]) and atr[t] > 0):
             continue
         ref_long = ref[t] + spr[t]
         hi, lo, his, los = -np.inf, np.inf, -np.inf, np.inf
@@ -266,41 +285,46 @@ def _window_excursions(ref, high, low, spr, seg, offset, horizons):
             steps += 1
             j += 1
             if steps == horizons[k]:
-                out[0, k, t] = max(hi - ref_long, 0.0)
-                out[1, k, t] = max(ref_long - lo, 0.0)
-                out[2, k, t] = max(ref[t] - los, 0.0)
-                out[3, k, t] = max(his - ref[t], 0.0)
+                out[0, k, c] = max(hi - ref_long, 0.0) / atr[t]
+                out[1, k, c] = max(ref_long - lo, 0.0) / atr[t]
+                out[2, k, c] = max(ref[t] - los, 0.0) / atr[t]
+                out[3, k, c] = max(his - ref[t], 0.0) / atr[t]
                 k += 1
     return out
 
 
 @njit(cache=True)
-def _first_passage(ref, high, low, spr, atr, seg, offset, barriers, cap):
-    """Per bar and barrier k: 1 if +k ATR came first, 0 if -k ATR did, 0.5 if both in one bar, NaN if neither by
-    the cap.
-
-    Same fills as ``_window_excursions``: a long's barriers sit around ref + spread.
+def _first_passage(targets, ref, high, low, spr, atr, seg, offset, barriers, cap):
+    """Per target bar and barrier k: 1 if +k ATR came first, 0 if -k ATR did, 0.5 if both in one bar, NaN if neither
+    by the cap. One forward scan resolves every barrier. Same fills as ``_window_excursions``.
     """
-    n, nk = ref.shape[0], barriers.shape[0]
-    out = np.full((2, nk, n), np.nan)
-    for t in range(n):
+    n, nk, m = ref.shape[0], barriers.shape[0], targets.shape[0]
+    out = np.full((2, nk, m), np.nan)
+    for c in range(m):
+        t = targets[c]
         if not (np.isfinite(ref[t]) and np.isfinite(atr[t]) and atr[t] > 0):
             continue
         ref_long = ref[t] + spr[t]
-        for q in range(nk):
-            d = barriers[q] * atr[t]
-            res_l, res_s = np.nan, np.nan
-            j, steps = t + offset, 0
-            while steps < cap and j < n and seg[j] == seg[t] and (np.isnan(res_l) or np.isnan(res_s)):
-                if np.isnan(res_l):
+        res_l, res_s = np.full(nk, np.nan), np.full(nk, np.nan)
+        unresolved = 2 * nk
+        j, steps = t + offset, 0
+        while steps < cap and j < n and seg[j] == seg[t] and unresolved > 0:
+            for q in range(nk):
+                d = barriers[q] * atr[t]
+                if np.isnan(res_l[q]):
                     up, dn = high[j] >= ref_long + d, low[j] <= ref_long - d
-                    res_l = 0.5 if (up and dn) else (1.0 if up else (0.0 if dn else np.nan))
-                if np.isnan(res_s):
+                    if up or dn:
+                        res_l[q] = 0.5 if (up and dn) else (1.0 if up else 0.0)
+                        unresolved -= 1
+                if np.isnan(res_s[q]):
                     fav, adv = low[j] + spr[j] <= ref[t] - d, high[j] + spr[j] >= ref[t] + d
-                    res_s = 0.5 if (fav and adv) else (1.0 if fav else (0.0 if adv else np.nan))
-                j += 1
-                steps += 1
-            out[0, q, t], out[1, q, t] = res_l, res_s
+                    if fav or adv:
+                        res_s[q] = 0.5 if (fav and adv) else (1.0 if fav else 0.0)
+                        unresolved -= 1
+            j += 1
+            steps += 1
+        out[0, :, c] = res_l
+        out[1, :, c] = res_s
     return out
 
 
@@ -338,12 +362,15 @@ class ExcursionLens:
         ----------
         trades_df    : vectorbt ``pf.trades.records_readable`` (ONE portfolio column) or a frame with entry_time,
                        exit_time, side (+1/-1 or Long/Short) and optionally entry_price / exit_price. Open trades
-                       (``Status == "Open"``) are dropped.
+                       (``Status == "Open"`` or no exit time) are dropped. Without prices, trades are priced at the
+                       bar's fill (``entry_fill``), a long paying the spread on entry and a short on exit.
         ohlc         : open/high/low/close bars; every trade timestamp must be one of its index stamps.
         spread       : optional bid-ask spread in PRICE units: a scalar, an array with one value per ``ohlc`` row, or a
                        Series indexed like ``ohlc``. A long pays it on entry, a short on exit.
-        stop_col     : optional trades column with each trade's stop price. It enables R units and, unless
-                       ``move_end_col`` is given, sets the move-end retrace ``k`` to the trade's own stop distance.
+        stop_col     : optional trades column with each trade's initial stop price, on the loss side of the entry. It
+                       enables R units, lets the stop analysis recognise grid levels wider than a stop the trade hit,
+                       and, unless ``move_end_col`` is given, sets the move-end retrace ``k`` to the stop distance. A
+                       stop at or beyond breakeven is not a risk distance and is ignored for that trade (warning).
         move_end_col : optional trades column with each trade's move-end retrace distance in PRICE units. Use it when
                        the exit itself is a retrace of the stop distance (e.g. a CTL flip): with ``k`` equal to the
                        exit rule, the move ends exactly at the exit and ``extension`` is zero by construction.
@@ -353,6 +380,9 @@ class ExcursionLens:
         self._ohlc = self._prepare_ohlc(ohlc)
         self._spr = self._spread_array(spread, ohlc.index)
         self._seg, self._seg_end, self._day_end = self._segments(self._ohlc.index)
+        spacing = self._ohlc.index.to_series().diff().median()
+        self._cap_day = (self.config.cap_at_day_end if self.config.cap_at_day_end is not None
+                         else bool(pd.notna(spacing) and spacing < pd.Timedelta(days=1)))
         self._atr_ref = self._atr(self._ohlc, self.config.atr_period).shift(1).to_numpy()
         self._offset = 1 if self.config.entry_fill is EntryFill.CLOSE else 0
         self._ref_price = self._ohlc[self.config.entry_fill.value].to_numpy(dtype=float)
@@ -365,16 +395,42 @@ class ExcursionLens:
 
     @classmethod
     def from_portfolio(cls, portfolio, ohlc: pd.DataFrame, **kwargs) -> "ExcursionLens":
-        """Backtest mode: build from a single-column vectorbt ``Portfolio`` (select one with ``pf[col]`` first)."""
+        """Backtest mode: build from a single-column vectorbt ``Portfolio`` (select one with ``pf[col]`` first).
+
+        vectorbt's trade records carry no stop price. If the portfolio used stops, build the records yourself, add
+        each trade's stop price and pass ``stop_col``; otherwise stop levels wider than a stop a trade hit cannot be
+        recognised as unknowable. ``from_signal`` does this for a scalar, non-trailing ``sl_stop``.
+        """
         return cls(portfolio.trades.records_readable, ohlc, **kwargs)
 
     @classmethod
     def from_signal(cls, ohlc: pd.DataFrame, signal_fn, close_col: str = "close", vbt_kwargs: dict | None = None,
                     **kwargs) -> "ExcursionLens":
-        """Alpha-hunting mode: ``signal_fn(ohlc)`` returns signed positions ({-1, 0, +1}); trades come from vectorbt."""
+        """Alpha-hunting mode: ``signal_fn(ohlc)`` returns signed positions ({-1, 0, +1}); trades come from vectorbt.
+
+        Trades are priced on ``ohlc``'s own close (column names match case-insensitively), the same series the lens
+        measures the path on. A scalar, non-trailing ``sl_stop`` in ``vbt_kwargs`` becomes each trade's stop price.
+        """
         from .signal_adapter import signal_to_portfolio
-        pf = signal_to_portfolio(ohlc, signal_fn, close_col=close_col, **(vbt_kwargs or {}))
-        return cls.from_portfolio(pf, ohlc, **kwargs)
+        names = {str(c).strip().lower(): c for c in ohlc.columns}
+        if str(close_col).strip().lower() != "close" or "close" not in names:
+            raise ValueError(f"from_signal prices trades on ohlc's close, the series the lens measures; got close_col="
+                             f"{close_col!r}. Pass a frame whose open/high/low/close describe the traded price.")
+        vbt = dict(vbt_kwargs or {})
+        pf = signal_to_portfolio(ohlc, signal_fn, close_col=names["close"], open_col=names.get("open", "open"), **vbt)
+        records = pf.trades.records_readable
+        stop = vbt.get("sl_stop")
+        if stop is not None and "stop_col" not in kwargs:
+            if np.ndim(stop) == 0 and not vbt.get("sl_trail", False):
+                records = records.copy()
+                is_long = records["Direction"].astype(str).str.strip().str.lower() == "long"
+                entry = records["Avg Entry Price"].to_numpy(dtype=float)
+                records["Stop Price"] = np.where(is_long, entry * (1 - float(stop)), entry * (1 + float(stop)))
+                kwargs["stop_col"] = "Stop Price"
+            else:
+                warnings.warn("ExcursionLens: sl_stop is per-bar or trailing, so stop prices cannot be rebuilt; stop "
+                              "levels wider than a stop a trade hit are not recognised as unknowable.")
+        return cls(records, ohlc, **kwargs)
 
     # ------------------------------------------------------------------
     # Preparation
@@ -450,11 +506,12 @@ class ExcursionLens:
         if "Column" in df.columns and df["Column"].nunique() > 1:
             raise ValueError(f"trades_df holds trades from {df['Column'].nunique()} portfolio columns, but one ohlc "
                              "path can only score one of them. Select a column first (pf[col], or filter on 'Column').")
+        open_trades = pd.to_datetime(self._column(df, "exit_time")).isna().to_numpy()
         if "Status" in df.columns:
-            open_trades = (df["Status"].astype(str) == "Open").to_numpy()
-            if open_trades.any():
-                warnings.warn(f"ExcursionLens: dropped {int(open_trades.sum())} open trade(s) (no exit yet).")
-            df = df[~open_trades]
+            open_trades |= (df["Status"].astype(str) == "Open").to_numpy()
+        if open_trades.any():
+            warnings.warn(f"ExcursionLens: dropped {int(open_trades.sum())} open trade(s) (no exit yet).")
+        df = df[~open_trades]
         side_raw = self._column(df, "side")
         side = (np.sign(side_raw.astype(float)) if pd.api.types.is_numeric_dtype(side_raw)
                 else side_raw.astype(str).str.strip().str.lower().map({"long": 1, "short": -1}))
@@ -466,13 +523,16 @@ class ExcursionLens:
         if unmatched:
             raise ValueError(f"{unmatched} trade timestamp(s) are not bars of `ohlc`. Pass the same bars the trades "
                              "were generated on (timestamps must match exactly).")
+        side = np.asarray(side, dtype=float)
         out = pd.DataFrame({"entry_time": entry_time.to_numpy(), "exit_time": exit_time.to_numpy(),
-                            "side": np.asarray(side, dtype=float), "e_idx": e_idx, "x_idx": x_idx})
+                            "side": side, "e_idx": e_idx, "x_idx": x_idx})
         entry_price = self._column(df, "entry_price", required=False)
         exit_price = self._column(df, "exit_price", required=False)
+        ref, spr = self._ref_price, self._spr
         out["entry_price"] = (entry_price.to_numpy(dtype=float) if entry_price is not None
-                              else self._ref_price[e_idx])
-        out["exit_price"] = exit_price.to_numpy(dtype=float) if exit_price is not None else self._ref_price[x_idx]
+                              else np.where(side > 0, ref[e_idx] + spr[e_idx], ref[e_idx]))
+        out["exit_price"] = (exit_price.to_numpy(dtype=float) if exit_price is not None
+                             else np.where(side > 0, ref[x_idx], ref[x_idx] + spr[x_idx]))
         out["stop_price"] = df[stop_col].to_numpy(dtype=float) if stop_col else np.nan
         out["move_end"] = df[move_end_col].to_numpy(dtype=float) if move_end_col else np.nan
         atr = self._atr_ref[e_idx]
@@ -495,7 +555,7 @@ class ExcursionLens:
         n = len(self._ohlc)
         held_end = np.clip(np.maximum(x_idx + self._offset - 1, e_idx), 0, n - 1)
         cap = np.minimum(e_idx + self._offset + self.config.max_leg_bars - 1, self._seg_end[held_end])
-        if self.config.cap_at_day_end:
+        if self._cap_day:
             cap = np.minimum(cap, self._day_end[held_end])
         return np.maximum(cap, held_end).astype(np.int64)
 
@@ -504,9 +564,14 @@ class ExcursionLens:
         e_idx, x_idx = t["e_idx"].to_numpy(np.int64), t["x_idx"].to_numpy(np.int64)
         side, p0, p1 = t["side"].to_numpy(float), t["entry_price"].to_numpy(float), t["exit_price"].to_numpy(float)
         atr = self._atr_ref[e_idx]
-        stop_dist = np.abs(p0 - t["stop_price"].to_numpy(float))
+        risk = side * (p0 - t["stop_price"].to_numpy(float))  # positive only when the stop is on the loss side
+        wrong_side = np.isfinite(risk) & (risk <= 0)
+        if wrong_side.any():
+            warnings.warn(f"ExcursionLens: {int(wrong_side.sum())} trade(s) have a stop at or beyond breakeven; it is "
+                          "not a risk distance and is ignored for those trades (no R units, default k).")
+        stop_dist = np.where(np.isfinite(risk) & (risk > 0), risk, np.nan)
         move_end = t["move_end"].to_numpy(float)
-        k_leg = np.where(np.isfinite(stop_dist) & (stop_dist > 0), stop_dist / atr, self.config.leg_retrace_atr)
+        k_leg = np.where(np.isfinite(stop_dist), stop_dist / atr, self.config.leg_retrace_atr)
         k_leg = np.where(np.isfinite(move_end) & (move_end > 0), move_end / atr, k_leg)
         grid = np.asarray(self.config.stop_grid_atr, dtype=float)
         mfe, mae, potential, leg_end, trail, trail_end, stop_out, stop_hit = _trade_kernel(
@@ -530,20 +595,37 @@ class ExcursionLens:
         # A trade that hit its OWN stop has an unknown future: a wider grid stop would have kept it open. Those
         # cells cannot be simulated and are left out, never filled with the original stop-out loss.
         own_stop = stop_dist / atr
-        stopped_by_own = np.isfinite(own_stop) & (own_stop > 0) & (mae >= stop_dist * (1 - 1e-9))
+        stopped_by_own = np.isfinite(own_stop) & (mae >= stop_dist * (1 - 1e-9))
         unknowable = stopped_by_own[:, None] & (grid[None, :] > own_stop[:, None] * (1 + 1e-9))
         self._stop_out_atr = np.where(unknowable, np.nan, stop_out / atr[:, None])
         self._stop_hit = stop_hit & ~unknowable
         self._holds = np.maximum(x_idx - e_idx, 1)
+
+    def _fill_at(self, bars: np.ndarray, side: np.ndarray) -> np.ndarray:
+        """Exit fill at ``bars`` (-1 = no bar -> NaN): the bar's close/open, plus the spread when a short covers."""
+        safe = np.where(bars >= 0, bars, 0)
+        fill = np.where(side > 0, self._ref_price[safe], self._ref_price[safe] + self._spr[safe])
+        return np.where(bars >= 0, fill, np.nan)
 
     # ------------------------------------------------------------------
     # Circular-shift null (shared by entries and after-exit drift)
     # ------------------------------------------------------------------
 
     @cached_property
-    def _span_days(self) -> int:
+    def _wall(self) -> pd.DatetimeIndex:
+        """Wall-clock stamps: a whole-day shift keeps the hour of day even across a DST change."""
         index = self._ohlc.index
-        return int((index[-1].normalize() - index[0].normalize()).days) + 1
+        return index.tz_localize(None) if index.tz is not None else index
+
+    @cached_property
+    def _wall_lookup(self) -> pd.Series:
+        """Wall time -> first bar position (a DST fall-back hour repeats wall times; the first one is kept)."""
+        wall = self._wall
+        return pd.Series(np.arange(len(wall)), index=wall)[~wall.duplicated(keep="first")]
+
+    @cached_property
+    def _span_days(self) -> int:
+        return int((self._wall[-1].normalize() - self._wall[0].normalize()).days) + 1
 
     @cached_property
     def _shift_days(self) -> np.ndarray:
@@ -562,11 +644,11 @@ class ExcursionLens:
         return rng.choice(candidates, self.config.n_null, replace=candidates.size < self.config.n_null)
 
     def _shifted(self, positions: np.ndarray, days: int) -> np.ndarray:
-        """Bar positions of ``positions`` moved ``days`` calendar days on, wrapping around; -1 where no bar exists."""
-        index = self._ohlc.index
-        origin = index[0].normalize()
-        moved = origin + (index[positions] - origin + pd.Timedelta(days=int(days))) % pd.Timedelta(days=self._span_days)
-        return index.get_indexer(moved)
+        """Bar positions of ``positions`` moved ``days`` days on the wall clock, wrapping around; -1 where no bar."""
+        wall = self._wall
+        origin = wall[0].normalize()
+        moved = origin + (wall[positions] - origin + pd.Timedelta(days=int(days))) % pd.Timedelta(days=self._span_days)
+        return self._wall_lookup.reindex(moved).fillna(-1).to_numpy(dtype=np.int64)
 
     # ------------------------------------------------------------------
     # Entry quality (exit-agnostic, fixed windows, circular-shift null)
@@ -580,25 +662,37 @@ class ExcursionLens:
         return np.unique(np.maximum(np.round(median * np.array([0.25, 0.5, 1, 2, 4])), 1).astype(np.int64))
 
     @cached_property
+    def _entry_targets(self) -> tuple[np.ndarray, np.ndarray]:
+        """Every bar an entry statistic is ever read at (real entries and all their shifted copies), and the column
+        each bar occupies; only those bars are scanned."""
+        e_idx = self.trades["e_idx"].to_numpy()
+        bars = np.concatenate([e_idx] + [self._shifted(e_idx, days) for days in self._shift_days])
+        targets = np.unique(bars[bars >= 0])
+        column = np.full(len(self._ohlc), -1, dtype=np.int64)
+        column[targets] = np.arange(targets.size)
+        return targets, column
+
+    @cached_property
     def _bar_excursions(self) -> tuple[np.ndarray, np.ndarray]:
         o = self._ohlc
-        win = _window_excursions(self._ref_price, o["high"].to_numpy(), o["low"].to_numpy(), self._spr, self._seg,
-                                 self._offset, self.horizons)
-        fp = _first_passage(self._ref_price, o["high"].to_numpy(), o["low"].to_numpy(), self._spr, self._atr_ref,
-                            self._seg, self._offset, np.asarray(self.config.barriers_atr, dtype=float),
+        targets, _ = self._entry_targets
+        win = _window_excursions(targets, self._ref_price, o["high"].to_numpy(), o["low"].to_numpy(), self._spr,
+                                 self._atr_ref, self._seg, self._offset, self.horizons)
+        fp = _first_passage(targets, self._ref_price, o["high"].to_numpy(), o["low"].to_numpy(), self._spr,
+                            self._atr_ref, self._seg, self._offset, np.asarray(self.config.barriers_atr, dtype=float),
                             self.config.max_leg_bars)
-        atr = np.where(self._atr_ref > 0, self._atr_ref, np.nan)
-        return win / atr, fp
+        return win, fp
 
     def _entry_stats(self, bars: np.ndarray, side: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Mean MFE, MAE (ATR) per horizon and P(+k first) per barrier for entries at ``bars`` (-1 = no bar)."""
         win, fp = self._bar_excursions
+        _, column = self._entry_targets
         valid = bars >= 0
-        safe = np.where(valid, bars, 0)
+        cols = column[np.where(valid, bars, 0)]
         is_long = side > 0
-        mfe = np.where(is_long, win[0][:, safe], win[2][:, safe])
-        mae = np.where(is_long, win[1][:, safe], win[3][:, safe])
-        hits = np.where(is_long, fp[0][:, safe], fp[1][:, safe])
+        mfe = np.where(is_long, win[0][:, cols], win[2][:, cols])
+        mae = np.where(is_long, win[1][:, cols], win[3][:, cols])
+        hits = np.where(is_long, fp[0][:, cols], fp[1][:, cols])
         for block in (mfe, mae, hits):
             block[:, ~valid] = np.nan
         return _nanmean(mfe), _nanmean(mae), _nanmean(hits)
@@ -627,8 +721,8 @@ class ExcursionLens:
         by_barrier = pd.DataFrame({"barrier_atr": self.config.barriers_atr, "p_up_first": hits})
         by_barrier = by_barrier.join(self._band(hits, null_hits))
         fp = self._bar_excursions[1]
-        bars = self.trades["e_idx"].to_numpy()
-        by_barrier["resolved_share"] = np.mean(np.isfinite(np.where(side > 0, fp[0][:, bars], fp[1][:, bars])), axis=1)
+        cols = self._entry_targets[1][self.trades["e_idx"].to_numpy()]
+        by_barrier["resolved_share"] = np.mean(np.isfinite(np.where(side > 0, fp[0][:, cols], fp[1][:, cols])), axis=1)
         return by_horizon, by_barrier
 
     @staticmethod
@@ -641,9 +735,10 @@ class ExcursionLens:
 
     # ------------------------------------------------------------------
     # Exit quality (entries fixed)
-    #   timing: your exits vs random exits drawn from your own holding times (same entries)
+    #   timing: your exit bars vs random exit bars drawn from your own holding times (same entries)
     #   after-exit drift: did the trade's direction still have edge after the exit? vs the same exits on the
     #   circular-shifted schedule (a direction with no edge left)
+    #   Both are measured from the exit BAR's fill price, so fills (slippage, intrabar stops) never read as timing.
     # ------------------------------------------------------------------
 
     @cached_property
@@ -656,13 +751,14 @@ class ExcursionLens:
         """True when every trade held the same number of bars: random-exit timing then equals the real exits."""
         return np.unique(self._holds).size == 1
 
-    def _drift_after(self, bars: np.ndarray, side: np.ndarray, ref_price: np.ndarray) -> np.ndarray:
-        """Mean move in ``side``'s favour ``d`` bars after ``bars`` (-1 = no bar), from ``ref_price``, in that bar's
-        ATR. ``ref_price`` is the exit fill, so the move always covers the same bars for real and shifted exits."""
+    def _drift_after(self, bars: np.ndarray, side: np.ndarray) -> np.ndarray:
+        """Mean move in ``side``'s favour ``d`` bars after ``bars`` (-1 = no bar), from each bar's exit fill, in that
+        bar's ATR. Real and shifted exits use the same fill, so they always cover the same bars."""
         n = len(self._ohlc)
         close = self._ohlc["close"].to_numpy()
         valid = bars >= 0
         safe = np.where(valid, bars, 0)
+        ref_price = self._fill_at(bars, side)
         atr = self._atr_ref[safe]
         usable = valid & np.isfinite(atr) & (atr > 0)
         out = np.empty(len(self.post_exit_offsets))
@@ -681,44 +777,49 @@ class ExcursionLens:
         hold = rng.choice(self._holds, len(e_idx))
         return np.minimum(e_idx + hold, len(self._ohlc) - 1)
 
+    def _realized_at_bars(self, bars: np.ndarray) -> float:
+        """Mean result per trade (entry ATR) if every trade had exited at the fill price of ``bars``."""
+        t = self.trades
+        side, p0, atr = t["side"].to_numpy(), t["entry_price"].to_numpy(), t["atr_entry"].to_numpy()
+        return float(_nanmean((side * (self._fill_at(bars, side) - p0) / atr)[None, :])[0])
+
     @cached_property
     def _exit_null(self) -> tuple[np.ndarray, np.ndarray]:
         rng = np.random.default_rng(self.config.seed + 1)
-        t = self.trades
-        side, p0, atr = t["side"].to_numpy(), t["entry_price"].to_numpy(), t["atr_entry"].to_numpy()
-        x_idx = t["x_idx"].to_numpy()
+        side, x_idx = self.trades["side"].to_numpy(), self.trades["x_idx"].to_numpy()
         realized, drift = [], []
         for days in self._shift_days:
-            bars = self._random_exit_bars(rng)
-            exit_f = np.where(side > 0, self._ref_price[bars] - p0, p0 - (self._ref_price[bars] + self._spr[bars]))
-            realized.append(_nanmean((exit_f / atr)[None, :])[0])
-            anchors = self._shifted(x_idx, days)
-            safe = np.where(anchors >= 0, anchors, 0)
-            fill = np.where(side > 0, self._ref_price[safe], self._ref_price[safe] + self._spr[safe])
-            drift.append(self._drift_after(anchors, side, fill))
+            realized.append(self._realized_at_bars(self._random_exit_bars(rng)))
+            drift.append(self._drift_after(self._shifted(x_idx, days), side))
         return np.asarray(realized), np.stack(drift)
 
     @cached_property
     def _drift_real(self) -> np.ndarray:
-        t = self.trades
-        return self._drift_after(t["x_idx"].to_numpy(), t["side"].to_numpy(), t["exit_price"].to_numpy())
+        return self._drift_after(self.trades["x_idx"].to_numpy(), self.trades["side"].to_numpy())
 
     def exit_quality(self) -> tuple[pd.Series, pd.DataFrame]:
-        """(summary, after_exit_drift). Summary means are per trade in entry ATR; drift is in ATR at the exit bar."""
+        """(summary, after_exit_drift). Summary means are per trade in entry ATR; drift is in ATR at the exit bar.
+
+        ``realized_atr`` is what the trades banked. The timing test compares ``realized_at_exit_bar_atr`` (the same
+        exits at their bars' fill price) with random exits priced the same way; ``fill_effect_atr`` is the
+        difference, i.e. what slippage or intrabar fills added or cost.
+        """
         t = self.trades
         null_realized, null_drift = self._exit_null
         real_drift = self._drift_real
         realized_mean = t["realized_atr"].mean()
+        at_bar = self._realized_at_bars(t["x_idx"].to_numpy())
         summary = pd.Series({
             "trades": len(t), "median_hold_bars": float(np.median(self._holds)), "fixed_hold": float(self.fixed_hold),
-            "realized_atr": realized_mean, "mfe_atr": t["mfe_atr"].mean(),
-            "giveback_atr": t["giveback_atr"].mean(), "extension_atr": t["extension_atr"].mean(),
-            "potential_atr": t["potential_atr"].mean(), "missed_atr": t["missed_atr"].mean(),
-            "trailing_atr": t["trailing_atr"].mean(), "median_capture": t["capture"].median(),
-            "median_potential_capture": t["potential_capture"].median(),
+            "realized_atr": realized_mean, "realized_at_exit_bar_atr": at_bar,
+            "fill_effect_atr": realized_mean - at_bar,
+            "mfe_atr": t["mfe_atr"].mean(), "giveback_atr": t["giveback_atr"].mean(),
+            "extension_atr": t["extension_atr"].mean(), "potential_atr": t["potential_atr"].mean(),
+            "missed_atr": t["missed_atr"].mean(), "trailing_atr": t["trailing_atr"].mean(),
+            "median_capture": t["capture"].median(), "median_potential_capture": t["potential_capture"].median(),
             "random_exit_lo": np.percentile(null_realized, 2.5), "random_exit_median": np.median(null_realized),
             "random_exit_hi": np.percentile(null_realized, 97.5),
-            "exit_percentile_vs_random": float(_midrank(np.array([realized_mean]), null_realized[:, None])[0]),
+            "exit_percentile_vs_random": float(_midrank(np.array([at_bar]), null_realized[:, None])[0]),
         })
         drift = pd.DataFrame({"bars_after_exit": self.post_exit_offsets, "drift_atr": real_drift})
         return summary, drift.join(self._band(real_drift, null_drift))
@@ -766,7 +867,9 @@ class ExcursionLens:
 
         Stop levels wider than a trade's own stop cannot be simulated for trades that hit that stop. Those cells are
         left out: every level is compared with the same trades' own exits, and a level must cover at least half the
-        trades to be chosen.
+        trades to be chosen. ``best_stop_improves`` says whether the best level actually beats the trades' own exits.
+        Walk-forward: trades still open when a test fold starts are purged from its training set, and a fold whose
+        chosen level covers less than half its trades is reported as not testable (NaN improvement).
         """
         t = self.trades
         grid = np.asarray(self.config.stop_grid_atr, dtype=float)
@@ -785,36 +888,46 @@ class ExcursionLens:
                               "share_stopped": stopped_share, "simulable_share": coverage})
         baseline = realized.mean()
 
+        entry_time, exit_time = t["entry_time"].to_numpy(), t["exit_time"].to_numpy()
         n_folds = min(self.config.n_stop_folds, len(t))
         folds = np.array_split(everyone, n_folds) if n_folds >= 2 else []
         walk = []
         for f in range(1, len(folds)):
-            train, test = np.concatenate(folds[:f]), folds[f]
-            _, train_gain, train_coverage = self._stop_gain(train, realized)
-            best = self._pick(train_gain, train_coverage)
-            use_stop = best is not None and train_gain[best] > 0
-            if use_stop:
-                test_with, test_gain, _ = self._stop_gain(test, realized)
-                with_result, without = test_with[best], test_with[best] - test_gain[best]
+            earlier, test = np.concatenate(folds[:f]), folds[f]
+            train = earlier[exit_time[earlier] < entry_time[test[0]]]  # purge trades still open at the test start
+            row = {"fold": f, "train_trades": len(train), "purged": len(earlier) - len(train), "test_trades": len(test),
+                   "chosen_stop_atr": np.nan, "test_coverage": np.nan}
+            _, train_gain, train_coverage = self._stop_gain(train, realized) if len(train) else (None, None, None)
+            best = self._pick(train_gain, train_coverage) if len(train) else None
+            if best is not None and train_gain[best] > 0:
+                test_with, test_gain, test_coverage = self._stop_gain(test, realized)
+                row.update({"chosen_stop_atr": grid[best], "test_coverage": test_coverage[best]})
+                if test_coverage[best] >= _MIN_STOP_COVERAGE:
+                    row.update({"test_with_stop_atr": test_with[best], "improvement_atr": test_gain[best],
+                                "test_without_atr": test_with[best] - test_gain[best]})
+                else:
+                    row.update({"test_with_stop_atr": np.nan, "test_without_atr": np.nan, "improvement_atr": np.nan})
             else:
-                with_result = without = realized[test].mean()
-            walk.append({"fold": f, "train_trades": len(train), "test_trades": len(test),
-                         "chosen_stop_atr": grid[best] if use_stop else np.nan, "test_with_stop_atr": with_result,
-                         "test_without_atr": without, "improvement_atr": with_result - without})
-        walk = pd.DataFrame(walk, columns=["fold", "train_trades", "test_trades", "chosen_stop_atr",
-                                           "test_with_stop_atr", "test_without_atr", "improvement_atr"])
+                own = realized[test].mean()
+                row.update({"test_with_stop_atr": own, "test_without_atr": own, "improvement_atr": 0.0})
+            walk.append(row)
+        walk = pd.DataFrame(walk, columns=["fold", "train_trades", "purged", "test_trades", "chosen_stop_atr",
+                                           "test_coverage", "test_with_stop_atr", "test_without_atr",
+                                           "improvement_atr"])
 
         best = self._pick(gain, coverage)
+        result = {"recovery": recovery, "curve": curve, "baseline_atr": baseline, "walk_forward": walk,
+                  "best_stop_atr": np.nan, "best_stop_gain_atr": np.nan, "best_stop_improves": False,
+                  "stop_fill_mean_x_nominal": np.nan, "stop_fill_worst_x_nominal": np.nan}
         if best is None:
-            return {"recovery": recovery, "curve": curve, "baseline_atr": baseline, "walk_forward": walk,
-                    "best_stop_atr": np.nan, "best_stop_gain_atr": np.nan, "stop_fill_mean_x_nominal": np.nan,
-                    "stop_fill_worst_x_nominal": np.nan}
+            return result
         hit = self._stop_hit[:, best]
         slippage = -self._stop_out_atr[hit, best] / grid[best] if hit.any() else np.array([np.nan])
-        return {"recovery": recovery, "curve": curve, "baseline_atr": baseline, "walk_forward": walk,
-                "best_stop_atr": grid[best], "best_stop_gain_atr": gain[best],
-                "stop_fill_mean_x_nominal": float(np.mean(slippage)),
-                "stop_fill_worst_x_nominal": float(np.max(slippage))}
+        result.update({"best_stop_atr": grid[best], "best_stop_gain_atr": gain[best],
+                       "best_stop_improves": bool(gain[best] > 0),
+                       "stop_fill_mean_x_nominal": float(np.mean(slippage)),
+                       "stop_fill_worst_x_nominal": float(np.max(slippage))})
+        return result
 
     # ------------------------------------------------------------------
     # Per-quarter stability and verdicts
@@ -874,7 +987,9 @@ class ExcursionLens:
                      f"{summary['giveback_atr']:.2f} handed back in the trade + {summary['extension_atr']:.2f} "
                      "after exit.")
         lines.append(f"A trailing stop at the move-end distance would have banked {summary['trailing_atr']:+.2f} "
-                     f"ATR/trade; random exits with your holding times bank {summary['random_exit_median']:+.2f}.")
+                     f"ATR/trade; random exits with your holding times bank {summary['random_exit_median']:+.2f} at "
+                     f"bar prices (yours {summary['realized_at_exit_bar_atr']:+.2f}; fills added "
+                     f"{summary['fill_effect_atr']:+.2f}).")
         pct = summary["exit_percentile_vs_random"]
         if summary["fixed_hold"]:
             lines.append(f"Exits are a fixed holding time ({int(summary['median_hold_bars'])} bars), so the "
@@ -897,17 +1012,21 @@ class ExcursionLens:
             lines.append(f"After your exits the direction had no edge left ({band}).")
 
         walk = stops["walk_forward"]
-        if np.isfinite(stops["best_stop_atr"]):
+        tested = walk["improvement_atr"].notna()
+        untestable = f" ({int((~tested).sum())} not testable)" if (~tested).any() else ""
+        if stops["best_stop_improves"]:
             improved = int((walk["improvement_atr"] > 0).sum())
             grid = self.config.stop_grid_atr
             edge = (" It sits at the EDGE of the tested grid, so the true optimum may lie outside it."
                     if stops["best_stop_atr"] in (min(grid), max(grid)) else "")
             lines.append(f"STOP: best in-sample stop {stops['best_stop_atr']:g} ATR "
                          f"({stops['best_stop_gain_atr']:+.2f} ATR/trade vs the same trades' own exits); chosen on "
-                         "earlier trades it improved "
-                         f"{improved}/{len(walk)} later folds.{edge} Stop fills averaged "
-                         f"{stops['stop_fill_mean_x_nominal']:.2f}x the nominal stop (worst "
+                         f"earlier trades it improved {improved}/{int(tested.sum())} later folds{untestable}.{edge} "
+                         f"Stop fills averaged {stops['stop_fill_mean_x_nominal']:.2f}x the nominal stop (worst "
                          f"{stops['stop_fill_worst_x_nominal']:.2f}x: gaps and spread at the fill).")
+        elif np.isfinite(stops["best_stop_atr"]):
+            lines.append(f"STOP: no tested stop beats your own exits (the least bad, {stops['best_stop_atr']:g} ATR, "
+                         f"gives {stops['best_stop_gain_atr']:+.2f} ATR/trade vs the same trades' own exits).")
         else:
             lines.append("STOP: no grid level can be simulated on at least half the trades (they hit their own, "
                          "tighter stops), so no stop is suggested.")
@@ -932,8 +1051,7 @@ class ExcursionLens:
         return go.Table(header=dict(values=header, fill_color=self._PANEL, line_color=self._BORDER, align="left",
                                     font=dict(color=colour, size=11, family="'Courier New', monospace")),
                         cells=dict(values=columns, fill_color=self._BG, line_color=self._BORDER, align="left",
-                                   height=20, font=dict(color=self._TEXT, size=10,
-                                                        family="'Courier New', monospace")))
+                                   height=20, font=dict(color=self._TEXT, size=10, family="'Courier New', monospace")))
 
     _MIN_POTENTIAL_ATR = 0.5  # panel 10 only: a trade whose move offered less has no meaningful share to bank
 
@@ -982,7 +1100,7 @@ class ExcursionLens:
         fig.add_trace(go.Scatter(x=curve["stop_atr"], y=curve["same_trades_own_exit_atr"], mode="lines",
                                  line=dict(color=self._SUB, dash="dash"), showlegend=False,
                                  hovertemplate="same trades, own exits: %{y:.2f}<extra></extra>"), row=2, col=2)
-        if np.isfinite(stops["best_stop_atr"]):
+        if stops["best_stop_improves"]:
             fig.add_vline(x=stops["best_stop_atr"], line=dict(color=self._GREEN, dash="dot"), row=2, col=2)
 
         for item in self._band_traces(by_h["horizon_bars"], by_h["mfe_mae_ratio"], by_h["random_lo"], by_h["random_hi"],
@@ -1016,8 +1134,8 @@ class ExcursionLens:
         fig.add_trace(self._table(list(q.columns), [q[c].round(3) if q[c].dtype.kind == "f" else q[c]
                                                     for c in q.columns], self._BLUE), row=6, col=1)
         walk = stops["walk_forward"].round(3).rename(columns={
-            "train_trades": "train", "test_trades": "test", "chosen_stop_atr": "stop_atr", "test_with_stop_atr": "with",
-            "test_without_atr": "without", "improvement_atr": "gain"})
+            "train_trades": "train", "test_trades": "test", "chosen_stop_atr": "stop_atr", "test_coverage": "cover",
+            "test_with_stop_atr": "with", "test_without_atr": "without", "improvement_atr": "gain"})
         fig.add_trace(self._table(list(walk.columns), [walk[c] for c in walk.columns], self._ORANGE), row=7, col=1)
         fig.add_trace(self._table(["Verdicts (family-wise vs random baselines)"], [self.verdicts()], self._GREEN),
                       row=7, col=2)

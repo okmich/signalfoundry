@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import plotly.graph_objects as go
 
-from okmich_quant_research.backtesting.excursion_lens import EntryFill, ExcursionConfig, ExcursionLens
+from okmich_quant_research.backtesting.excursion_lens import EntryFill, ExcursionConfig, ExcursionLens, _midrank
 
 WARMUP = 40  # flat bars so ATR(14) settles at exactly 1.0 before the scenario starts
 
@@ -30,7 +30,8 @@ def _trades(ohlc: pd.DataFrame, rows: list[tuple[int, int, int]]) -> pd.DataFram
 
 
 class TestPerTradeExcursions:
-    """Hand-built path: entry 100, runs to 103.5 high, exits at 102, the move keeps going to 108.5, then retraces 3."""
+    """Hand-built path: entry 100, runs to a 103.5 high, and the exit bar's low (101.5) retraces 2 ATR from it: the move
+    ended inside the trade. Exit at 102; the later run to 108.5 is a NEW move, not this trade's extension."""
 
     @pytest.fixture
     def lens(self) -> ExcursionLens:
@@ -48,12 +49,12 @@ class TestPerTradeExcursions:
         assert trade["mae"] == pytest.approx(0.0)  # every in-trade low stayed above 100
         assert trade["giveback"] == pytest.approx(1.5)
 
-    def test_potential_follows_the_move_past_the_exit_until_a_k_atr_retrace(self, lens: ExcursionLens):
+    def test_a_move_that_ended_inside_the_trade_has_no_extension(self, lens: ExcursionLens):
         trade = lens.trades.iloc[0]
-        assert trade["potential"] == pytest.approx(8.5)  # high of the 108 bar; the 106 bar retraces 3 >= 2 ATR
-        assert trade["extension"] == pytest.approx(5.0)
-        assert trade["missed"] == pytest.approx(6.5)
-        assert trade["missed"] == pytest.approx(trade["giveback"] + trade["extension"])
+        assert trade["potential"] == pytest.approx(3.5)  # = MFE: the exit bar's low retraced k = 2 ATR from 103.5
+        assert trade["extension"] == pytest.approx(0.0)
+        assert trade["missed"] == pytest.approx(trade["giveback"])
+        assert trade["leg_end_time"] == lens._ohlc.index[WARMUP + 2]  # the bar where the move ended
 
     def test_trailing_stop_benchmark(self, lens: ExcursionLens):
         # best 3.5 after the 103 bar -> trailing level 1.5; the 102 bar's low (101.5) touches it
@@ -61,9 +62,31 @@ class TestPerTradeExcursions:
 
     def test_units(self, lens: ExcursionLens):
         trade = lens.trades.iloc[0]
-        assert trade["potential_atr"] == pytest.approx(8.5)
+        assert trade["potential_atr"] == pytest.approx(3.5)
         assert trade["realized_bp"] == pytest.approx(200.0)
         assert np.isnan(trade["realized_r"])  # no stop column -> no R units
+
+
+class TestPotentialPastTheExit:
+    """Entry 100, highs 101.5 / 103.5 / 103.7 with no k-ATR retrace inside the trade, exit at 103.2; the move then runs
+    to a 108.5 high and ends on the 106 bar (low 105.5 = 3 ATR below the best)."""
+
+    @pytest.fixture
+    def lens(self) -> ExcursionLens:
+        ohlc = _bars([101, 103, 103.2, 105, 108, 106, 106, 106, 106, 106])
+        e = WARMUP - 1
+        return ExcursionLens(_trades(ohlc, [(e, e + 3, 1)]), ohlc, n_null=5)
+
+    def test_potential_follows_the_move_past_the_exit_until_a_k_atr_retrace(self, lens: ExcursionLens):
+        trade = lens.trades.iloc[0]
+        assert trade["mfe"] == pytest.approx(3.7)
+        assert trade["potential"] == pytest.approx(8.5)
+        assert trade["extension"] == pytest.approx(4.8)
+        assert trade["missed"] == pytest.approx(trade["giveback"] + trade["extension"])
+        assert trade["leg_end_time"] == lens._ohlc.index[WARMUP + 4]  # the 108 bar, last before the retrace
+
+    def test_trailing_stop_rides_the_same_move(self, lens: ExcursionLens):
+        assert lens.trades.loc[0, "trailing"] == pytest.approx(6.0)  # level 6.5 crossed on the 106 bar, filled at 106
 
 
 class TestShortSide:
@@ -260,7 +283,8 @@ class TestSpreadInput:
         trades = _trades(ohlc, [(100, 110, 1)])
         base = ExcursionLens(trades, ohlc, n_null=5)
         wide = ExcursionLens(trades, ohlc, spread=0.01, n_null=5)
-        cost = 0.01 / base._atr_ref
+        targets, _ = base._entry_targets
+        cost = 0.01 / base._atr_ref[targets]
         before, after = base._bar_excursions[0], wide._bar_excursions[0]
         for mfe, mae in ((0, 1), (2, 3)):  # long, then short
             room = before[mfe] > 2 * cost  # MFE well clear of its floor at zero
@@ -374,3 +398,137 @@ class TestValidation:
         lens = ExcursionLens(_trades(ohlc, [(100, 110, 1)]), ohlc, n_null=5)
         assert lens.stop_analysis()["walk_forward"].empty
         assert any(line.startswith("STOP") for line in lens.verdicts())
+
+
+def _random_book(ohlc: pd.DataFrame, seed: int, count: int = 400) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    starts = np.sort(rng.choice(np.arange(300, len(ohlc) - 300), count, replace=False))
+    return starts, rng.integers(3, 30, starts.size), rng.choice([-1, 1], starts.size)
+
+
+class TestFillsAreNotTiming:
+    """Slippage or intrabar fills must not read as timing skill: both timing tests run on the exit BAR's fill price."""
+
+    def test_slipped_exits_on_a_random_walk_read_as_random(self):
+        ohlc = _random_walk(20_000, seed=21)
+        starts, holds, side = _random_book(ohlc, seed=22)
+        close = ohlc["close"].to_numpy()
+        trades = pd.DataFrame({"entry_time": ohlc.index[starts], "exit_time": ohlc.index[starts + holds], "side": side,
+                               "entry_price": close[starts],
+                               "exit_price": close[starts + holds] - side * 0.003})  # every exit fills 0.3 worse
+        lens = ExcursionLens(trades, ohlc, n_null=60, cap_at_day_end=False)
+        summary, _ = lens.exit_quality()
+        assert summary["fill_effect_atr"] < 0
+        assert 0.025 < summary["exit_percentile_vs_random"] < 0.975
+        sig = lens.significance().loc["after_exit_drift"]
+        assert sig["p_beat"] > 0.025 and sig["p_worse"] > 0.025
+
+    def test_vectorbt_slippage_is_not_timing(self):
+        def signal(data: pd.DataFrame) -> pd.Series:
+            return pd.Series(np.sign(data["close"].diff(12)).fillna(0.0), index=data.index)
+
+        lens = ExcursionLens.from_signal(_random_walk(20_000, seed=0), signal, vbt_kwargs={"slippage": 0.0002},
+                                         n_null=60, cap_at_day_end=False)
+        summary, _ = lens.exit_quality()
+        assert 0.025 < summary["exit_percentile_vs_random"] < 0.975  # it was 0.00 on every seed: "DESTROY value"
+        assert lens.significance().loc["after_exit_drift", "p_beat"] > 0.025  # it was "You exit EARLY"
+
+
+class TestDefaultsAndInputs:
+    def test_trades_without_prices_pay_the_spread(self):
+        ohlc = _random_walk(3_000, seed=4)
+        starts = np.array([100, 200])
+        trades = pd.DataFrame({"entry_time": ohlc.index[starts], "exit_time": ohlc.index[starts + 6], "side": [1, -1]})
+        t = ExcursionLens(trades, ohlc, spread=0.004, n_null=5).trades
+        close = ohlc["close"].to_numpy()
+        assert t.loc[0, "entry_price"] == pytest.approx(close[100] + 0.004)  # a long buys at the ask
+        assert t.loc[0, "exit_price"] == pytest.approx(close[106])
+        assert t.loc[1, "entry_price"] == pytest.approx(close[200])
+        assert t.loc[1, "exit_price"] == pytest.approx(close[206] + 0.004)  # a short covers at the ask
+
+    def test_open_trades_without_status_are_dropped(self):
+        ohlc = _random_walk(3_000, seed=4)
+        trades = pd.DataFrame({"entry_time": ohlc.index[[100, 200]], "exit_time": [ohlc.index[110], pd.NaT],
+                               "side": [1, 1]})
+        with pytest.warns(UserWarning, match="open trade"):
+            lens = ExcursionLens(trades, ohlc, n_null=5)
+        assert len(lens.trades) == 1
+
+    def test_a_stop_in_profit_is_not_read_as_risk(self):
+        ohlc = _random_walk(3_000, seed=4)
+        trades = _trades(ohlc, [(100, 110, 1)]).assign(stop=ohlc["close"].iloc[100] + 0.05)  # above a long's entry
+        with pytest.warns(UserWarning, match="breakeven"):
+            trade = ExcursionLens(trades, ohlc, stop_col="stop", n_null=5).trades.iloc[0]
+        assert np.isnan(trade["realized_r"])
+        assert trade["k_leg_atr"] == pytest.approx(2.0)  # the default move-end retrace
+
+    def test_from_signal_matches_columns_case_insensitively(self):
+        titled = _random_walk(3_000, seed=5).rename(columns=str.title)
+        lens = ExcursionLens.from_signal(
+            titled, lambda d: pd.Series(np.sign(d["Close"].diff(12)).fillna(0.0), index=d.index), n_null=5)
+        assert len(lens.trades) > 10
+
+    def test_from_signal_refuses_another_price_column(self):
+        ohlc = _random_walk(3_000, seed=5).assign(mid=lambda d: d["close"])
+        with pytest.raises(ValueError, match="prices trades on ohlc's close"):
+            ExcursionLens.from_signal(ohlc, lambda d: pd.Series(np.sign(d["close"].diff(12)).fillna(0.0),
+                                                                index=d.index), close_col="mid", n_null=5)
+
+    def test_from_signal_turns_a_scalar_sl_stop_into_stop_prices(self):
+        def signal(data: pd.DataFrame) -> pd.Series:
+            return pd.Series(np.sign(data["close"].diff(12)).fillna(0.0), index=data.index)
+
+        lens = ExcursionLens.from_signal(_random_walk(20_000, seed=4), signal, vbt_kwargs={"sl_stop": 0.0002},
+                                         n_null=5, cap_at_day_end=False)
+        assert np.isfinite(lens.trades["stop_price"]).all()
+        assert lens.stop_analysis()["curve"]["simulable_share"].iloc[-1] < 1.0  # stopped trades: wide levels unknown
+
+    def test_midrank_ignores_missing_draws(self):
+        null = np.r_[np.linspace(-1, 1, 51), np.full(51, np.nan)][:, None]
+        assert _midrank(np.array([0.0]), null)[0] == pytest.approx(0.5)
+
+
+class TestDailyBars:
+    def test_the_day_cap_is_off_by_default_on_daily_bars(self):
+        rng = np.random.default_rng(3)
+        n = 2_000
+        close = 100 + np.cumsum(rng.standard_normal(n))
+        open_ = np.r_[close[0], close[:-1]]
+        daily = pd.DataFrame({"open": open_, "high": np.maximum(open_, close) + 0.3,
+                              "low": np.minimum(open_, close) - 0.3, "close": close},
+                             index=pd.date_range("2015-01-01", periods=n, freq="1D"))
+        starts = np.arange(100, 1_900, 20)
+        trades = _trades(daily, [(s, s + 3, 1) for s in starts])
+        assert (ExcursionLens(trades, daily, n_null=5).trades["extension"] > 0).any()
+        assert (ExcursionLens(trades, daily, n_null=5, cap_at_day_end=True).trades["extension"] == 0).all()
+
+
+class TestTimezones:
+    def test_a_day_shift_keeps_the_wall_clock_hour_across_dst(self):
+        ny = _random_walk(60_000, seed=6)
+        ny.index = pd.date_range("2024-01-01", periods=len(ny), freq="5min", tz="America/New_York")  # spans both DSTs
+        lens = ExcursionLens(_trades(ny, [(2_000, 2_010, 1)]), ny, n_null=5)
+        for days in (30, 90, 120, 180):
+            moved = lens._shifted(np.array([2_000]), days)[0]
+            assert moved < 0 or ny.index[moved].strftime("%H:%M") == ny.index[2_000].strftime("%H:%M")
+
+
+class TestStopVerdicts:
+    def test_no_improving_stop_is_not_called_best(self):
+        ohlc = _bars([98] + [101] * 1_200, opens={WARMUP: 100.0})  # every stop up to 2.5 ATR cuts a winner
+        lens = ExcursionLens(_trades(ohlc, [(WARMUP - 1, WARMUP + 1, 1)]), ohlc, n_null=5,
+                             stop_grid_atr=(1.0, 2.0, 3.0))
+        stops = lens.stop_analysis()
+        assert not stops["best_stop_improves"]
+        assert any("no tested stop beats" in line for line in lens.verdicts())
+
+    def test_walk_forward_purges_trades_still_open_at_the_test_start(self):
+        ohlc = _random_walk(3_000, seed=4)
+        starts = np.arange(100, 2_800, 30)
+        lens = ExcursionLens(_trades(ohlc, [(s, s + 90, 1) for s in starts]), ohlc, n_null=5, n_stop_folds=4,
+                             cap_at_day_end=False)  # each trade overlaps the next two
+        walk = lens.stop_analysis()["walk_forward"]
+        assert (walk["purged"] > 0).all()
+        assert (walk["train_trades"] + walk["purged"]).tolist() == [len(f) for f in
+                                                                    np.array_split(np.arange(len(starts)), 4)[:1]] + [
+            sum(len(f) for f in np.array_split(np.arange(len(starts)), 4)[:k]) for k in (2, 3)]
