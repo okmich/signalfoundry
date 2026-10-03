@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from okmich_quant_features.trend import trend_scan_features
+from okmich_quant_features.trend.trend_scan import _hysteresis_kernel
 
 SCAN_COLUMNS = ["ts_direction", "ts_strength", "ts_r2", "ts_window", "ts_t_value", "ts_slope", "ts_agreement",
                 "ts_line_gap"]
@@ -104,6 +105,42 @@ class TestBreaks:
         result = trend_scan_features(prices, max_window=48, break_gap=gap)
         assert result.iloc[100:105].isna().all().all() and result.iloc[105:].notna().all().all()
 
+    @pytest.mark.parametrize("gap", [30, 1800, 30.0, "30", " 30 ", True, np.int64(30)])
+    def test_a_break_gap_without_a_unit_is_refused(self, gap):
+        with pytest.raises(ValueError, match="unit"):
+            trend_scan_features(_random_walk(), break_gap=gap)  # pd.Timedelta(30) would mean 30 nanoseconds
+
+    def test_a_break_gap_shorter_than_the_bar_spacing_is_refused(self):
+        with pytest.raises(ValueError, match="spacing"):
+            trend_scan_features(_random_walk(), break_gap="1min")  # 5-minute bars: every bar would be a break
+
+    def test_break_gap_needs_a_time_sorted_index(self):
+        with pytest.raises(ValueError, match="sorted"):
+            trend_scan_features(_random_walk().iloc[::-1], break_gap="30min")
+
+    def test_segment_labels_split_windows_like_a_break(self):
+        prices = _random_walk()
+        gapped = prices.copy()
+        gapped.index = prices.index.where(np.arange(len(prices)) < 100, prices.index + pd.Timedelta(days=2))
+        labels = np.where(np.arange(len(prices)) < 100, 0, 1)  # e.g. a rollover that leaves no time gap
+        by_label = trend_scan_features(prices.to_numpy(), max_window=48, segment=labels)
+        by_gap = trend_scan_features(gapped, max_window=48, break_gap="30min")
+        np.testing.assert_array_equal(by_label.to_numpy(), by_gap.to_numpy())
+        assert by_label.iloc[100:105].isna().all().all()
+
+    def test_segment_and_break_gap_combine(self):
+        prices = _random_walk()
+        prices.index = prices.index.where(np.arange(len(prices)) < 100, prices.index + pd.Timedelta(days=2))
+        labels = np.where(np.arange(len(prices)) < 200, "a", "b")
+        result = trend_scan_features(prices, max_window=48, break_gap="30min", segment=labels)
+        assert result.iloc[100:105].isna().all().all() and result.iloc[200:205].isna().all().all()
+        assert result.iloc[105:200].notna().all().all()
+
+    @pytest.mark.parametrize("labels", [np.zeros(5), np.r_[np.zeros(299), np.nan], np.zeros((300, 2))])
+    def test_bad_segment_labels_raise(self, labels):
+        with pytest.raises(ValueError, match="segment"):
+            trend_scan_features(_random_walk(), segment=labels)
+
     def test_break_gap_works_on_microsecond_index(self):
         prices = _random_walk()
         prices.index = prices.index.as_unit("us")
@@ -137,10 +174,17 @@ class TestBehaviour:
         assert (result["ts_t_value"] == 0).all() and (result["ts_line_gap"] == 0).all()
         assert (result["ts_agreement"] == 1.0).all()
 
-    def test_exactly_straight_window_has_huge_t(self):
+    def test_a_perfectly_straight_window_has_an_undefined_t(self):
+        result = trend_scan_features(np.arange(38_000, 38_300, 5.0), log_prices=False, max_window=24).iloc[5:]
+        assert (result["ts_direction"] == 1).all() and (result["ts_r2"] == 1).all()
+        assert result["ts_t_value"].isna().all()  # an exact equal-step ladder: t is undefined, never +-inf
+        assert not np.isinf(result.to_numpy(dtype=float)).any()
+
+    def test_near_straight_windows_keep_a_finite_t(self):
         result = trend_scan_features(np.exp(np.linspace(0, 0.1, 40)), max_window=24).iloc[5:]
         assert (result["ts_direction"] == 1).all()
-        assert (result["ts_t_value"].abs() > 1e6).all()
+        t_value = result["ts_t_value"]
+        assert (t_value.isna() | (t_value.abs() > 1e6)).all() and not np.isinf(t_value).any()
 
     def test_ndarray_and_series_give_the_same_values(self):
         prices = _random_walk()
@@ -190,6 +234,15 @@ class TestState:
         entered_up = (state[1:] == 1) & (state[:-1] != 1)
         assert (strength[1:][entered_up] >= 0.8).all()
 
+    def test_hysteresis_down_side_mirrors_the_up_side(self):
+        state = _hysteresis_kernel(np.array([-0.9, -0.5, -0.31, -0.2, -0.85, 0.85]), 0.8, 0.3)
+        np.testing.assert_array_equal(state, [-1, -1, -1, 0, -1, 1])  # holds to -exit, leaves above it, flips direct
+
+    def test_state_restarts_from_neutral_after_a_gap(self):
+        # UP before the gap; afterwards 0.5 sits between exit (0.3) and enter (0.8): a carried-over UP would stay UP
+        state = _hysteresis_kernel(np.array([0.9, 0.5, np.nan, 0.5, 0.85]), 0.8, 0.3)
+        np.testing.assert_array_equal(state, [1, 1, np.nan, 0, 1])
+
     def test_state_resets_after_a_break(self):
         prices = _random_walk(n=400)
         prices.index = prices.index.where(np.arange(len(prices)) < 200, prices.index + pd.Timedelta(days=2))
@@ -203,7 +256,10 @@ class TestValidation:
                                         {"state_enter": 0.5, "state_exit": 0.6},
                                         {"state_enter": 0.5, "state_exit": -0.1}, {"break_gap": pd.Timedelta(0)},
                                         {"break_gap": "soon"}, {"break_gap": pd.NaT}, {"min_window": 6.5},
-                                        {"max_window": 48.5}, {"min_window": True}])
+                                        {"max_window": 48.5}, {"min_window": True}, {"min_window": 4},
+                                        {"min_window": "6"}, {"min_window": None}, {"max_window": 1e20},
+                                        {"max_window": float("nan")}, {"state_exit": 0.4},
+                                        {"state_enter": "0.5"}, {"state_enter": 0.5, "state_exit": None}])
     def test_invalid_parameters(self, kwargs):
         with pytest.raises(ValueError):
             trend_scan_features(_random_walk(), **kwargs)

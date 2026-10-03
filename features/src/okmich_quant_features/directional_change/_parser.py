@@ -138,12 +138,16 @@ def parse_dc_events(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.D
     Each row in the output represents one completed trend (EXT to EXT). A row only exists once its END extreme
     is confirmed: the dcc_* columns mark that confirmation — the bar where price has reversed θ (alpha·θ for a
     downward reversal) from ext_end. The DC event ext_end → dcc therefore OPENS THE NEXT TREND, and
-    dcc_pos > ext_end_pos on every row. The trend's own opening confirmation is the previous row's dcc.
+    dcc_pos > ext_end_pos on every row for strictly positive prices. A trend's own opening confirmation is the
+    previous row's dcc; for row 0 it is the bar where the parser leaves its initialisation state, which is not
+    reported.
 
     Parameters
     ----------
     prices : pd.Series
-        Close price series. Index can be integer or DatetimeIndex.
+        Strictly positive close prices; index can be integer or DatetimeIndex. θ is a fraction of price, so
+        non-positive prices (a spread, a negative futures print) are not rejected but make the thresholds and the
+        guarantees above meaningless.
     theta : float
         DC threshold as a decimal fraction (e.g., 0.002 for 0.2%).
     alpha : float, optional
