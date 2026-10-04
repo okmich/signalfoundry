@@ -18,6 +18,12 @@ Streaming CTL (O(1) per-bar; live/online use)
   ctl_warm_up                    Replay a history once, return the live state for incremental stepping
   ctl_streaming_replay           Replay a series through the FSM (equivalence harness / batch parity)
 
+Causal trend scan (backward form of Lopez de Prado's trend scanning)
+--------------------------------------------------------------------
+  trend_scan_features            Per-bar DataFrame from the max-|t| trailing line: direction, R2 strength, window,
+                                 t-value, slope, cross-window sign agreement, gap from the line, optional
+                                 UP/NEUTRAL/DOWN hysteresis state
+
 Channels (mean line +/- vol-based half-width)
 ---------------------------------------------
   bollinger_band                 SMA +/- k*stdev (returns bands + %B + width)
@@ -57,6 +63,7 @@ from .continuous_trend import CTLFeatures, CTLState, continuous_trend_labeling, 
 from .normalized_ma import MovingAverageType, ma_slope_norm, norm_dema, norm_ema, norm_lwma, norm_moving_average, \
                             norm_sma, norm_smma, norm_tema, norm_vwap
 from .trend_persistence import trend_persistence_labeling
+from .trend_scan import trend_scan_features
 from .z_score_trend import zscore_trend_features
 
 
@@ -110,6 +117,8 @@ __all__ = [
     "ctl_step",
     "ctl_warm_up",
     "ctl_streaming_replay",
+    # Causal trend scan
+    "trend_scan_features",
     # Channels
     "bollinger_band",
     "envelope",

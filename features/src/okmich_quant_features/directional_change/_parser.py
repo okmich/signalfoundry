@@ -135,13 +135,19 @@ def parse_dc_events(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.D
     """
     Parse a price series into completed DC trends using the Directional Change framework.
 
-    Each row in the output represents one completed trend (EXT to EXT), comprising
-    one DC event (EXT → DCC) and one overshoot event (DCC → next EXT).
+    Each row in the output represents one completed trend (EXT to EXT). A row only exists once its END extreme
+    is confirmed: the dcc_* columns mark that confirmation — the bar where price has reversed θ (alpha·θ for a
+    downward reversal) from ext_end. The DC event ext_end → dcc therefore OPENS THE NEXT TREND, and
+    dcc_pos > ext_end_pos on every row for strictly positive prices. A trend's own opening confirmation is the
+    previous row's dcc; for row 0 it is the bar where the parser leaves its initialisation state, which is not
+    reported.
 
     Parameters
     ----------
     prices : pd.Series
-        Close price series. Index can be integer or DatetimeIndex.
+        Strictly positive close prices; index can be integer or DatetimeIndex. θ is a fraction of price, so
+        non-positive prices (a spread, a negative futures print) are not rejected but make the thresholds and the
+        guarantees above meaningless.
     theta : float
         DC threshold as a decimal fraction (e.g., 0.002 for 0.2%).
     alpha : float, optional
@@ -157,10 +163,13 @@ def parse_dc_events(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.D
         - direction        : 'up' (trough→peak) or 'down' (peak→trough)
         - ext_start_price  : P_EXT(n-1) — price at start extreme
         - ext_start_idx    : t_EXT(n-1) — index label of start extreme
+        - ext_start_pos    : integer position of the start extreme
         - ext_end_price    : P_EXT(n)   — price at end extreme
         - ext_end_idx      : t_EXT(n)   — index label of end extreme
-        - dcc_price        : price at DC confirmation point
-        - dcc_idx          : index label at DC confirmation point
+        - ext_end_pos      : integer position of the end extreme
+        - dcc_price        : price at the bar that confirms the END extreme (the reversal off ext_end)
+        - dcc_idx          : index label of that confirmation — the first bar at which this row is known
+        - dcc_pos          : integer position of that confirmation
         - tmv              : Total Price Movement (multiples of θ).
                              Upward trends: always ≥ 1.0.
                              Downward trends: ≥ alpha (may be < 1.0 when alpha < 1.0).
@@ -170,7 +179,8 @@ def parse_dc_events(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.D
     Notes
     -----
     - EXT points are confirmed retrospectively — a trough is only known when price
-      rises by θ from it. No look-ahead bias is introduced.
+      rises by θ from it. No look-ahead bias is introduced as long as a row is used
+      from its dcc_idx onwards, never from ext_end_idx.
     - T is always measured in bars regardless of the index type.
     - Book reference: Section 2.2.1; Eq 2.2–2.4; Appendix A.
     """
