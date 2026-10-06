@@ -91,11 +91,12 @@ def test_spot_and_perp_on_the_same_base_are_separate_markets(tmp_path):
     assert len(cfg.all_strategies()) == 2
 
 
-def test_isolation_names_and_magics_unique(tmp_path):
+def test_isolation_magics_unique_names_may_repeat(tmp_path):
     with pytest.raises(ValidationError, match="share magic"):
         CryptoSystemConfig(**_system(tmp_path, [_s("a", 1), _s("b", 1, "ETH/USDT:USDT")]))
-    with pytest.raises(ValidationError, match="duplicate strategy name"):
-        CryptoSystemConfig(**_system(tmp_path, [_s("a", 1), _s("a", 2, "ETH/USDT:USDT")]))
+    # Sleeves of one multi-trader share their strategy name (the Supervisor's runner root); symbols still isolate.
+    cfg = CryptoSystemConfig(**_system(tmp_path, [_s("a", 1), _s("a", 2, "ETH/USDT:USDT")]))
+    assert [s.name for s in cfg.all_strategies()] == ["a", "a"]
 
 
 def test_strategy_xor_strategies(tmp_path):

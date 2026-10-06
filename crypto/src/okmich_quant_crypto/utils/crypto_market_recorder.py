@@ -3,13 +3,15 @@
     record-crypto-market --exchange bybit --symbols BTC/USDT:USDT,ETH/USDT:USDT --output D:/crypto_data \\
         --levels 30 --interval 3
 
-or from a JSON file holding a ``RecorderConfig`` (``--config recorder.json``). Runs until Ctrl+C, then flushes and
-compacts what it holds. It needs an always-on machine: every hour it is not running is a hole in the order-book
-history (recorded in the ``gaps`` stream for outages it sees; a stopped process cannot record its own absence).
+or from a JSON file holding a ``RecorderConfig`` (``--config recorder.json``). Runs until Ctrl+C - or for
+``--duration-hours`` - then flushes and compacts what it holds. It needs an always-on machine: every hour it is not
+running is a hole in the order-book history (recorded in the ``gaps`` stream for outages it sees; a stopped process
+cannot record its own absence).
 """
 import argparse
 import asyncio
 import logging
+from typing import Optional
 
 from ..data.recorder import MarketRecorder, RecorderConfig
 from ..enums import RecordStream, VenueEnvironment
@@ -32,8 +34,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--flush-seconds", type=float, default=60.0, help="Seconds between writes to disk")
     parser.add_argument("--environment", default=VenueEnvironment.LIVE.value,
                         choices=[e.value for e in VenueEnvironment])
+    parser.add_argument("--duration-hours", type=float, default=None,
+                        help="Stop by itself after this many hours, flushing and compacting as on Ctrl+C "
+                             "(default: run until Ctrl+C)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args()
+
+
+async def record(recorder: MarketRecorder, duration_hours: Optional[float] = None) -> None:
+    """Run ``recorder`` until Ctrl+C, or until ``duration_hours`` have passed - the same graceful stop either way."""
+    if duration_hours is not None:
+        if duration_hours <= 0:
+            raise ValueError("duration_hours must be > 0")
+        asyncio.get_running_loop().call_later(duration_hours * 3600.0, recorder.request_stop)
+    await recorder.run()
 
 
 def main() -> None:
@@ -50,4 +64,6 @@ def main() -> None:
                              book_levels=args.levels, book_interval_seconds=args.interval,
                              ticker_interval_seconds=args.ticker_interval, book_subscribe_depth=args.subscribe_depth,
                              flush_seconds=args.flush_seconds)
-    asyncio.run(MarketRecorder(cfg).run())
+    if args.duration_hours is not None and args.duration_hours <= 0:
+        raise SystemExit("--duration-hours must be > 0")
+    asyncio.run(record(MarketRecorder(cfg), args.duration_hours))

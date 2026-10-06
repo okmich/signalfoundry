@@ -225,3 +225,33 @@ def test_leftover_parts_from_a_crash_are_compacted_on_start(tmp_path):
     clock.advance(2 * HOUR)
     PartitionWriter(tmp_path, "fakex", clock, symbols=(PERP,)).compact()
     assert not list(tmp_path.rglob("*.part-*.parquet")) and len(list(tmp_path.rglob("*.parquet"))) == 1
+
+
+class _StubRecorder:
+    """Stands in for MarketRecorder.run(): waits for request_stop like the real one."""
+
+    def __init__(self):
+        self._stop_event = None
+        self.stopped = False
+
+    async def run(self):
+        self._stop_event = asyncio.Event()
+        await self._stop_event.wait()
+        self.stopped = True
+
+    def request_stop(self):
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+
+async def test_duration_stops_the_recorder_gracefully():
+    from okmich_quant_crypto.utils.crypto_market_recorder import record
+    stub = _StubRecorder()
+    await asyncio.wait_for(record(stub, duration_hours=0.05 / 3600), timeout=5)   # 50 ms
+    assert stub.stopped
+
+
+async def test_duration_must_be_positive():
+    from okmich_quant_crypto.utils.crypto_market_recorder import record
+    with pytest.raises(ValueError, match="duration_hours"):
+        await record(_StubRecorder(), duration_hours=0)

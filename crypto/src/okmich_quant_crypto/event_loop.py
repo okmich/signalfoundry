@@ -21,6 +21,7 @@ from typing import Awaitable, Callable, Optional
 
 from okmich_quant_core import RunnerIdentity, RunnerStatus
 from okmich_quant_core.broker_session import BrokerSession
+from okmich_quant_core.logging.identity import runner_strategy_root
 
 from .broker_session import CryptoBrokerSession
 from .config import CryptoVenueConfig, check_isolation
@@ -48,12 +49,20 @@ def _library_versions() -> dict:
 
 
 class CryptoEventLoop:
-    """Async runner for one venue account. Entry point is :meth:`start` (``asyncio.run(self.run())``)."""
+    """Async runner for one venue account. Entry point is :meth:`start` (``asyncio.run(self.run())``).
+
+    ``multi`` sets the runner-root log folder exactly as core's ``RunLoop`` does: ``<strategy>`` for a single trader,
+    ``<strategy>-multi`` for a multi-trader (one process, N symbols, one venue session). It is where the per-symbol
+    inference logs and the one ``status.json`` go - the paths the Fleet Supervisor tails - so pass
+    ``multi=bool(system.strategies)`` to match a ``strategies[]`` config (core's text log and the Supervisor classify
+    the same way). ``None`` = multi when more than one strategy is added. Sleeves of a multi-trader share their
+    strategy name, as in MT5 / IB systems.
+    """
 
     def __init__(self, venue: CryptoVenueConfig, *, credentials: Optional[Credentials] = None,
                  exchange_factory: Optional[ExchangeFactory] = None, broker_session: Optional[BrokerSession] = None,
                  runner_identity: Optional[RunnerIdentity] = None, runner_name: str = "crypto_runner", log_base=None,
-                 clock: Callable[[], int] = utc_now_ms, sleep: Callable = asyncio.sleep):
+                 multi: Optional[bool] = None, clock: Callable[[], int] = utc_now_ms, sleep: Callable = asyncio.sleep):
         self.venue = venue
         self._credentials = credentials
         self._exchange_factory = exchange_factory
@@ -61,6 +70,7 @@ class CryptoEventLoop:
         self._runner_identity = runner_identity
         self._runner_name = runner_name
         self._log_base = log_base
+        self._multi = multi
         self._clock = clock
         self._sleep = sleep
         self._strategies: list[BaseCryptoStrategy] = []
@@ -131,9 +141,12 @@ class CryptoEventLoop:
 
         ctx = VenueContext(exchange=self.exchange, profile=self.profile, venue=self.venue, clock=self._clock,
                            sleep=self._sleep)
+        multi = self._multi if self._multi is not None else len(self._strategies) > 1
         for s in self._strategies:
+            # The runner root re-points the logical identity, so inference paths, records and status.json agree.
+            runner_strategy = runner_strategy_root(s.log_binding.logical.strategy, multi=multi)
             # Bind BEFORE bootstrap so the envelope is complete before any heartbeat can fire (first-bar race).
-            s.bind_runner_identity(self._runner_identity)
+            s.bind_runner_identity(self._runner_identity, runner_strategy=runner_strategy)
             await s._bootstrap(ctx)
             logger.info("Bootstrapped %s", s.strategy_config.name)
 

@@ -137,6 +137,15 @@ class BaseNotifier(ABC):
         suffix = f" (retcode {retcode})" if retcode is not None else ""
         self.on_error(strategy_name, f"Trade failed {symbol} {direction}: {reason}{suffix}", ctx)
 
+    def on_account_event(self, title: str, message: str, level: str = "info"):
+        """An account-level event: the Account Admin's directive changes, latches, book actions, and the guard's
+        suppressed or forced operations. ``level`` is ``info``, ``warning`` or ``critical``.
+
+        Default implementation delegates to on_error() so legacy notifiers still deliver it. Override for distinct
+        formatting.
+        """
+        self.on_error(title, message)
+
     @abstractmethod
     def on_error(self, strategy_name: str, error_message: str, context: dict = None):
         ...

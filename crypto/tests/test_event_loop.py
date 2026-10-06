@@ -7,16 +7,17 @@ from okmich_quant_crypto import CryptoEventLoop, OrderSide
 from okmich_quant_crypto.models import Credentials
 
 from .conftest import RecordingStrategy, make_cfg, seed_candles
-from .fakes import MIN
+from .fakes import MIN, perp_market
 
 SYM = "BTC/USDT:USDT"
 
 
-def _loop(exchange, venue, clock, *strategies, credentials=Credentials(api_key="k", secret="s")):
+def _loop(exchange, venue, clock, *strategies, credentials=Credentials(api_key="k", secret="s"), **kw):
     async def factory(profile, venue_cfg, creds):
         return exchange
 
-    loop = CryptoEventLoop(venue, credentials=credentials, exchange_factory=factory, clock=clock, sleep=clock.sleep)
+    loop = CryptoEventLoop(venue, credentials=credentials, exchange_factory=factory, clock=clock, sleep=clock.sleep,
+                           **kw)
     for s in strategies:
         loop.add_strategy(s)
     return loop
@@ -58,6 +59,36 @@ def _status_files():
     import os
     from pathlib import Path
     return Path(os.environ["OKMICH_QUANT_LOG_BASE"]).glob("**/status.json")
+
+
+async def test_multi_trader_sleeves_share_the_runner_root(exchange, venue, clock):
+    """As core's RunLoop: the sleeves' shared strategy name + "-multi" holds every inference path and the ONE
+    status.json - the folder the Fleet Supervisor tails."""
+    eth = "ETH/USDT:USDT"
+    exchange.markets[eth] = perp_market(eth)
+    last_closed = (clock() // (5 * MIN)) * 5 * MIN - 5 * MIN
+    for symbol in (SYM, eth):
+        seed_candles(exchange, symbol, 5 * MIN, last_closed, 10)
+    btc = RecordingStrategy(make_cfg(name="rsi", magic=1))
+    eth_sleeve = RecordingStrategy(make_cfg(name="rsi", magic=2, market_symbol=eth))
+    loop = _loop(exchange, venue, clock, btc, eth_sleeve)
+    await loop._startup()
+    assert [s.log_binding.logical.strategy for s in (btc, eth_sleeve)] == ["rsi-multi", "rsi-multi"]
+    await loop.close()
+    [status] = list(_status_files())
+    assert status.parent.name == "rsi-multi"
+    assert {d["symbol"] for d in json.loads(status.read_text(encoding="utf-8"))["logical_systems"]} == {
+        "BTC/USDT-USDT", "ETH/USDT-USDT"}
+
+
+@pytest.mark.parametrize("multi,expected", [(None, "s1"), (False, "s1"), (True, "s1-multi")])
+async def test_single_strategy_runner_root_follows_multi(exchange, venue, clock, multi, expected):
+    seed_candles(exchange, SYM, 5 * MIN, (clock() // (5 * MIN)) * 5 * MIN - 5 * MIN, 10)
+    s = RecordingStrategy(make_cfg())
+    loop = _loop(exchange, venue, clock, s, multi=multi)
+    await loop._startup()
+    assert s.log_binding.logical.strategy == expected
+    await loop.close()
 
 
 async def test_dispatch_routes_by_symbol_only_to_streaming_strategies(exchange, venue, clock):

@@ -21,6 +21,7 @@ _log = logging.getLogger(__name__)
 #: Everything else (``bar``) routes through the bounded writer thread (LOGGING_CONTRACT §10).
 _LIFECYCLE_EVENTS = frozenset({
     LogEventType.CIRCUIT_BREAKER_TRIPPED, LogEventType.STRATEGY_REENABLED,
+    LogEventType.ACCOUNT_DIRECTIVE_OP, LogEventType.ACCOUNT_DIRECTIVE_APPLIED,   # rare, and an audit trail: durable
 })
 
 #: Default bound for the bar-record writer queue. Large enough that hitting it means a

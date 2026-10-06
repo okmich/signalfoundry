@@ -107,6 +107,8 @@ class MultiTrader:
         for strategy in self.strategies:
             strategy_key = self._get_strategy_key(strategy)
             health = self.health_trackers[strategy_key]
+            # Before the breaker check: a circuit-broken strategy's positions must still close under NO_OPS.
+            strategy.enforce_account_directive(run_dt)
 
             if not health.is_enabled:
                 logger.debug(f"Strategy '{strategy_key}' is disabled, skipping position check")
@@ -135,6 +137,7 @@ class MultiTrader:
         for strategy in self.strategies:
             strategy_key = self._get_strategy_key(strategy)
             health = self.health_trackers[strategy_key]
+            strategy.enforce_account_directive(run_dt)   # before the breaker check (ACCOUNT_ADMIN_SPEC §10.1)
 
             if not health.is_enabled:
                 logger.warning(f"Strategy '{strategy_key}' is disabled, skipping execution")

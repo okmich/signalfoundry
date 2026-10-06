@@ -221,9 +221,13 @@ class CryptoSystemConfig(BaseModel):
 
 
 def check_isolation(venue: CryptoVenueConfig, strategies: list[CryptoStrategyConfig]) -> None:
-    """At most one strategy per (venue, environment, account, market type, symbol); names and magics unique."""
+    """At most one strategy per (venue, environment, account, market type, symbol); magics unique.
+
+    Names may repeat: the sleeves of a multi-trader share their strategy name (the runner-root log folder the Fleet
+    Supervisor expects, as in MT5 / IB systems). State files are keyed by name AND symbol, and the isolation key above
+    already forbids two strategies on one symbol, so a shared name never shares state.
+    """
     seen_keys: dict[tuple, str] = {}
-    seen_names: set[str] = set()
     seen_magics: dict[int, str] = {}
     for s in strategies:
         key = isolation_key(venue, s)
@@ -233,9 +237,6 @@ def check_isolation(venue: CryptoVenueConfig, strategies: list[CryptoStrategyCon
                              f"{venue.sub_account}; the venue nets them into one position, so magic cannot "
                              f"separate them")
         seen_keys[key] = s.name
-        if s.name in seen_names:
-            raise ValueError(f"duplicate strategy name {s.name!r}")
-        seen_names.add(s.name)
         if s.magic in seen_magics:
             raise ValueError(f"strategies {seen_magics[s.magic]!r} and {s.name!r} share magic {s.magic}")
         seen_magics[s.magic] = s.name
