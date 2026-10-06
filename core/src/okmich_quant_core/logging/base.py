@@ -26,7 +26,7 @@ import pandas as pd
 from .identity import LogicalSystemIdentity, RunnerIdentity
 
 
-LOG_SCHEMA_VERSION = "2.0.0"  # tracks LOGGING_CONTRACT.md; v2.0.0: the log tree mirrors the live account folder + status.json `account`
+LOG_SCHEMA_VERSION = "2.1.0"  # tracks LOGGING_CONTRACT.md; v2.1.0: account_directive_op / account_directive_applied
 
 _SCHEMA_DIR = Path(__file__).resolve().parent / "schema"
 
@@ -38,6 +38,25 @@ class LogEventType(enum.StrEnum):
     BAR = "bar"
     CIRCUIT_BREAKER_TRIPPED = "circuit_breaker_tripped"
     STRATEGY_REENABLED = "strategy_reenabled"
+    # v2.1.0: the Account Admin guard (ACCOUNT_ADMIN_SPEC §10.3)
+    ACCOUNT_DIRECTIVE_OP = "account_directive_op"             # an operation a directive suppressed or forced
+    ACCOUNT_DIRECTIVE_APPLIED = "account_directive_applied"   # the directive a system applies changed
+
+
+class GuardedOp(enum.StrEnum):
+    """What a system would have done, or was made to do, because of an account directive (ACCOUNT_ADMIN_SPEC §10.3)."""
+
+    OPEN_LONG = "open_long"             # suppressed: the signal asked to open, the directive refused
+    OPEN_SHORT = "open_short"
+    PLACE_PENDING = "place_pending"     # suppressed: a pending order the directive refused
+    CANCEL_PENDING = "cancel_pending"   # forced: a resting pending order cancelled because of the directive
+    CLOSE_LONG = "close_long"           # forced: closed because of NO_OPS, not the system's own exit rule
+    CLOSE_SHORT = "close_short"
+
+
+class GuardOutcome(enum.StrEnum):
+    SUPPRESSED = "suppressed"
+    FORCED = "forced"
 
 
 class BarOutcome(enum.StrEnum):
@@ -194,10 +213,52 @@ class StrategyReenabledRecord(LogRecord):
         return {"reason": self.reason}
 
 
+@dataclass(frozen=True)
+class AccountDirectiveOpRecord(LogRecord):
+    """One operation an account directive suppressed or forced (ACCOUNT_ADMIN_SPEC §10.3). Carries NO size, price or
+    P&L (§6): those go to the system's text log and the alert."""
+
+    op: GuardedOp = GuardedOp.OPEN_LONG
+    outcome: GuardOutcome = GuardOutcome.SUPPRESSED
+    directive: str = ""
+    directive_source: str = ""
+    directive_sequence: int | None = None
+    directive_episode: int | None = None
+    directive_reason: str | None = None
+    signal_bar_utc: str | None = None
+
+    def _event_fields(self) -> dict[str, Any]:
+        return {"op": str(self.op), "outcome": str(self.outcome), "directive": self.directive,
+                "directive_source": self.directive_source, "directive_sequence": self.directive_sequence,
+                "directive_episode": self.directive_episode, "directive_reason": self.directive_reason,
+                "signal_bar_utc": self.signal_bar_utc}
+
+
+@dataclass(frozen=True)
+class AccountDirectiveAppliedRecord(LogRecord):
+    """The directive this system applies changed, including to and from a fallback (ACCOUNT_ADMIN_SPEC §10.3)."""
+
+    directive: str = ""
+    directive_source: str = ""
+    directive_sequence: int | None = None
+    directive_episode: int | None = None
+    directive_reason: str | None = None
+    previous_directive: str | None = None
+    previous_source: str | None = None
+
+    def _event_fields(self) -> dict[str, Any]:
+        return {"directive": self.directive, "directive_source": self.directive_source,
+                "directive_sequence": self.directive_sequence, "directive_episode": self.directive_episode,
+                "directive_reason": self.directive_reason, "previous_directive": self.previous_directive,
+                "previous_source": self.previous_source}
+
+
 _RECORD_BY_EVENT: dict[LogEventType, type[LogRecord]] = {
     LogEventType.BAR: BarRecord,
     LogEventType.CIRCUIT_BREAKER_TRIPPED: CircuitBreakerTrippedRecord,
     LogEventType.STRATEGY_REENABLED: StrategyReenabledRecord,
+    LogEventType.ACCOUNT_DIRECTIVE_OP: AccountDirectiveOpRecord,
+    LogEventType.ACCOUNT_DIRECTIVE_APPLIED: AccountDirectiveAppliedRecord,
 }
 
 
@@ -222,6 +283,21 @@ def record_from_dict(payload: Mapping[str, Any]) -> LogRecord:
                          label_bar_ts=payload.get("label_bar_ts"), direction=payload.get("direction"),
                          confidence=payload.get("confidence"), features=dict(payload.get("features", {})),
                          extras=dict(payload.get("extras", {})), tier1_error=payload.get("tier1_error"))
+    if cls is AccountDirectiveOpRecord:
+        return AccountDirectiveOpRecord(envelope=envelope, op=GuardedOp(payload["op"]), outcome=GuardOutcome(payload["outcome"]),
+                                        directive=str(payload["directive"]), directive_source=str(payload["directive_source"]),
+                                        directive_sequence=payload.get("directive_sequence"),
+                                        directive_episode=payload.get("directive_episode"),
+                                        directive_reason=payload.get("directive_reason"),
+                                        signal_bar_utc=payload.get("signal_bar_utc"))
+    if cls is AccountDirectiveAppliedRecord:
+        return AccountDirectiveAppliedRecord(envelope=envelope, directive=str(payload["directive"]),
+                                             directive_source=str(payload["directive_source"]),
+                                             directive_sequence=payload.get("directive_sequence"),
+                                             directive_episode=payload.get("directive_episode"),
+                                             directive_reason=payload.get("directive_reason"),
+                                             previous_directive=payload.get("previous_directive"),
+                                             previous_source=payload.get("previous_source"))
     if cls is CircuitBreakerTrippedRecord:
         return CircuitBreakerTrippedRecord(envelope=envelope,
                                            consecutive_errors=int(payload.get("consecutive_errors", 0)),
@@ -292,6 +368,26 @@ class SystemRecordFactory:
 
     def strategy_reenabled(self, *, reason: str | None = None, wall_clock: Any = None) -> StrategyReenabledRecord:
         return StrategyReenabledRecord(envelope=self._env(LogEventType.STRATEGY_REENABLED, wall_clock), reason=reason)
+
+    def account_directive_op(self, *, op: GuardedOp, outcome: GuardOutcome, directive: str, directive_source: str,
+                             directive_sequence: int | None = None, directive_episode: int | None = None,
+                             directive_reason: str | None = None, signal_bar_utc: Any = None,
+                             wall_clock: Any = None) -> AccountDirectiveOpRecord:
+        return AccountDirectiveOpRecord(envelope=self._env(LogEventType.ACCOUNT_DIRECTIVE_OP, wall_clock),
+                                        op=GuardedOp(op), outcome=GuardOutcome(outcome), directive=str(directive),
+                                        directive_source=str(directive_source), directive_sequence=directive_sequence,
+                                        directive_episode=directive_episode, directive_reason=directive_reason,
+                                        signal_bar_utc=_iso_utc(signal_bar_utc))
+
+    def account_directive_applied(self, *, directive: str, directive_source: str, directive_sequence: int | None = None,
+                                  directive_episode: int | None = None, directive_reason: str | None = None,
+                                  previous_directive: str | None = None, previous_source: str | None = None,
+                                  wall_clock: Any = None) -> AccountDirectiveAppliedRecord:
+        return AccountDirectiveAppliedRecord(envelope=self._env(LogEventType.ACCOUNT_DIRECTIVE_APPLIED, wall_clock),
+                                             directive=str(directive), directive_source=str(directive_source),
+                                             directive_sequence=directive_sequence, directive_episode=directive_episode,
+                                             directive_reason=directive_reason, previous_directive=previous_directive,
+                                             previous_source=previous_source)
 
 
 class LogBinding:

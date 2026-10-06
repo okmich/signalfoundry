@@ -28,6 +28,8 @@ class Trader:
             f"(circuit breaker: {max_consecutive_errors} errors)")
 
     def check_positions(self, run_dt: datetime):
+        # Before the breaker check: a circuit-broken strategy's positions must still close under NO_OPS.
+        self.strategy.enforce_account_directive(run_dt)
         if not self.health.is_enabled:
             logger.debug(f"Strategy '{self.health.strategy_name}' is disabled, skipping position check")
             return
@@ -44,6 +46,7 @@ class Trader:
         return [self.strategy]
 
     def run(self, run_dt: datetime):
+        self.strategy.enforce_account_directive(run_dt)   # before the breaker check (ACCOUNT_ADMIN_SPEC §10.1)
         if not self.health.is_enabled:
             logger.warning( f"Strategy '{self.health.strategy_name}' is disabled, skipping execution")
             # Ops-channel heartbeat so a circuit-broken system is distinguishable from wedged (§7.3).
