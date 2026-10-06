@@ -43,6 +43,7 @@ ALL_PROJECTS = [
     "utils",
     "mt5",
     "ib",
+    "crypto",
     "features",
     "labelling",
     "ml",

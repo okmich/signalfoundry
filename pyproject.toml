@@ -10,6 +10,7 @@ dependencies = [
 [tool.uv.workspace]
 members = [
     "core",
+    "crypto",
     "features",
     "ib",
     "labelling",
