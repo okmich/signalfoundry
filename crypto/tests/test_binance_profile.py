@@ -246,3 +246,57 @@ async def test_whole_leverage_is_sent_as_int(leverage, sent):
     spec = MarketSpec.from_market(stub, stub.market(PERP), MarketType.LINEAR_PERP)
     await BinanceProfile().apply_leverage(_Lev(), leverage, spec)
     assert calls == [(sent, type(sent))]
+
+
+class _ModeExchange:
+    """Position-mode calls only. ``set_error`` is what Binance answers to a switch while any order is open."""
+
+    def __init__(self, *, readable=True, hedged=False, read_error=None, set_error=None):
+        self.has = {"fetchPositionMode": readable, "setPositionMode": True, "fetchPositions": True}
+        self.hedged, self.read_error, self.set_error = hedged, read_error, set_error
+        self.calls = []
+
+    async def fetch_position_mode(self, symbol=None, params=None):
+        self.calls.append("read")
+        if self.read_error:
+            raise self.read_error
+        return {"info": {}, "hedged": self.hedged}
+
+    async def set_position_mode(self, hedged, symbol=None, params=None):
+        self.calls.append("set")
+        if self.set_error:
+            raise self.set_error
+
+    async def fetch_positions(self, symbols=None, since=None, limit=None, params=None):
+        return []
+
+
+_OPEN_ORDERS = e.OperationRejected('binance {"code":-4067,"msg":"Position side cannot be changed if there exists open '
+                                   'orders."}')
+
+
+def _perp_spec():
+    stub = _Stub()
+    return MarketSpec.from_market(stub, stub.market(PERP), MarketType.LINEAR_PERP)
+
+
+async def test_one_way_account_is_left_alone_even_with_open_orders():
+    """Seen live on Binance demo: the ETH sleeve's switch failed with -4067 because the BTC sleeve had just placed its
+    stops - although the account was already one-way. A one-way account must not be written to at all."""
+    ex = _ModeExchange(hedged=False, set_error=_OPEN_ORDERS)
+    await BinanceProfile().ensure_one_way(ex, _perp_spec())
+    assert ex.calls == ["read"]
+
+
+async def test_hedged_account_is_switched_or_fails_clearly():
+    ex = _ModeExchange(hedged=True)
+    await BinanceProfile().ensure_one_way(ex, _perp_spec())
+    assert ex.calls == ["read", "set"]
+    with pytest.raises(VenueUnsupportedError, match="one-way"):
+        await BinanceProfile().ensure_one_way(_ModeExchange(hedged=True, set_error=_OPEN_ORDERS), _perp_spec())
+
+
+@pytest.mark.parametrize("ex", [_ModeExchange(readable=False), _ModeExchange(read_error=e.NetworkError("timeout"))])
+async def test_unreadable_mode_falls_back_to_setting_it(ex):
+    await BinanceProfile().ensure_one_way(ex, _perp_spec())
+    assert ex.calls[-1] == "set"

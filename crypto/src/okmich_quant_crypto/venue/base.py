@@ -240,7 +240,22 @@ class VenueProfile:
 
     # ------------------------------------------------------------------ account setup
     async def ensure_one_way(self, exchange, spec: MarketSpec) -> None:
-        """Make sure ``spec``'s positions are in one-way mode, or fail fast."""
+        """Make sure ``spec``'s positions are in one-way mode, or fail fast.
+
+        The mode is READ first where CCXT can, and an account that is already one-way is left alone: a switch is a
+        write the venue may refuse even when it would change nothing - Binance answers -4067 / -4068 while ANY order
+        or position is open, such as the stops a sibling sleeve placed moments earlier, or this sleeve's own stops on
+        a restart. Only a hedged account (or one whose mode cannot be read) is switched.
+        """
+        if exchange.has.get("fetchPositionMode"):
+            try:
+                mode = await exchange.fetch_position_mode(spec.symbol)
+            except Exception as exc:
+                logger.warning("%s: could not read the position mode (%s); setting one-way instead", spec.symbol, exc)
+            else:
+                if not (mode or {}).get("hedged"):
+                    return
+                logger.warning("%s: the account is in hedge mode; switching it to one-way", spec.symbol)
         if exchange.has.get("setPositionMode"):
             try:
                 await exchange.set_position_mode(False, spec.symbol)
