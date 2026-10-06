@@ -223,3 +223,26 @@ async def test_strategy_reads_the_right_balance(exchange, venue, clock):
 
 def test_fake_exchange_still_constructs(clock):
     assert FakeExchange(clock).id == "fakex"
+
+
+def test_fractional_leverage_is_rejected_for_perps(exchange):
+    with pytest.raises(VenueUnsupportedError, match="whole number"):
+        resolve_capabilities(exchange, BinanceProfile(), make_cfg(leverage=2.5))
+    assert resolve_capabilities(exchange, BinanceProfile(), make_cfg(leverage=3)).stop_mode is StopMode.NATIVE
+
+
+@pytest.mark.parametrize("leverage,sent", [(1.0, 1), (3, 3), (2.5, 2.5)])
+async def test_whole_leverage_is_sent_as_int(leverage, sent):
+    """Binance answers -1102 to "leverage=1.0"; a whole number must go out as an int (seen live on demo)."""
+    calls = []
+
+    class _Lev:
+        has = {"setLeverage": True}
+
+        async def set_leverage(self, value, symbol=None, params=None):
+            calls.append((value, type(value)))
+
+    stub = _Stub()
+    spec = MarketSpec.from_market(stub, stub.market(PERP), MarketType.LINEAR_PERP)
+    await BinanceProfile().apply_leverage(_Lev(), leverage, spec)
+    assert calls == [(sent, type(sent))]

@@ -267,8 +267,10 @@ class VenueProfile:
     async def apply_leverage(self, exchange, leverage: float, spec: MarketSpec) -> None:
         if not exchange.has.get("setLeverage"):
             raise VenueUnsupportedError(f"{self.exchange_id} cannot set leverage through CCXT")
+        # A whole number goes out as an int: CCXT forwards the value as given, and Binance rejects "1.0" (-1102).
+        value = int(leverage) if float(leverage).is_integer() else float(leverage)
         try:
-            await exchange.set_leverage(leverage, spec.symbol)
+            await exchange.set_leverage(value, spec.symbol)
         except Exception as exc:
             if classify_ccxt_error(exc, self) is not ErrorClass.NO_CHANGE:
                 raise
