@@ -39,6 +39,7 @@ class ResolvedCapabilities:
 
 
 def resolve_capabilities(exchange, profile: VenueProfile, cfg: CryptoStrategyConfig) -> ResolvedCapabilities:
+    profile.check_strategy(cfg)
     has = exchange.has or {}
     required = list(REQUIRED_ALWAYS)
     if cfg.market_type is MarketType.LINEAR_PERP:

@@ -32,7 +32,8 @@ from .timeframe_utils import (
     MAX_TIMEFRAME_MINUTES, timeframe_to_minutes, timeframe_to_ms, timeframe_to_seconds, validate_venue_timeframe,
 )
 from .venue import (
-    BybitProfile, StopCapabilities, VenueProfile, get_profile, is_supported, resolve_profile, supported_venues,
+    BinanceProfile, BybitProfile, StopCapabilities, VenueProfile, get_profile, is_supported, resolve_profile,
+    supported_venues,
 )
 
 __all__ = [
@@ -43,8 +44,8 @@ __all__ = [
     "CryptoStrategyConfig", "CryptoSystemConfig", "CryptoVenueConfig", "check_isolation", "derive_log_symbol",
     "isolation_key",
     # venue profiles + capabilities
-    "VenueProfile", "BybitProfile", "StopCapabilities", "supported_venues", "is_supported", "get_profile",
-    "resolve_profile",
+    "VenueProfile", "BinanceProfile", "BybitProfile", "StopCapabilities", "supported_venues", "is_supported",
+    "get_profile", "resolve_profile",
     "ResolvedCapabilities", "resolve_capabilities",
     # resilience
     "CryptoError", "CryptoTransientError", "CryptoPermanentError", "CryptoBannedError", "OrderStateUnknownError",

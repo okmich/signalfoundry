@@ -10,9 +10,11 @@ Read-only tools (``fetch-crypto-data``) may use :func:`get_profile` for any CCXT
 """
 from ..resilience import VenueUnsupportedError
 from .base import VenueProfile
+from .binance import BinanceProfile
 from .bybit import BybitProfile
 
 _SUPPORTED: dict[str, type[VenueProfile]] = {
+    "binance": BinanceProfile,
     "bybit": BybitProfile,
 }
 

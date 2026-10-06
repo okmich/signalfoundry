@@ -1,7 +1,7 @@
 """Integration tests run against a REAL venue copy (testnet or demo) and are skipped unless configured:
 
-    CRYPTO_IT_EXCHANGE=bybit
-    CRYPTO_IT_ENV=demo            # or testnet - LIVE is refused
+    CRYPTO_IT_EXCHANGE=bybit      # or binance
+    CRYPTO_IT_ENV=demo            # testnet: bybit only. LIVE is refused
     CRYPTO_IT_API_KEY=...
     CRYPTO_IT_API_SECRET=...
 

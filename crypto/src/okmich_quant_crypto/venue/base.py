@@ -8,7 +8,7 @@ leaves out, and only venues in ``venue.registry`` can trade (the base class alon
 """
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import ccxt.pro as ccxtpro
 
@@ -133,6 +133,23 @@ class VenueProfile:
             if limit:
                 return int(limit)
         return self.default_ohlcv_limit
+
+    def check_strategy(self, cfg) -> None:
+        """Reject a strategy configuration this venue cannot honour (called before anything is subscribed)."""
+        return None
+
+    def balance_params(self, market_type: MarketType) -> dict:
+        """Params that make ``fetch_balance`` read the account that funds ``market_type``."""
+        return {}
+
+    def account_stream_calls(self, exchange, *, spot: bool, perp_symbols: list[str]) -> list[tuple[str, Callable]]:
+        """The account-wide WebSocket watchers to run: ``(kind, zero-arg coroutine factory)`` with kind in
+        ``orders`` / ``fills`` / ``positions``. Venues whose spot and futures accounts stream separately return one
+        watcher per account."""
+        calls: list[tuple[str, Callable]] = [("orders", exchange.watch_orders), ("fills", exchange.watch_my_trades)]
+        if perp_symbols:
+            calls.append(("positions", exchange.watch_positions))
+        return calls
 
     # ------------------------------------------------------------------ order parameters
     def order_params(self, market_type: MarketType, *, reduce_only: bool = False) -> dict:

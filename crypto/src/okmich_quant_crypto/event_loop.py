@@ -143,7 +143,7 @@ class CryptoEventLoop:
 
         stream_account = any(s.caps.stream_account for s in self._strategies)
         if stream_account:
-            self._start_account_streams(has_perps)
+            self._start_account_streams()
         for s in self._strategies:
             s.start(stream_account)
 
@@ -165,12 +165,14 @@ class CryptoEventLoop:
             self._shutdown_event.set()
 
     # ------------------------------------------------------------------ account streams
-    def _start_account_streams(self, has_perps: bool) -> None:
-        streams = [("orders", self.exchange.watch_orders), ("fills", self.exchange.watch_my_trades)]
-        if has_perps:
-            streams.append(("positions", self.exchange.watch_positions))
-        for kind, watch in streams:
-            self._stream_tasks.append(asyncio.create_task(self._account_stream(kind, watch), name=f"account:{kind}"))
+    def _start_account_streams(self) -> None:
+        streaming = [s for s in self._strategies if s.caps.stream_account]
+        perp_symbols = [s.spec.symbol for s in streaming if s.strategy_config.market_type is MarketType.LINEAR_PERP]
+        spot = any(s.strategy_config.market_type is MarketType.SPOT for s in streaming)
+        calls = self.profile.account_stream_calls(self.exchange, spot=spot, perp_symbols=perp_symbols)
+        for i, (kind, watch) in enumerate(calls):
+            self._stream_tasks.append(asyncio.create_task(self._account_stream(kind, watch),
+                                                          name=f"account:{kind}:{i}"))
 
     async def _account_stream(self, kind: str, watch: Callable[[], Awaitable[list]]) -> None:
         backoff = 1.0
