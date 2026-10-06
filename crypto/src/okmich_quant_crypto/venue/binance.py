@@ -100,6 +100,8 @@ class BinanceProfile(VenueProfile):
         if cfg.market_type is MarketType.LINEAR_PERP and cfg.stop_trigger is StopTrigger.INDEX:
             raise VenueUnsupportedError(f"{cfg.name}: Binance USDⓈ-M stops trigger on the last (contract) or the mark "
                                         f"price only; stop_trigger 'index' is not available")
+        if cfg.leverage is not None and not float(cfg.leverage).is_integer():
+            raise VenueUnsupportedError(f"{cfg.name}: Binance USDⓈ-M leverage is a whole number; got {cfg.leverage}")
 
     def balance_params(self, market_type: MarketType) -> dict:
         return {"type": "spot"} if market_type is MarketType.SPOT else {"type": "swap"}
