@@ -16,14 +16,14 @@ from .fakes import FakeExchange, perp_market, spot_market
 
 # ---------------------------------------------------------------------- registry + gate
 
-def test_supported_list_is_bybit_only():
-    assert [v for v in supported_venues() if v != "fakex"] == ["bybit"]   # fakex: the test-only venue
-    assert is_supported(" ByBit ") and not is_supported("okx")
+def test_supported_list():
+    assert [v for v in supported_venues() if v != "fakex"] == ["binance", "bybit"]   # fakex: test-only venue
+    assert is_supported(" ByBit ") and is_supported("binance") and not is_supported("okx")
     assert isinstance(resolve_profile("bybit"), BybitProfile)
 
 
 def test_unsupported_exchanges_cannot_trade():
-    for exchange_id in ("okx", "binance", "kraken"):
+    for exchange_id in ("okx", "kraken", "gate"):
         with pytest.raises(VenueUnsupportedError, match="not a supported exchange"):
             resolve_profile(exchange_id)
 

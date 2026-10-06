@@ -627,7 +627,7 @@ class BaseCryptoStrategy(BaseStrategy):
         if stop_loss is None or stop_loss <= 0 or stop_loss == price:
             raise OrderSizeError(f"{cfg.name}: {sizing.type.value} sizing needs a stop-loss distance and none is set")
         currency = self.spec.settle or self.spec.quote
-        equity = await fetch_quote_equity(self.exchange, currency)
+        equity = await fetch_quote_equity(self.exchange, currency, self._balance_params())
         if not equity or equity <= 0:
             raise OrderSizeError(f"{cfg.name}: no positive {currency} equity to size against")
         return equity * float(fraction) / abs(price - stop_loss)
@@ -776,14 +776,17 @@ class BaseCryptoStrategy(BaseStrategy):
             await self._restore_protection()
         return False
 
+    def _balance_params(self) -> dict:
+        return self.profile.balance_params(self.spec.market_type)
+
     async def _spot_sellable_qty(self) -> float:
         """Sellable spot quantity. Cancelled stop orders can take a moment to release their locked balance."""
-        free = await fetch_free_balance(self.exchange, self.spec.base)
+        free = await fetch_free_balance(self.exchange, self.spec.base, self._balance_params())
         for _ in range(3):
             if free + self._qty_eps() >= self.spot_ledger.qty:
                 break
             await self._sleep(0.5)
-            free = await fetch_free_balance(self.exchange, self.spec.base)
+            free = await fetch_free_balance(self.exchange, self.spec.base, self._balance_params())
         return self.spot_ledger.sellable_qty(free)
 
     async def _restore_protection(self) -> None:

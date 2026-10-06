@@ -41,11 +41,11 @@ Market data: see [Market data](#market-data) (`fetch-crypto-data`, `record-crypt
 
 | field | default | meaning |
 |---|---|---|
-| `exchange_id` | - | a [supported exchange](#supported-exchanges) id (`bybit`); anything else is rejected at load |
+| `exchange_id` | - | a [supported exchange](#supported-exchanges) id (`binance`, `bybit`); anything else is rejected at load |
 | `environment` | **required** | `live`, `testnet`, `demo` - no default, so LIVE is never an accident |
 | `sub_account` | `main` | label of the (sub-)account the key belongs to; part of the isolation key |
 | `api_key_env`, `secret_env`, `password_env` | `CRYPTO_API_KEY`, `CRYPTO_API_SECRET`, - | env var NAMES |
-| `margin_mode` | `null` | `cross` / `isolated`, applied at startup. On Bybit this changes the **whole account** |
+| `margin_mode` | `null` | `cross` / `isolated`, applied at startup. On Bybit this changes the **whole account**; on Binance it is per symbol |
 | `state_dir` | `.crypto_state` | lifecycle ids, order roles, managed stop levels, spot ledger |
 | `rate_limit_ms`, `ccxt_options` | - | CCXT overrides |
 
@@ -86,6 +86,10 @@ rejected with a logged, notified failure - never a crash.
 Bybit demo is switched on with `enable_demo_trading(True)` (never combined with sandbox). Demo has no UID endpoint, so
 `account_id` is a non-reversible fingerprint of the API key.
 
+Binance paper trading is **demo** only (`enable_demo_trading`, spot and USDⓈ-M; keys from the demo site). CCXT no
+longer supports Binance's futures testnet, so `testnet` is refused for `binance`. USDⓈ-M demo prices, funding and lot
+steps are not production's: use it for plumbing, never to measure fills or funding.
+
 ## Feeds: STREAM and POLL produce identical bars
 
 Both feed one `ClosedBarSource` contract: exactly one REST-reconciled closed bar per timeframe boundary.
@@ -98,8 +102,9 @@ Both feed one `ClosedBarSource` contract: exactly one REST-reconciled closed bar
 - **Gaps** (reconnects, missed polls) are backfilled from REST. Any bar that closed more than `close_max_wait_seconds`
   ago is **stale**: it updates the price buffer but does not run the strategy or write a heartbeat - acting late on an
   old signal is worse than skipping it, and the heartbeat shows the outage honestly.
-- Orders / fills / positions are account-wide streams on every venue: consumed once by the event loop, dispatched by
-  symbol, and REST-reconciled every `reconcile_seconds`. Without the WebSocket capabilities they are polled.
+- Orders / fills / positions are account-wide streams: consumed once by the event loop, dispatched by symbol, and
+  REST-reconciled every `reconcile_seconds`. Without the WebSocket capabilities they are polled. Binance keeps spot and
+  USDⓈ-M apart, so it gets one set of streams per account that has strategies.
 
 ## Stops
 
@@ -111,14 +116,15 @@ Both feed one `ClosedBarSource` contract: exactly one REST-reconciled closed bar
 
 Native, per venue capability:
 
-- **Position-level stops** (Bybit perps): entries carry attached SL/TP; changes go through `/v5/position/trading-stop` in
-  Full mode, replacing both levels in one call - the position is never unprotected.
-- **Standalone conditional orders** (everything else): placed when the position appears, resized when the position
-  grows or shrinks, changed new-before-old (the replacement is placed before the old order is cancelled). Every stop
-  operation runs under one lock; an order whose cancel cannot be confirmed is kept and retried, and untracked stop
-  orders carrying our client-id prefix are cancelled on reconcile. Spot stops are cancelled BEFORE a strategy close,
-  since a spot stop is a plain sell - and put back if the close then fails. Entries never attach stops here: a
-  venue-created stop has no id this package could move.
+- **Position-level stops** (Bybit perps): entries carry attached SL/TP; changes go through
+  `/v5/position/trading-stop` in Full mode, replacing both levels in one call - the position is never unprotected.
+- **Standalone conditional orders** (Bybit spot TP/SL orders; Binance USDⓈ-M "algo" orders, triggered on `last` =
+  contract price or `mark`, `index` rejected at load): placed when the position appears, resized when the position
+  grows or shrinks, changed new-before-old (the replacement is placed before the old order is cancelled), cancelled
+  when the position closes. Every stop operation runs under one lock; an order whose cancel cannot be confirmed is
+  kept and retried, and untracked stop orders carrying our client-id prefix are cancelled on reconcile. Spot stops are
+  cancelled BEFORE a strategy close, since a spot stop is a plain sell - and put back if the close then fails. Entries
+  never attach stops here: a venue-created stop has no id this package could move.
 
 The resolved stop mode is logged at startup for every strategy.
 
@@ -243,12 +249,17 @@ are compacted on the next start).
 
   ```
   CRYPTO_IT_EXCHANGE=bybit CRYPTO_IT_ENV=demo CRYPTO_IT_API_KEY=... CRYPTO_IT_API_SECRET=...
+  CRYPTO_IT_EXCHANGE=binance CRYPTO_IT_ENV=demo CRYPTO_IT_API_KEY=... CRYPTO_IT_API_SECRET=...
   ```
+
+  The suite follows the venue's declared stop capabilities: attached + position-level stops on Bybit, separate
+  reduce-only conditional orders (placed, found by client id, listed, cancelled) on Binance.
 
 ## Supported exchanges
 
 | exchange | `exchange_id` | spot | USDT linear perps | stops | paper environments | added |
 |---|---|---|---|---|---|---|
+| Binance (spot + USDⓈ-M) | `binance` | yes | yes | native: conditional (algo) orders on perps; managed on spot | `demo` | 2026-10 |
 | Bybit (v5 unified account) | `bybit` | yes | yes | native: position-level on perps, TP/SL orders on spot | `demo`, `testnet` | 2026-10 |
 
 The list lives in `venue/registry.py`; nothing outside it can trade.
@@ -268,11 +279,19 @@ The list lives in `venue/registry.py`; nothing outside it can trade.
 
 ## Known limitations
 
-- Supported exchanges: Bybit only (see [Supported exchanges](#supported-exchanges)).
+- Supported exchanges: Binance and Bybit (see [Supported exchanges](#supported-exchanges)).
 - Managed stops are not live while the process is disconnected or stopped.
 - Hedge (two-sided) position mode is unsupported; the account must be one-way.
 - Spot shorting is unsupported; stop-entry orders are not supported in v1.
 - Spot native stops on Bybit (TP/SL orders) are verified by integration tests only. If Bybit locks the balance for a
   spot TP/SL order, an SL and a TP cannot both cover the full quantity; the TP placement then fails (logged and
   notified) and only the SL protects the position.
+- Binance:
+  - Spot stops are managed (`auto` resolves to `managed`; `native` is rejected): Binance does not state that a spot
+    stop leaves the balance free, so an SL and a TP on the same quantity may not coexist.
+  - Its trade history carries no client order id and does not mark liquidation / ADL / stop fills, so a venue-side
+    close is reported with an UNKNOWN reason (the P&L is still exact).
+  - Funding is read from the income history and taken as signed from the account's side (positive = received).
+    Verify the sign on the first funding payment in demo.
+  - Trade history is read in the venue's windows (7 days USDⓈ-M, 24 h spot): a long outage costs one request per window.
 - On Windows no event-loop policy is needed: CCXT works on the default Proactor loop (aiodns is not installed).

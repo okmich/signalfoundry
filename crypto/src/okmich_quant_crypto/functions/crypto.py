@@ -68,15 +68,16 @@ def ticker_to_tick_info(ticker: dict) -> dict[str, float]:
             "mark": float(ticker.get("markPrice") or 0.0), "index": float(ticker.get("indexPrice") or 0.0)}
 
 
-async def fetch_quote_equity(exchange, currency: str) -> Optional[float]:
-    """Account equity in ``currency`` (total balance incl. unrealised P&L where the venue reports it)."""
-    balance = await exchange.fetch_balance()
+async def fetch_quote_equity(exchange, currency: str, params: Optional[dict] = None) -> Optional[float]:
+    """Account equity in ``currency`` (total balance incl. unrealised P&L where the venue reports it). ``params``
+    select the account on venues that keep spot and futures apart (``VenueProfile.balance_params``)."""
+    balance = await exchange.fetch_balance(params or {})
     total = (balance.get("total") or {}).get(currency)
     return float(total) if total is not None else None
 
 
-async def fetch_free_balance(exchange, currency: str) -> float:
-    balance = await exchange.fetch_balance()
+async def fetch_free_balance(exchange, currency: str, params: Optional[dict] = None) -> float:
+    balance = await exchange.fetch_balance(params or {})
     return float((balance.get("free") or {}).get(currency) or 0.0)
 
 
