@@ -187,6 +187,7 @@ trend.normalized_ma.norm_smma,odd,scale-carrying,,"FXPIG-Server M5, 6 symbols (B
 trend.normalized_ma.norm_tema,odd,scale-carrying,,"FXPIG-Server M5, 4 symbols (EURUSD.r, GBPUSD.r, USDCAD.r, US500.r), 80000 bars/symbol, 2026-09-02"
 trend.normalized_ma.norm_vwap,odd,scale-carrying,,"FXPIG-Server M5, 6 symbols (BTCUSDT.r, EURUSD.r, GBPUSD.r, US500.r, USDJPY.r, XAUUSD.r), 20000 bars/symbol, 2026-09-04; generic binder params (period=20) except metastore-tuned entries"
 trend.trend_persistence_labeling,odd,scale-free,,"FXPIG-Server M5, 6 symbols (BTCUSDT.r, EURUSD.r, GBPUSD.r, US500.r, USDJPY.r, XAUUSD.r), 20000 bars/symbol, 2026-09-04; generic binder params (period=20) except metastore-tuned entries"
+trend.trend_scan.trend_scan_features,heterogeneous,unscored,,"FXPIG-Server M5, 6 symbols (BTCUSDT.r, EURUSD.r, GBPUSD.r, US500.r, USDJPY.r, XAUUSD.r), 20000 bars/symbol, 2026-10-04; function defaults (min_window=6, max_window=72)"
 trend.zscore_trend_features,heterogeneous,unscored,,"FXPIG-Server M5, 6 symbols (BTCUSDT.r, EURUSD.r, GBPUSD.r, US500.r, USDJPY.r, XAUUSD.r), 20000 bars/symbol, 2026-09-04; generic binder params (period=20) except metastore-tuned entries"
 volatility._atr.atr,even,scale-carrying,,"FXPIG-Server M5, 4 symbols (EURUSD.r, GBPUSD.r, USDCAD.r, US500.r), 80000 bars/symbol, 2026-09-02"
 volatility._atr.atr_ratio,even,scale-free,,"FXPIG-Server M5, 4 symbols (EURUSD.r, GBPUSD.r, USDCAD.r, US500.r), 80000 bars/symbol, 2026-09-02"

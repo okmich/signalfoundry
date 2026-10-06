@@ -24,8 +24,10 @@ class InferenceMode(StrEnum):
                  Best for backtesting and live trading to avoid temporal leakage.
     - SMOOTHING: Non-causal inference using all observations (Forward-Backward algorithm).
                  Best for offline labeling when you have the full dataset.
-    - VITERBI: Most likely state sequence (Viterbi algorithm).
-               Only applicable to predict(), not predict_proba().
+    - VITERBI: Most likely state SEQUENCE (true Viterbi: max-product forward + backward traceback).
+               Differs from SMOOTHING, which is the per-bar argmax of the marginals. Only applicable
+               to predict(), not predict_proba(). Before 2026-09-27 this mode returned pomegranate's
+               DenseHMM.predict, i.e. the SMOOTHING labels; see BasePomegranateHMM.predict_viterbi.
     - CAUSAL_VITERBI: Terminal state of the best path over observations up to time t
                (max-product forward recursion, no traceback). Causal, so it is the
                Viterbi-family member that is safe for backtesting and live trading.

@@ -635,6 +635,14 @@ _TREND = [
         "Causal per-bar features from the CTL state machine: direction, trend age, retrace-to-flip, leg return, flip count",
         rr=H, ret=H, dr=H, hor=S, wbi=[TR, RA], dir_=True, ot="dataframe",
         notes="No look-ahead. Distills the +/-1 CTL label into trend maturity, proximity-to-reversal, leg magnitude, and choppiness."),
+    _fe("trend_scan_features", "trend.trend_scan", "trend",
+        "Causal trend scan (backward Lopez de Prado): the max-|t| trailing line -- direction, R2 strength, window, "
+        "t-value, slope, cross-window sign agreement, gap from the line, optional hysteresis state",
+        rr=M, ret=L, dr=M, hor=S, wbi=[TR], dir_=True, ot="dataframe",
+        notes="Backward scan only, so no look-ahead (the published forward scan is a training target, not a feature). "
+              "Strength columns are biased upward on noise by the max-|t| choice: calibrate thresholds against a null. "
+              "On FXPIG 5m/15m FX its states lasted no longer than sign-flipped noise (lab trend_state_descriptor, "
+              "2026-10)."),
     # Supplementary indicators
     _fe("bollinger_band", "trend", "price_structure", "Bollinger Bands: upper/mid/lower/%B/width",
         rr=H, ret=M, dr=M, hor=S, wbi=[RA], ot="dataframe", notes="Returns 5 columns: upper, mid, lower, pct_b, width"),

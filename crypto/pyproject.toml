@@ -1,0 +1,40 @@
+[project]
+name = "okmich-quant-crypto"
+version = "0.1.0"
+description = "CCXT-based crypto exchange integration (spot and USDT-margined linear perpetuals)"
+requires-python = ">=3.12"
+dependencies = [
+    "okmich-quant-core",
+    "okmich-quant-utils",
+    # Pinned exactly: ccxt hard-pins several shared transitive dependencies (certifi, idna, typing-extensions,
+    # urllib3, ...), so every ccxt upgrade moves them for the whole workspace lock. Upgrade deliberately.
+    "ccxt==4.5.85",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "pyarrow>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+fetch-crypto-data = "okmich_quant_crypto.utils.crypto_data_fetcher:main"
+record-crypto-market = "okmich_quant_crypto.utils.crypto_market_recorder:main"
+
+[tool.uv.sources]
+okmich-quant-core = { workspace = true }
+okmich-quant-utils = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/okmich_quant_crypto"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

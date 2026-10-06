@@ -45,7 +45,8 @@ class BasePomegranateHMM(ABC):
             Inference algorithm to use for predictions:
             - FILTERING: Forward algorithm only (no look-ahead bias)
             - SMOOTHING: Forward-Backward algorithm (uses future info, for analysis)
-            - VITERBI: Most likely state sequence (uses future info, for labeling)
+            - VITERBI: Most likely state SEQUENCE, the true Viterbi path (uses future info, for labeling)
+            - CAUSAL_VITERBI: Terminal state of the best path so far (causal)
         dist_kwargs
             Extra arguments forwarded to the actual pomegranate
             distribution constructors (e.g. n_components for gmm).
@@ -208,11 +209,7 @@ class BasePomegranateHMM(ABC):
         if self.inference_mode == InferenceMode.CAUSAL_VITERBI:
             return self.predict_causal_viterbi(X)
         elif self.inference_mode == InferenceMode.VITERBI:
-            predictions = self._model.predict([X]).flatten()
-            # Convert torch tensor to numpy
-            if hasattr(predictions, "detach"):
-                return predictions.detach().cpu().numpy()
-            return predictions
+            return self.predict_viterbi(X)
         elif self.inference_mode == InferenceMode.FILTERING:
             return np.argmax(self._predict_proba_filtered(X), axis=1)
         elif self.inference_mode == InferenceMode.SMOOTHING:
@@ -574,6 +571,71 @@ class BasePomegranateHMM(ABC):
         for t in range(1, T):
             log_delta[t] = np.max(log_delta[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
         return log_delta
+
+    @staticmethod
+    def _max_product_backpointer_pass(log_pi: np.ndarray, log_A: np.ndarray,
+                                      log_B: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Max-product forward pass WITH backpointers, for full (offline) Viterbi decoding.
+
+        Same recursion as :meth:`_max_product_forward_pass`, with the same ``log_delta`` values. It also stores
+        ``psi[t, k] = argmax_j (log_delta[t-1, j] + log_A[j, k])``, the best predecessor of state ``k`` at bar ``t``.
+        Tracing ``psi`` back from the terminal argmax is what makes Viterbi non-causal. That is why the causal pass
+        stores no backpointers, and why this pass is a separate method.
+        """
+        T, K = log_B.shape
+        log_delta = np.empty((T, K), dtype=np.float64)
+        psi = np.zeros((T, K), dtype=np.int64)
+        log_delta[0] = log_pi + log_B[0]
+        cols = np.arange(K)
+        for t in range(1, T):
+            scores = log_delta[t - 1, :, np.newaxis] + log_A
+            psi[t] = np.argmax(scores, axis=0)
+            log_delta[t] = scores[psi[t], cols] + log_B[t]
+        return log_delta, psi
+
+    def predict_viterbi(self, X: np.ndarray) -> np.ndarray:
+        """The most likely state SEQUENCE (the MAP path), shape ``(T,)``: true Viterbi decoding.
+
+        ``argmax over q_0..q_{T-1} of log P(q_0..q_{T-1}, o_0..o_{T-1})``. It runs the max-product forward pass
+        with backpointers, then traces back from the terminal argmax.
+
+        **Not the same as SMOOTHING.** SMOOTHING picks each bar's most likely state separately (the argmax of the
+        forward-backward marginal), so its sequence can even contain transitions the model forbids. Viterbi picks
+        the single most likely sequence. The two agree on most bars and differ around ambiguous switches: about 1% of
+        bars on a noisy 3-state fit, where Viterbi is the more persistent of the two.
+
+        **History.** Until 2026-09-27 ``InferenceMode.VITERBI`` returned pomegranate 1.x ``DenseHMM.predict``,
+        which is the SMOOTHING labels, despite the mode's name. Labels produced in this mode before then are
+        smoothed labels.
+
+        **Non-causal.** The traceback rewrites earlier labels as later bars arrive, so use it only for offline
+        labelling. Its terminal label equals :meth:`predict_causal_viterbi` at that bar (Viterbi's termination step).
+        That is the only label the two decoders are guaranteed to share.
+        """
+        if self._model is None:
+            raise RuntimeError("Model has not been fitted. Call fit() before predict_viterbi().")
+        X = np.asarray(X)
+        if X.size == 0:
+            raise ValueError("X must not be empty")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X contains NaN or Inf values. Clean input data before calling predict_viterbi.")
+        X = self._preprocess_input(X)
+        log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+        log_delta, psi = self._max_product_backpointer_pass(log_pi, log_A, log_B)
+        dead = np.isneginf(log_delta).all(axis=1)
+        if dead.any():
+            # Same guard as predict_causal_viterbi: an all -inf frontier row means every path into that bar goes
+            # through a zero-probability transition or emission, and argmax would silently tie on state 0.
+            raise ValueError(
+                f"predict_viterbi: no feasible state path exists at bar {int(np.argmax(dead))} - "
+                "every candidate path is forced through a zero-probability transition. Inspect the "
+                "fitted transition matrix for over-restrictive zeros."
+            )
+        path = np.empty(len(log_delta), dtype=np.int64)
+        path[-1] = int(np.argmax(log_delta[-1]))
+        for t in range(len(path) - 2, -1, -1):
+            path[t] = psi[t + 1, path[t + 1]]
+        return path
 
     def causal_viterbi_scores(self, X: np.ndarray) -> np.ndarray:
         """Max-product forward scores ``log_delta``, shape ``(T, K)``. See :meth:`predict_causal_viterbi`.
