@@ -15,6 +15,9 @@ jobs:
           - package: okmich-quant-core
             module: okmich_quant_core
             tests: core/tests
+          - package: okmich-quant-crypto
+            module: okmich_quant_crypto
+            tests: crypto/tests
           - package: okmich-quant-features
             module: okmich_quant_features
             tests: features/tests
