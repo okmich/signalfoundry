@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import numba as nb
 
+from ..utils.causal import DEFAULT_LOOKBACK, count_edges_at_or_below, prior_rolling_edges
+
 
 @nb.jit(nopython=True, cache=True)
 def _calculate_directions_fast(curr_bins: np.ndarray, prev_bins: np.ndarray) -> np.ndarray:
@@ -35,14 +37,17 @@ def _calculate_directions_fast(curr_bins: np.ndarray, prev_bins: np.ndarray) -> 
 
 def market_facilitation_index(high_prices: pd.Series, low_prices: pd.Series, volumes: pd.Series,
                               bin_percentiles: List[float] = [0.25, 0.50, 0.75], fixed_bin_edges: List[float] = None,
-                              mfi_bin_percentiles: List[float] = [0.25, 0.50, 0.75], fixed_mfi_bin_edges: List[float] = None,):
+                              mfi_bin_percentiles: List[float] = [0.25, 0.50, 0.75],
+                              fixed_mfi_bin_edges: List[float] = None, lookback: int = DEFAULT_LOOKBACK):
     """
     Calculate the Market Facilitation Index (MFI) - measures efficiency of price movement per unit volume.
 
     THE BILL WILLIAMS CLASSIC: Reveals how effectively volume is moving price.
     Bins are always conceptually defined by percentiles.
-    - In training: bin edges are computed from full df using bin_percentiles.
-    - In live: precomputed edges (from training) are passed as fixed_bin_edges.
+    - Default (no fixed edges): the edges at bar t are the percentiles of the ``lookback`` bars BEFORE t —
+      look-ahead-free, so backtest and live compute the same bins. Bars in warm-up have no bin (NaN code).
+    - Frozen edges: pass ``fixed_bin_edges`` / ``fixed_mfi_bin_edges`` (e.g. the edges returned by a training run).
+      They are used as given.
 
     Parameters:
     -----------
@@ -61,6 +66,8 @@ def market_facilitation_index(high_prices: pd.Series, low_prices: pd.Series, vol
     fixed_mfi_bin_edges : array-like, optional
         Precomputed MFI bin edges from training (e.g., [0, 0.01, 0.03, inf]).
         If provided, mfi_bin_percentiles is ignored.
+    lookback : int, default=500
+        Prior window (bars) for the percentile edges when no fixed edges are given.
 
     Returns:
     --------
@@ -68,8 +75,9 @@ def market_facilitation_index(high_prices: pd.Series, low_prices: pd.Series, vol
         - mfi_series: Raw MFI values (high-low)/volume
         - log_mfi_series: Log-transformed MFI for ML models
         - code_series: Pattern codes like "mfi_up__vol_down"
-        - vol_bin_edges: Volume bin edges [0, q1, q2, ..., inf]
-        - mfi_bin_edges: MFI bin edges [q1, q2, ..., inf] (no leading 0)
+        - vol_bin_edges: Volume bin edges [0, q1, q2, ..., inf] — the fixed edges, or the prior-window edges in force
+          at the LAST bar (pass them as ``fixed_bin_edges`` to freeze them for later data)
+        - mfi_bin_edges: MFI bin edges [q1, q2, ..., inf] (no leading 0) — same convention
 
 
     MFI Interpretation (Bill Williams Methodology):
@@ -111,24 +119,26 @@ def market_facilitation_index(high_prices: pd.Series, low_prices: pd.Series, vol
     • Numba JIT for direction calculations (5x faster)
     • Overall: 29.2x faster than original
     """
-    # Determine volume bin edges
+    volumes_array = volumes.values
+
+    # Volume bins. Fixed edges (from training) are used as given; otherwise the edges at bar t are the
+    # ``bin_percentiles`` quantiles of the ``lookback`` bars BEFORE t, so no bar is binned with future volumes.
     if fixed_bin_edges is not None:
         vol_edges = np.array(fixed_bin_edges, dtype=float)
         if vol_edges[0] != 0:
             vol_edges = np.concatenate([[0.0], vol_edges[vol_edges > 0]])
         if not np.isinf(vol_edges[-1]):
             vol_edges = np.append(vol_edges, np.inf)
+        vol_bin_curr = (np.digitize(volumes_array, vol_edges) - 1).astype(float)  # 0-based
+        vol_bin_curr[np.isnan(volumes_array)] = np.nan
     else:
         if not all(0 < p < 1 for p in bin_percentiles):
             raise ValueError("All bin_percentiles must be in (0, 1).")
-        edge_vals = [np.percentile(volumes, p * 100) for p in sorted(bin_percentiles)]
-        vol_edges = np.array([0.0] + edge_vals + [np.inf])
-
-    # OPTIMIZED: Use vectorized np.digitize instead of .apply()
-    volumes_array = volumes.values
-    vol_bin_curr = np.digitize(volumes_array, vol_edges) - 1  # 0-based
-    vol_bin_curr = vol_bin_curr.astype(float)
-    vol_bin_curr[np.isnan(volumes_array)] = np.nan
+        vol_s = pd.Series(volumes_array.astype(float), index=volumes.index)
+        vol_edge_series = prior_rolling_edges(vol_s, list(bin_percentiles), lookback)
+        # np.digitize on [0, e1, …, ek, inf] - 1 == number of e_i <= v (volumes are non-negative)
+        vol_bin_curr = count_edges_at_or_below(vol_s, vol_edge_series).to_numpy()
+        vol_edges = np.array([0.0] + [float(e.iloc[-1]) for e in vol_edge_series] + [np.inf])
 
     # Shift for previous bins
     vol_bin_prev = np.roll(vol_bin_curr, 1)
@@ -137,23 +147,21 @@ def market_facilitation_index(high_prices: pd.Series, low_prices: pd.Series, vol
     # MFI calculation (vectorized)
     mfi = (high_prices.values - low_prices.values) / volumes.values
 
-    # Determine MFI bin edges
+    # MFI bins — same rule: fixed edges as given, otherwise prior-window quantiles of MFI.
     if fixed_mfi_bin_edges is not None:
         mfi_edges = np.array(fixed_mfi_bin_edges, dtype=float)
         if not np.isinf(mfi_edges[-1]):
             mfi_edges = np.append(mfi_edges, np.inf)
+        mfi_bin_curr = (np.digitize(mfi, mfi_edges) - 1).astype(float)
+        mfi_bin_curr[np.isnan(mfi)] = np.nan
     else:
         if not all(0 < p < 1 for p in mfi_bin_percentiles):
             raise ValueError("All mfi_bin_percentiles must be in (0, 1).")
-        mfi_edge_vals = [
-            np.percentile(mfi, p * 100) for p in sorted(mfi_bin_percentiles)
-        ]
-        mfi_edges = np.array(mfi_edge_vals + [np.inf])
-
-    # OPTIMIZED: Use vectorized np.digitize instead of .apply()
-    mfi_bin_curr = np.digitize(mfi, mfi_edges) - 1
-    mfi_bin_curr = mfi_bin_curr.astype(float)
-    mfi_bin_curr[np.isnan(mfi)] = np.nan
+        mfi_s = pd.Series(np.where(np.isfinite(mfi), mfi, np.nan), index=volumes.index)
+        mfi_edge_series = prior_rolling_edges(mfi_s, list(mfi_bin_percentiles), lookback)
+        # np.digitize on [q1, …, qk, inf] - 1 == (number of q_i <= mfi) - 1, i.e. -1 below the first edge
+        mfi_bin_curr = (count_edges_at_or_below(mfi_s, mfi_edge_series) - 1.0).to_numpy()
+        mfi_edges = np.array([float(e.iloc[-1]) for e in mfi_edge_series] + [np.inf])
 
     # Shift for previous bins
     mfi_bin_prev = np.roll(mfi_bin_curr, 1)

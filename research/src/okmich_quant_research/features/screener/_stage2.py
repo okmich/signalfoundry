@@ -5,11 +5,16 @@ Filters out features that were historically predictive but are unstable over tim
 A feature with high mean IC but large variance of IC is unreliable in live trading.
 
 Two complementary checks:
-  1. Full-sample IC-IR >= min_icir        (average predictiveness)
-  2. IC hit rate    >= walk_forward_pct   (consistency across time)
+  1. Full-sample |IC-IR| >= min_icir        (average predictiveness, either sign)
+  2. IC hit rate    >= walk_forward_pct     (consistency across time)
 
 IC-IR = mean(IC) / std(IC) over the rolling IC series.
-IC hit rate = fraction of rolling windows where IC > 0 (pointed in the right direction).
+IC hit rate = fraction of rolling windows whose IC points the SAME way as the feature's mean IC.
+
+Sign-agnostic by default: a feature whose IC is reliably NEGATIVE (a reversal / contrarian feature) is exactly as
+informative as one whose IC is reliably positive — the model only has to flip it. Scoring the signed IC-IR and a
+hit rate of IC > 0, as this stage once did, removed every reliable reversal feature however stable it was. The
+signed IC-IR is still returned, so the direction is reported. ``sign_agnostic=False`` restores the old rule.
 
 A feature must pass BOTH checks to survive Stage 2.
 
@@ -175,19 +180,19 @@ def _icir(ic_series: pd.Series) -> float:
 def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return", window: int = 252,
                               min_icir: float | None = None, walk_forward_pct: float = 0.60,
                               icir_pct: float | None = None, wf_threshold: float | None = None,
-                              use_block_ic: bool = False,
+                              use_block_ic: bool = False, sign_agnostic: bool = True,
                               verbose: bool = True) -> tuple[pd.DataFrame, StageReport, dict[str, float]]:
     """
     Temporal stability filter via IC-IR and walk-forward IC hit rate.
 
     A feature must pass TWO checks to survive:
 
-    1. Full-sample IC-IR >= min_icir
-       Ensures the feature has a high enough signal-to-noise ratio on average.
+    1. Full-sample |IC-IR| >= min_icir
+       Ensures the feature has a high enough signal-to-noise ratio on average, in either direction.
 
     2. IC hit rate >= walk_forward_pct
-       Ensures the feature points in the right direction consistently across time.
-       IC hit rate = fraction of rolling windows where IC > 0.
+       Ensures the feature points the same way consistently across time.
+       IC hit rate = fraction of rolling windows where sign(mean IC) · IC > wf_threshold.
 
     Parameters
     ----------
@@ -214,6 +219,11 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
     use_block_ic : bool
         If True, use non-overlapping block IC (O(n), fast).
         If False, use bar-by-bar sliding-window IC (O(n × window), original). Default False.
+    sign_agnostic : bool
+        If True (default), both checks are applied to the feature's IC oriented by the sign of its mean IC, so a
+        stable negative-IC feature passes like a stable positive-IC one. The returned IC-IR keeps its sign.
+        If False, the original signed rule: IC-IR >= min_icir and IC > threshold. Irrelevant for ``task="regime"``,
+        whose IC (abs point-biserial) is never negative.
     walk_forward_pct : float
         Minimum fraction of rolling windows where IC must exceed the per-task threshold.
         For ``task="return"`` (signed Spearman): IC must be > 0 (pointing right direction).
@@ -247,14 +257,18 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
         icir_scores[col] = _icir(ic)
         ic_series_map[col] = ic
 
-    # Adaptive IC-IR threshold
+    # Orientation: +1 for every feature under the signed rule, else the sign of its IC-IR (0 IC-IR counts as +1).
+    orientation = {col: (1.0 if (not sign_agnostic or icir_scores[col] >= 0) else -1.0) for col in X.columns}
+    oriented_icir = {col: orientation[col] * icir_scores[col] for col in X.columns}
+
+    # Adaptive IC-IR threshold (on the oriented scores, so the percentile ranks strength, not sign)
     if icir_pct is not None:
-        min_icir = float(np.percentile(list(icir_scores.values()), icir_pct * 100))
+        min_icir = float(np.percentile(list(oriented_icir.values()), icir_pct * 100))
 
     kept, removed = [], []
     for col in X.columns:
-        score = icir_scores[col]
-        ic = ic_series_map[col]
+        score = oriented_icir[col]
+        ic = orientation[col] * ic_series_map[col]
 
         if score < min_icir:
             removed.append(col)
@@ -273,8 +287,10 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
               f"(window={window}, ic={ic_method}): "
               f"{n_before} -> {len(kept)} features ({len(removed)} removed)")
         if kept:
-            top = sorted(icir_scores.items(), key=lambda kv: kv[1], reverse=True)[:5]
-            print(f"    Top IC-IR: {[(k, round(v, 3)) for k, v in top]}")
+            top = sorted(icir_scores.items(), key=lambda kv: oriented_icir[kv[0]], reverse=True)[:5]
+            print(f"    Top IC-IR (signed): {[(k, round(v, 3)) for k, v in top]}")
 
-    report = StageReport(stage="Stage2_TemporalStability", n_before=n_before, n_after=len(kept), removed=removed)
+    report = StageReport(stage="Stage2_TemporalStability", n_before=n_before, n_after=len(kept), removed=removed,
+                         detail={"sign_agnostic": sign_agnostic,
+                                 "negative_ic_kept": [c for c in kept if orientation[c] < 0]})
     return X[kept], report, icir_scores

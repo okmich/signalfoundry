@@ -102,12 +102,13 @@ treating them as independent.
 
 See ``probe`` for the method's limits, and ``registry._axis`` for what the verdicts are used to decide.
 """
-from ._classify import (MIN_OBS, PARITY_BAND, SCALE_C, SCALE_CARRY, SCALE_FREE, VIF3_R, best_match,
-                        classify_cell, classify_parity, classify_scale, cross_correlations, iqr,
-                        scale_exponent)
+from ._classify import (LOG_SHIFT_MIN, LOG_SHIFT_PURITY_MAX, MIN_OBS, PARITY_BAND, SCALE_C, SCALE_CARRY, SCALE_FREE,
+                        VIF3_R, best_match, classify_cell, classify_parity, classify_scale, cross_correlations, iqr,
+                        location_shift, scale_exponent)
 from ._transforms import OHLC, reflect_ohlc, rescale_ohlc
 from .probe import (PROBE_COLUMNS, STAMP_COLUMNS, aggregate_stamps, nearest_neighbour_redundancy,
                     probe_invariance, stamp_summary, unscored, write_stamps_csv)
+from .causality import AuditStatus, check_function, compare_truncated, truncation_audit
 
 __all__ = [
     # transforms
@@ -119,6 +120,9 @@ __all__ = [
     "classify_scale",
     "classify_cell",
     "scale_exponent",
+    "location_shift",
+    "LOG_SHIFT_MIN",
+    "LOG_SHIFT_PURITY_MAX",
     "iqr",
     "cross_correlations",
     "best_match",
@@ -136,5 +140,10 @@ __all__ = [
     "nearest_neighbour_redundancy",
     "unscored",
     "PROBE_COLUMNS",
+    # causality
+    "AuditStatus",
+    "truncation_audit",
+    "check_function",
+    "compare_truncated",
     "STAMP_COLUMNS",
 ]

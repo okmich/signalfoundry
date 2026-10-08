@@ -5,12 +5,18 @@ import pandas as pd
 import talib
 from numba import njit, jit
 
+from ..utils.causal import DEFAULT_LOOKBACK, prior_rolling_bins, prior_rolling_group_mean
 
-def discretize_volume(volumes, bins=4):
+
+def discretize_volume(volumes, bins=4, lookback: int = DEFAULT_LOOKBACK):
     """
-    Discretize a volume series into specified quantile-based bins.
+    Discretize a volume series into equal-width bins of its recent range.
 
     CRITICAL FOR: Market Facilitation Index (MFI) analysis and volume-based regime classification.
+
+    Look-ahead-free: the bin edges at bar t span the min–max of the ``lookback`` volumes BEFORE t, so no bar is binned
+    with knowledge of later volumes (the old version took ``np.histogram_bin_edges`` of the whole series). Bars in
+    warm-up (fewer than ``lookback // 4`` prior volumes) get NaN; volumes outside the prior range clip to the end bins.
 
     Parameters:
     -----------
@@ -18,12 +24,15 @@ def discretize_volume(volumes, bins=4):
         List or array of volume data
     bins : int, default=4
         Number of bins to create (typically 4 for quartile analysis)
+    lookback : int, default=500
+        Prior window (bars) whose range defines the edges.
 
     Returns:
     --------
     tuple: (bin_assignments, bin_map)
-        - bin_assignments: List of bin IDs (0 to bins-1) for each volume value
-        - bin_map: Dictionary mapping bin ID to (lower_bound, upper_bound) ranges
+        - bin_assignments: List of bin IDs (0 to bins-1, NaN in warm-up) for each volume value
+        - bin_map: Dictionary mapping bin ID to (lower_bound, upper_bound) — the edges in force at the LAST bar, for
+          freezing the binning on later data
 
     Significance and Usage:
     ----------------------
@@ -51,21 +60,25 @@ def discretize_volume(volumes, bins=4):
     >>> bin_clazz, binMap = discretize_volume(volumes, bins=4)
     >>> # binMap: {0: (0, Q1), 1: (Q1, Q2), 2: (Q2, Q3), 3: (Q3, inf)}
     """
-    volume = np.array(volumes)
+    volume = pd.Series(np.asarray(volumes, dtype=float))
+    min_periods = max(2, lookback // 4)
+    prior = volume.shift(1).rolling(lookback, min_periods=min_periods)
+    lo, hi = prior.min().to_numpy(), prior.max().to_numpy()
+    width = (hi - lo) / bins
 
-    # Calculate bin edges using quartiles (or other method)
-    bin_edges = np.histogram_bin_edges(volume, bins=bins)
+    # Equal-width bins of the prior range: bin k covers (lo + k·w, lo + (k+1)·w], ends clipped (np.digitize, right)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        raw_bin = np.ceil((volume.to_numpy() - lo) / width) - 1.0
+    bin_assignments = np.clip(raw_bin, 0, bins - 1)
+    bin_assignments[width == 0] = 0.0                                   # a flat prior window has one bin
+    bin_assignments[~(np.isfinite(lo) & np.isfinite(hi)) | volume.isna().to_numpy()] = np.nan
 
-    # Assign volumes to bins (0 to bins-1)
-    bin_assignments = np.digitize(volume, bin_edges, right=True) - 1
-    bin_assignments = np.clip(bin_assignments, 0, bins - 1)  # Ensure valid bin IDs
-
-    # Create bin map: {bin_id: (lower_bound, upper_bound)}
+    # Bin map of the edges in force at the last bar: {bin_id: (lower_bound, upper_bound)}
     bin_map = {}
-    for i in range(bins):
-        lower_bound = bin_edges[i]
-        upper_bound = bin_edges[i + 1] if i < len(bin_edges) - 1 else np.inf
-        bin_map[i] = (lower_bound, upper_bound)
+    if np.isfinite(lo[-1]) and np.isfinite(hi[-1]):
+        edges = np.linspace(lo[-1], hi[-1], bins + 1)
+        for i in range(bins):
+            bin_map[i] = (edges[i], edges[i + 1] if i < bins - 1 else np.inf)
 
     return bin_assignments.tolist(), bin_map
 
@@ -721,10 +734,21 @@ def mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, pe
     return pd.Series(mfi_values, index=close.index)
 
 
-def binned_mfi_delta(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
-                     bins: int = 5, period: int = 14) -> pd.Series:
+def _volume_bins(volume: pd.Series, bins: int, lookback: int) -> pd.Series:
+    """Causal volume bin per bar: volume_t against the quantile edges of the ``lookback`` bars BEFORE t.
+
+    Replaces ``pd.qcut(volume.rank(), bins)``, whose edges came from the whole series — bar t was binned with
+    knowledge of every later bar's volume. NaN during warm-up (no edges yet).
     """
-    Compute ΔMFI within each volume bin.
+    return prior_rolling_bins(volume.astype(float), bins, lookback)
+
+
+def binned_mfi_delta(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
+                     bins: int = 5, period: int = 14, lookback: int = DEFAULT_LOOKBACK) -> pd.Series:
+    """
+    Compute ΔMFI within each volume bin: MFI(t) minus the MFI of the most recent earlier bar in the same volume bin.
+
+    Volume bins are equal-frequency bins of the prior ``lookback`` bars' volume (look-ahead-free; NaN in warm-up).
 
     High Impact Use:
         - Measures change in flow intensity conditioned on liquidity.
@@ -734,16 +758,17 @@ def binned_mfi_delta(high: pd.Series, low: pd.Series, close: pd.Series, volume: 
         - FX, Crypto.
     """
     mfi_vals = mfi(high, low, close, volume, period=period)
-    vol_bin = pd.qcut(
-        volume.rank(method="first"), bins, labels=False, duplicates="drop"
-    )
-    return mfi_vals.groupby(vol_bin).diff()
+    vol_bin = _volume_bins(volume, bins, lookback)
+    return mfi_vals.groupby(vol_bin).diff().reindex(mfi_vals.index)
 
 
 def mfi_volume_bin_ratio(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
-                         bins: int = 5, period: int = 14) -> pd.Series:
+                         bins: int = 5, period: int = 14, lookback: int = DEFAULT_LOOKBACK) -> pd.Series:
     """
-    Compute ratio of current MFI to average MFI in its volume bin.
+    Compute ratio of current MFI to the average MFI of its volume bin.
+
+    Both the bin and the bin average are look-ahead-free: the bin comes from the prior ``lookback`` bars' volume
+    quantiles, and the average is over the prior ``lookback`` bars that fell in the same bin (at least 5 of them).
 
     High Impact Use:
         - Detects abnormal flow strength relative to liquidity regime.
@@ -753,17 +778,17 @@ def mfi_volume_bin_ratio(high: pd.Series, low: pd.Series, close: pd.Series, volu
         - Equities, FX, and Futures.
     """
     mfi_vals = mfi(high, low, close, volume, period=period)
-    vol_bin = pd.qcut(
-        volume.rank(method="first"), bins, labels=False, duplicates="drop"
-    )
-    avg_bin_mfi = mfi_vals.groupby(vol_bin).transform("mean")
+    vol_bin = _volume_bins(volume, bins, lookback)
+    avg_bin_mfi = prior_rolling_group_mean(mfi_vals, vol_bin, bins, lookback)
     return mfi_vals / (avg_bin_mfi + 1e-8)
 
 
 def categorized_mfi_trend(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, bins: int = 5,
-                          period: int = 14) -> pd.Series:
+                          period: int = 14, lookback: int = DEFAULT_LOOKBACK) -> pd.Series:
     """
     Categorize directional MFI trends (+1 for uptrend, -1 for downtrend) within each volume bin.
+
+    Uses the look-ahead-free bins of ``binned_mfi_delta``; 0 where the direction is not yet defined.
 
     High Impact Use:
         - Encodes flow direction relative to liquidity condition.
@@ -772,18 +797,16 @@ def categorized_mfi_trend(high: pd.Series, low: pd.Series, close: pd.Series, vol
     Best for:
         - FX and Crypto intraday models.
     """
-    mfi_vals = mfi(high, low, close, volume, period=period)
-    vol_bin = pd.qcut(
-        volume.rank(method="first"), bins, labels=False, duplicates="drop"
-    )
-    grouped_delta = mfi_vals.groupby(vol_bin).diff()
+    grouped_delta = binned_mfi_delta(high, low, close, volume, bins=bins, period=period, lookback=lookback)
     return np.sign(grouped_delta).fillna(0)
 
 
 def volume_bin_mfi_persistence(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, bins: int = 5,
-                               period: int = 14, lag: int = 5) -> pd.Series:
+                               period: int = 14, lag: int = 5, lookback: int = DEFAULT_LOOKBACK) -> pd.Series:
     """
-    Compute autocorrelation (persistence) of MFI changes within each volume bin.
+    Compute autocorrelation (persistence) of MFI over the last ``lag`` bars of the same volume bin.
+
+    Uses look-ahead-free volume bins (prior ``lookback`` bars' quantiles). NaN where the bin is not yet known.
 
     High Impact Use:
         - Quantifies consistency of flow bias under similar liquidity.
@@ -793,12 +816,11 @@ def volume_bin_mfi_persistence(high: pd.Series, low: pd.Series, close: pd.Series
         - FX, Futures, and Commodities.
     """
     mfi_vals = mfi(high, low, close, volume, period=period)
-    vol_bin = pd.qcut(
-        volume.rank(method="first"), bins, labels=False, duplicates="drop"
-    )
+    vol_bin = _volume_bins(volume, bins, lookback)
 
     def rolling_autocorr(x):
         return x.rolling(lag).apply(lambda y: y.autocorr(), raw=False)
 
-    return mfi_vals.groupby(vol_bin, group_keys=False).apply(rolling_autocorr)
+    out = mfi_vals.groupby(vol_bin, group_keys=False).apply(rolling_autocorr)
+    return out.reindex(mfi_vals.index)
 

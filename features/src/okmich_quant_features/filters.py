@@ -194,15 +194,23 @@ def smooth_savitzky_golay(series: pd.Series, window=11, polyorder=2, causal=True
     return result
 
 
-def smooth_wavelet(series: pd.Series, wavelet="db4", level=2):
+def _wavelet_denoise(values: np.ndarray, wavelet: str, level: int) -> np.ndarray:
+    """Soft-threshold the detail coefficients (universal threshold) and reconstruct, same length as ``values``."""
+    coeffs = pywt.wavedec(values, wavelet=wavelet, level=level)
+    threshold = np.std(coeffs[-1]) * np.sqrt(2 * np.log(len(values)))
+    for i in range(1, len(coeffs)):
+        coeffs[i] = pywt.threshold(coeffs[i], threshold, mode="soft")
+    smoothed = pywt.waverec(coeffs, wavelet=wavelet)
+    if len(smoothed) > len(values):
+        smoothed = smoothed[: len(values)]
+    elif len(smoothed) < len(values):
+        smoothed = np.pad(smoothed, (0, len(values) - len(smoothed)), mode="edge")
+    return smoothed
+
+
+def smooth_wavelet(series: pd.Series, wavelet="db4", level=2, causal=True, window=64):
     """
     Wavelet smoothing filter.
-
-    WARNING: This filter is NON-CAUSAL and uses future data.
-    NOT suitable for real-time trading strategies.
-    Use for research, visualization, or offline analysis only.
-
-    For causal alternatives, use smooth_ema(), smooth_kalman(), or smooth_gaussian(causal=True).
 
     Parameters
     ----------
@@ -212,37 +220,38 @@ def smooth_wavelet(series: pd.Series, wavelet="db4", level=2):
         Wavelet type (default: "db4")
     level : int
         Decomposition level (default: 2)
+    causal : bool
+        If True (default), the value at t is the last point of the denoised ``window`` bars ending at t — it uses no
+        bar after t, so it is safe for backtests and live use. The first ``window - 1`` values (and any window that
+        contains a NaN) are NaN. Cost is O(n · window).
+        If False, the whole series is denoised in one pass: every value depends on future bars. Research/plotting
+        only — NOT suitable for live trading or as a model input.
+    window : int
+        Trailing window, in bars, for the causal mode (default 64).
 
     Returns
     -------
     pd.Series
         Smoothed series
     """
-    import warnings
-    warnings.warn(
-        "smooth_wavelet is NON-CAUSAL and uses future data. "
-        "Not suitable for live trading. Use smooth_ema or smooth_kalman instead.",
-        UserWarning
-    )
+    values = series.values.astype(np.float64)
+    if not causal:
+        import warnings
+        warnings.warn(
+            "smooth_wavelet with causal=False is NON-CAUSAL and uses future data. "
+            "Not suitable for live trading.",
+            UserWarning
+        )
+        return pd.Series(_wavelet_denoise(values, wavelet, level), index=series.index)
 
-    # Perform wavelet decomposition
-    coeffs = pywt.wavedec(series.values, wavelet=wavelet, level=level)
-
-    # Zero out high-frequency coefficients for denoising
-    threshold = np.std(coeffs[-1]) * np.sqrt(2 * np.log(len(series)))
-    for i in range(1, len(coeffs)):
-        coeffs[i] = pywt.threshold(coeffs[i], threshold, mode="soft")
-
-    # Reconstruct smoothed signal
-    smoothed = pywt.waverec(coeffs, wavelet=wavelet)
-
-    # Ensure output length matches input
-    if len(smoothed) > len(series):
-        smoothed = smoothed[: len(series)]
-    elif len(smoothed) < len(series):
-        smoothed = np.pad(smoothed, (0, len(series) - len(smoothed)), mode="edge")
-
-    return pd.Series(smoothed, index=series.index)
+    if window < 2 ** (level + 1):
+        raise ValueError(f"window={window} too short for a level-{level} decomposition")
+    out = np.full(len(values), np.nan)
+    for t in range(window - 1, len(values)):
+        segment = values[t - window + 1: t + 1]
+        if np.isfinite(segment).all():
+            out[t] = _wavelet_denoise(segment, wavelet, level)[-1]
+    return pd.Series(out, index=series.index)
 
 
 @njit
@@ -280,39 +289,83 @@ def smooth_kalman(series: pd.Series, process_noise=0.1, measurement_noise=1.0, i
     return pd.Series(smoothed, index=series.index)
 
 
-def smooth_loess(series: pd.Series, frac=0.1):
+@njit(cache=True)
+def _one_sided_loess_kernel(y: np.ndarray, window: int) -> np.ndarray:
+    """Tricube-weighted local-linear fit over the ``window`` bars ending at t, evaluated at t."""
+    n = len(y)
+    out = np.full(n, np.nan)
+    span = float(window)
+    for t in range(window - 1, n):
+        sw = 0.0
+        swx = 0.0
+        swy = 0.0
+        swxx = 0.0
+        swxy = 0.0
+        ok = True
+        for k in range(window):
+            v = y[t - k]
+            if np.isnan(v):
+                ok = False
+                break
+            d = k / span
+            w = (1.0 - d * d * d) ** 3
+            x = -float(k)
+            sw += w
+            swx += w * x
+            swy += w * v
+            swxx += w * x * x
+            swxy += w * x * v
+        if not ok:
+            continue
+        denom = sw * swxx - swx * swx
+        if denom == 0.0:
+            out[t] = swy / sw
+        else:
+            slope = (sw * swxy - swx * swy) / denom
+            intercept = (swy - slope * swx) / sw
+            out[t] = intercept  # the fit evaluated at x = 0, i.e. at bar t
+    return out
+
+
+def smooth_loess(series: pd.Series, frac=0.1, causal=True, window=50):
     """
     LOESS (locally weighted scatterplot smoothing) filter.
-
-    WARNING: This filter is NON-CAUSAL and uses future data.
-    NOT suitable for real-time trading strategies.
-    Use for research, visualization, or offline analysis only.
-
-    For causal alternatives, use smooth_ema(), smooth_kalman(), or smooth_gaussian(causal=True).
 
     Parameters
     ----------
     series : pd.Series
         Input time series
     frac : float
-        Fraction of data used for smoothing (default: 0.1)
+        Fraction of data used for smoothing in the non-causal mode (default: 0.1)
+    causal : bool
+        If True (default), one-sided LOESS: a tricube-weighted local-linear regression over the ``window`` bars ending
+        at t, evaluated at t (no robustness iterations). It uses no bar after t, so it is safe for backtests and live
+        use. The first ``window - 1`` values (and any window containing a NaN) are NaN.
+        If False, statsmodels ``lowess`` over the whole series with ``frac``: every value depends on future bars.
+        Research/plotting only — NOT suitable for live trading or as a model input.
+    window : int
+        Trailing window, in bars, for the causal mode (default 50).
 
     Returns
     -------
     pd.Series
         Smoothed series
     """
-    import warnings
-    warnings.warn(
-        "smooth_loess is NON-CAUSAL and uses future data. "
-        "Not suitable for live trading. Use smooth_ema or smooth_kalman instead.",
-        UserWarning
-    )
+    if not causal:
+        import warnings
+        warnings.warn(
+            "smooth_loess with causal=False is NON-CAUSAL and uses future data. "
+            "Not suitable for live trading.",
+            UserWarning
+        )
+        if not 0 < frac < 1:
+            raise ValueError("Frac must be between 0 and 1")
+        x = np.arange(len(series))
+        y = series.values
+        smoothed = lowess(y, x, frac=frac, return_sorted=False)
+        return pd.Series(smoothed, index=series.index)
 
-    if not 0 < frac < 1:
-        raise ValueError("Frac must be between 0 and 1")
-
-    x = np.arange(len(series))
-    y = series.values
-    smoothed = lowess(y, x, frac=frac, return_sorted=False)
+    if window < 3:
+        raise ValueError("window must be >= 3 for a local-linear fit")
+    smoothed = _one_sided_loess_kernel(series.values.astype(np.float64), int(window))
     return pd.Series(smoothed, index=series.index)

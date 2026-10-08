@@ -195,42 +195,47 @@ def dc_live_features(prices: pd.Series, theta: float, alpha: float = 1.0) -> pd.
     }, index=prices.index)
 
 
-def normalise_minmax(series: pd.Series, min_val: float = None, max_val: float = None) -> tuple[pd.Series, float, float]:
+def normalise_minmax(series: pd.Series, min_val: float = None, max_val: float = None,
+                     lookback: int = 250) -> tuple[pd.Series, float, float]:
     """
     Min-max normalise a DC indicator series to [0, 1].
 
-    Designed for use with TMV and T. Call with min_val=None on the training set to fit, then pass the returned
-    min_val/max_val when normalising live/test data to avoid look-ahead bias.
+    Designed for use with TMV and T. Two modes:
+
+    - **Default (look-ahead-free):** with ``min_val``/``max_val`` left as None, row ``t`` is scaled by the min and
+      max of the ``lookback`` rows ending at ``t`` (fewer during warm-up). No row ever uses a later row, so the value
+      at ``t`` does not change when more data arrives. The returned ``min_val``/``max_val`` are those of the window
+      ending at the last row — pass them back to freeze the scaling for later data.
+    - **Frozen:** pass ``min_val`` and/or ``max_val`` (e.g. fitted on a training set); they are used as given.
 
     Parameters
     ----------
     series : pd.Series
         TMV or T values to normalise.
     min_val : float, optional
-        Pre-computed minimum (from training set). If None, computed from series.
+        Fixed minimum. If None, the rolling minimum over ``lookback`` rows (causal).
     max_val : float, optional
-        Pre-computed maximum (from training set). If None, computed from series.
+        Fixed maximum. If None, the rolling maximum over ``lookback`` rows (causal).
+    lookback : int, default=250
+        Rolling window, in rows (one row per DC event when applied to event features).
 
     Returns
     -------
     tuple[pd.Series, float, float]
-        (normalised_series, min_val, max_val)
-        min_val and max_val should be stored and reused for test/live normalisation.
+        (normalised_series, min_val, max_val). Rows whose min and max coincide normalise to 0.
 
     Notes
     -----
-    Book reference: Eq 4.3; Section 4.2.3.
+    Book reference: Eq 4.3; Section 4.2.3. The book fits min/max on the training set; the old default here used the
+    whole input series, which leaked every later row into the scaling of earlier ones.
     """
     if series.isna().any() or not np.isfinite(series.values).all():
         raise ValueError("normalise_minmax: series contains NaN or infinite values. Clean the data before normalising.")
-    if min_val is None:
-        min_val = float(series.min())
-    if max_val is None:
-        max_val = float(series.max())
-
-    denom = max_val - min_val
-    if denom == 0.0:
-        return pd.Series(np.zeros(len(series)), index=series.index), min_val, max_val
-
-    normalised = (series - min_val) / denom
-    return normalised, min_val, max_val
+    if lookback < 1:
+        raise ValueError(f"normalise_minmax: lookback must be >= 1, got {lookback}")
+    window = series.rolling(lookback, min_periods=1)
+    lo = window.min() if min_val is None else pd.Series(float(min_val), index=series.index)
+    hi = window.max() if max_val is None else pd.Series(float(max_val), index=series.index)
+    denom = hi - lo
+    normalised = ((series - lo) / denom.where(denom != 0.0)).fillna(0.0)
+    return normalised, float(lo.iloc[-1]), float(hi.iloc[-1])

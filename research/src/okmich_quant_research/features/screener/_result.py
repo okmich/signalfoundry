@@ -184,8 +184,9 @@ class ScreenerResult:
         status_order = {"confirmed": 0, "tentative": 1, "rejected": 2}
         df["_status_rank"] = df["status"].map(status_order)
         df["_stage_rank"]  = df["eliminated_at"].map(lambda s: stage_order.get(s, 99))
-        df = (df.sort_values(["_status_rank", "_stage_rank", "icir"], ascending=[True, True, False])
-                .drop(columns=["_status_rank", "_stage_rank"])
+        df["_abs_icir"]    = df["icir"].abs()   # strength, either sign; the signed value stays in "icir"
+        df = (df.sort_values(["_status_rank", "_stage_rank", "_abs_icir"], ascending=[True, True, False])
+                .drop(columns=["_status_rank", "_stage_rank", "_abs_icir"])
                 .reset_index(drop=True))
 
         return df

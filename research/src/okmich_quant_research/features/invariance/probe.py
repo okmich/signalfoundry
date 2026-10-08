@@ -54,13 +54,13 @@ import pandas as pd
 
 from ..registry import FeatureInvariance, Parity, ScaleClass
 from ._classify import (MIN_OBS, SCALE_C, best_match, classify_cell, classify_parity, classify_scale,
-                        cross_correlations, scale_exponent)
+                        cross_correlations, location_shift, scale_exponent)
 from ._transforms import reflect_ohlc, rescale_ohlc
 
 FeatureEngineering = Callable[[pd.DataFrame], pd.DataFrame]
 
-PROBE_COLUMNS = ("symbol", "feature", "refl_corr", "parity", "scale_exp", "scale_class", "cell",
-                 "conjugate", "conjugate_corr", "n_valid")
+PROBE_COLUMNS = ("symbol", "feature", "refl_corr", "parity", "scale_exp", "log_shift", "log_shift_purity",
+                 "scale_class", "cell", "conjugate", "conjugate_corr", "n_valid")
 STAMP_COLUMNS = ("feature", "parity", "scale_class", "conjugate", "measured_on")
 
 
@@ -96,10 +96,11 @@ def probe_invariance(raw: pd.DataFrame, feature_engineering: FeatureEngineering,
         conj_name, conj_corr = best_match(cmat, col)
         conj_is_self = conj_name == col
         exponent = scale_exponent(orig[col], scal[col], scale_c)
+        shift, purity = location_shift(orig[col], scal[col], scale_c)
         parity = classify_parity(refl_corr, conj_corr, conj_is_self=conj_is_self)
-        scale = classify_scale(exponent)
+        scale = classify_scale(exponent, shift, purity)
         rows.append({"symbol": symbol, "feature": col, "refl_corr": refl_corr, "parity": parity.value,
-                     "scale_exp": exponent, "scale_class": scale.value,
+                     "scale_exp": exponent, "log_shift": shift, "log_shift_purity": purity, "scale_class": scale.value,
                      "cell": classify_cell(parity, scale),
                      "conjugate": "" if conj_is_self else conj_name,
                      "conjugate_corr": float("nan") if conj_is_self else conj_corr,
@@ -131,13 +132,15 @@ def aggregate_stamps(probe_df: pd.DataFrame, measured_on: str) -> dict[str, Feat
     for feature, group in probe_df.groupby("feature", sort=True):
         refl = _median(group["refl_corr"])
         exponent = _median(group["scale_exp"])
+        shift = _median(group["log_shift"]) if "log_shift" in group else float("nan")
+        purity = _median(group["log_shift_purity"]) if "log_shift_purity" in group else float("nan")
         conj_names = group["conjugate"].fillna("")
         conj_names = conj_names[conj_names != ""]
         conj = str(conj_names.value_counts().idxmax()) if len(conj_names) else ""
         conj_corr = _median(group["conjugate_corr"]) if len(conj_names) else float("nan")
 
         parity = classify_parity(refl, conj_corr, conj_is_self=(conj == ""))
-        scale = classify_scale(exponent)
+        scale = classify_scale(exponent, shift, purity)
         stamps[str(feature)] = FeatureInvariance(parity=parity, scale_class=scale,
                                                  conjugate=conj if parity is Parity.ONE_SIDED else "",
                                                  measured_on=measured_on)

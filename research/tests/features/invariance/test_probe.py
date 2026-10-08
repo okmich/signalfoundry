@@ -8,11 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_research.features.invariance import (PARITY_BAND, SCALE_CARRY, SCALE_FREE, VIF3_R,
-                                                       aggregate_stamps, classify_cell, classify_parity,
-                                                       classify_scale, cross_correlations, iqr,
-                                                       nearest_neighbour_redundancy, probe_invariance,
-                                                       stamp_summary, unscored, write_stamps_csv)
+from okmich_quant_research.features.invariance import (LOG_SHIFT_MIN, LOG_SHIFT_PURITY_MAX, PARITY_BAND, SCALE_CARRY,
+                                                       SCALE_FREE, VIF3_R, aggregate_stamps, classify_cell,
+                                                       classify_parity, classify_scale, cross_correlations, iqr,
+                                                       location_shift, nearest_neighbour_redundancy,
+                                                       probe_invariance, stamp_summary, unscored, write_stamps_csv)
 from okmich_quant_research.features.registry import Parity, ScaleClass, load_invariance_stamps
 
 # Medians measured over EURUSD.r / GBPUSD.r / USDCAD.r / US500.r, FXPIG-Server M5, 80k bars each.
@@ -71,6 +71,28 @@ def test_self_match_is_never_one_sided():
 ])
 def test_scale_classification_bands(exponent, expected):
     assert classify_scale(exponent) is expected
+
+
+@pytest.mark.parametrize("exponent,shift,purity,expected", [
+    (0.0, 2.0, 0.0, ScaleClass.CARRYING),                                   # log variance: a pure shift of 2·log c
+    (0.0, -1.0, 0.01, ScaleClass.CARRYING),                                 # sign of the shift does not matter
+    (0.0, 0.0, 0.0, ScaleClass.FREE),                                       # a ratio: no response at all
+    (0.0, LOG_SHIFT_MIN * 0.9, 0.0, ScaleClass.FREE),                       # too small a shift
+    (0.0, 2.0, LOG_SHIFT_PURITY_MAX * 2, ScaleClass.FREE),                  # not a pure shift
+    (0.4, 2.0, LOG_SHIFT_PURITY_MAX * 2, ScaleClass.PARTIAL),
+    (float("nan"), 2.0, 0.0, ScaleClass.UNSCORED),
+])
+def test_log_shift_is_a_second_route_to_carrying(exponent, shift, purity, expected):
+    assert classify_scale(exponent, shift, purity) is expected
+
+
+def test_location_shift_of_log_variance():
+    rng = np.random.default_rng(3)
+    log_var = pd.Series(rng.normal(0.0, 1.0, 1000))
+    shift, purity = location_shift(log_var, log_var + 2.0 * np.log(2.0), c=2.0)
+    assert shift == pytest.approx(2.0)
+    assert purity == pytest.approx(0.0, abs=1e-12)
+    assert np.isnan(location_shift(log_var.iloc[:50], log_var.iloc[:50])[0])     # too few observations
 
 
 def test_cells_cover_the_taxonomy():

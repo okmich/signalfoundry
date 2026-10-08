@@ -11,7 +11,7 @@ import pytest
 import okmich_quant_features.momentum as mom
 import okmich_quant_features.path_structure as ps
 from okmich_quant_features.timothymasters.single import trend as tm_trend
-from okmich_quant_research.features.invariance import (SCALE_C, probe_invariance, reflect_ohlc,
+from okmich_quant_research.features.invariance import (LOG_SHIFT_MIN, SCALE_C, probe_invariance, reflect_ohlc,
                                                        rescale_ohlc, scale_exponent)
 from okmich_quant_research.features.registry import Parity, ScaleClass
 
@@ -175,6 +175,25 @@ def test_scale_exponent_of_a_pure_return_series(raw):
     lr = np.log(raw["close"]).diff()
     rescaled_lr = np.log(rescale_ohlc(raw, SCALE_C)["close"]).diff()
     assert scale_exponent(lr, rescaled_lr, SCALE_C) == pytest.approx(1.0, abs=1e-6)
+
+
+def _log_scale_engineering(df: pd.DataFrame) -> pd.DataFrame:
+    rv = np.log(df["close"]).diff().pow(2).rolling(48).sum()
+    return pd.DataFrame({"rv": rv, "log_rv": np.log(rv), "log_vol": 0.5 * np.log(rv),
+                         "efficiency_ratio": ps.efficiency_ratio(df["close"], window=60)}, index=df.index)
+
+
+def test_log_of_a_size_measure_carries_scale(raw):
+    """Rescaling SHIFTS log RV by 2·log c instead of stretching it, so its IQR exponent is ~0. The log-scale test is
+    what keeps it out of the scale-free (path-shape) cell — measured: log RV once stamped even/scale-free."""
+    p = probe_invariance(raw, _log_scale_engineering, symbol="SYNTH").set_index("feature")
+    assert p.at["log_rv", "scale_exp"] == pytest.approx(0.0, abs=0.05)
+    assert p.at["log_rv", "log_shift"] == pytest.approx(2.0, abs=1e-6)
+    assert p.at["log_vol", "log_shift"] == pytest.approx(1.0, abs=1e-6)
+    for feature in ("rv", "log_rv", "log_vol"):
+        assert p.at[feature, "scale_class"] == ScaleClass.CARRYING.value, feature
+    assert p.at["efficiency_ratio", "scale_class"] == ScaleClass.FREE.value
+    assert abs(p.at["efficiency_ratio", "log_shift"]) < LOG_SHIFT_MIN
 
 
 # ── conjugate detection (the mechanism behind ONE_SIDED) ──────────────────────────────────────────

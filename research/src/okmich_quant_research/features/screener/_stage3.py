@@ -64,7 +64,8 @@ def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_thres
     Z = linkage(condensed, method="complete")
     labels = fcluster(Z, t=1.0 - corr_threshold, criterion="distance")
 
-    # From each cluster, select the feature with the highest IC-IR
+    # From each cluster, select the feature with the strongest IC-IR. Magnitude, not sign: a reliable negative-IC
+    # (reversal) feature is as informative as a positive one, and stage 2 keeps both.
     n_clusters = labels.max()
     kept, removed = [], []
 
@@ -73,7 +74,7 @@ def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_thres
         if len(cluster_cols) == 1:
             kept.append(cluster_cols[0])
         else:
-            best = max(cluster_cols, key=lambda c: icir_scores.get(c, 0.0))
+            best = max(cluster_cols, key=lambda c: abs(icir_scores.get(c, 0.0)))
             kept.append(best)
             removed.extend([c for c in cluster_cols if c != best])
 

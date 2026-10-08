@@ -90,6 +90,10 @@ class FeatureScreener:
     use_block_ic : bool
         Stage 2: if True, use non-overlapping block IC — O(n) and much faster than
         the default sliding-window O(n × window). Default False (original behaviour).
+    stage2_sign_agnostic : bool
+        Stage 2: judge |IC-IR| and a hit rate oriented by the sign of the mean IC, so a reliably negative-IC
+        (reversal) feature survives like a positive one. Default True. False restores the signed rule, which
+        removes every negative-IC feature on the return task.
     max_samples : int
         If > 0, subsample this many rows (time-stratified) before Stages 1, 4, and 5.
         Stage 2 always uses the full series for temporal coverage.
@@ -107,7 +111,8 @@ class FeatureScreener:
                  stage1_dcor_pct: float | None = None,
                  stage2_icir_pct: float | None = None, stage2_wf_threshold: float | None = None,
                  prefix_dedup: bool = True, prefix_priority: tuple = ("tm_", "feat_"),
-                 use_block_ic: bool = True, max_samples: int = 0, verbose: bool = True):
+                 use_block_ic: bool = True, max_samples: int = 0, stage2_sign_agnostic: bool = True,
+                 verbose: bool = True):
         self.cv_threshold = cv_threshold
         self.const_pct_threshold = const_pct_threshold
         self.mi_threshold = mi_threshold
@@ -131,6 +136,7 @@ class FeatureScreener:
         self.prefix_priority = prefix_priority
         self.use_block_ic = use_block_ic
         self.max_samples = max_samples
+        self.stage2_sign_agnostic = stage2_sign_agnostic
         self.verbose = verbose
 
     def _log(self, msg: str) -> None:
@@ -310,7 +316,8 @@ class FeatureScreener:
                                                        walk_forward_pct=self.walk_forward_pct,
                                                        icir_pct=self.stage2_icir_pct,
                                                        wf_threshold=self.stage2_wf_threshold,
-                                                       use_block_ic=self.use_block_ic, verbose=self.verbose)
+                                                       use_block_ic=self.use_block_ic,
+                                                       sign_agnostic=self.stage2_sign_agnostic, verbose=self.verbose)
         X_sub = X_sub[X_sub.columns.intersection(X.columns)]
         stage_reports.append(r2)
         if X.shape[1] == 0:

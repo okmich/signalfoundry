@@ -54,14 +54,24 @@ class TestBarAbsorptionRatio:
         assert isinstance(result, np.ndarray)
 
     def test_doji_bars_clipped_to_finite(self):
-        """When close == open, |C-O| = 0 → AR should be clipped to a finite value, not NaN."""
-        n = 10
+        """When close == open, |C-O| = 0 → AR is capped at the p99 of the PRIOR finite ARs: finite, not inf/NaN."""
+        n = 200
+        rng = np.random.default_rng(0)
         open_ = pd.Series(np.full(n, 100.0))
-        close = pd.Series(np.full(n, 100.0))  # doji
-        vol = pd.Series(np.full(n, 1000.0))
+        close = pd.Series(100.0 + rng.choice([-0.05, 0.05], n))
+        close.iloc[150] = 100.0  # doji
+        vol = pd.Series(rng.integers(500, 1500, n).astype(float))
         result = bar_absorption_ratio(open_, close, vol)
         assert np.all(np.isfinite(result.values))
-        assert np.all(~np.isnan(result.values))
+        assert result.iloc[150] == pytest.approx(np.percentile(result.iloc[:150], 99))
+
+    def test_doji_without_finite_history_is_nan(self):
+        """No prior finite AR → the cap is not yet known: NaN, never a value borrowed from later bars."""
+        n = 10
+        open_ = pd.Series(np.full(n, 100.0))
+        close = pd.Series(np.full(n, 100.0))  # all doji
+        vol = pd.Series(np.full(n, 1000.0))
+        assert bar_absorption_ratio(open_, close, vol).isna().all()
 
     def test_high_volume_small_body_gives_high_ar(self):
         """High volume with tiny body → very high AR."""

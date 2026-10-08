@@ -21,8 +21,28 @@ import pandas as pd
 from numba import njit
 from typing import Union
 from ._primitives import _check_index_aligned
+from ..utils.causal import DEFAULT_LOOKBACK, prior_rolling_quantile
 
 ArrayLike = Union[pd.Series, np.ndarray]
+
+#: Doji bars (|C-O| ≈ 0) have an infinite absorption ratio. They are capped at this quantile of the finite ratios seen
+#: in the PRIOR ``cap_lookback`` bars — never at a quantile of the whole series, which would let bar t see the future.
+DOJI_CAP_QUANTILE = 0.99
+
+
+def _cap_doji_causal(ar: np.ndarray, cap_lookback: int) -> np.ndarray:
+    """Replace infinite (doji) ratios with the prior-window 99th percentile of finite ratios. Look-ahead-free.
+
+    Warm-up doji bars (fewer than ``cap_lookback // 4`` prior finite ratios) stay NaN: their cap is not yet known.
+    """
+    inf_mask = ~np.isfinite(ar)
+    if not inf_mask.any():
+        return ar
+    finite = pd.Series(np.where(inf_mask, np.nan, ar))
+    cap = prior_rolling_quantile(finite, DOJI_CAP_QUANTILE, cap_lookback).to_numpy()
+    out = ar.copy()
+    out[inf_mask] = cap[inf_mask]
+    return out
 
 
 @njit(cache=True)
@@ -40,7 +60,8 @@ def _bar_absorption_ratio_kernel(volume: np.ndarray, open_: np.ndarray, close: n
     return ar
 
 
-def bar_absorption_ratio(open_: ArrayLike, close: ArrayLike, volume: ArrayLike) -> ArrayLike:
+def bar_absorption_ratio(open_: ArrayLike, close: ArrayLike, volume: ArrayLike,
+                         cap_lookback: int = DEFAULT_LOOKBACK) -> ArrayLike:
     """
     Bar Absorption Ratio (AR).
 
@@ -51,13 +72,17 @@ def bar_absorption_ratio(open_: ArrayLike, close: ArrayLike, volume: ArrayLike) 
     Formula:
         AR(t) = V(t) / |C(t) - O(t)|
 
-    For doji bars (|C-O| < ε), AR is clipped to the 99th percentile of finite values
-    (maximum absorption — all volume, zero price movement).
+    For doji bars (|C-O| < ε), AR is clipped to the 99th percentile of the finite AR values in the
+    ``cap_lookback`` bars BEFORE t (maximum absorption — all volume, zero price movement). The cap never uses
+    bars after t, so the value at t does not change when later data arrives.
 
     Parameters
     ----------
     open_, close, volume : ArrayLike
         OHLCV data (1-D float64 arrays or pd.Series, same length)
+    cap_lookback : int, default=500
+        Prior window (bars) for the doji cap. Doji bars before ``cap_lookback // 4`` prior finite values exist
+        are NaN (warm-up).
 
     Returns
     -------
@@ -65,7 +90,7 @@ def bar_absorption_ratio(open_: ArrayLike, close: ArrayLike, volume: ArrayLike) 
         Bar absorption ratio. Same type as `open_`.
         - High AR → large volume, small body (hidden depth / iceberg)
         - Low AR  → small volume, large body (thin order book)
-        - Capped  → doji bar (|C-O| ≈ 0), clipped to p99 of finite AR
+        - Capped  → doji bar (|C-O| ≈ 0), clipped to the prior-window p99 of finite AR
 
     Interpretation
     --------------
@@ -83,13 +108,8 @@ def bar_absorption_ratio(open_: ArrayLike, close: ArrayLike, volume: ArrayLike) 
     v = np.asarray(volume.values if isinstance(volume, pd.Series) else volume, dtype=np.float64)
 
     ar = _bar_absorption_ratio_kernel(v, o, c)
-    # Clip doji bars (Inf) to 99th percentile of finite values.
-    # Doji = maximum absorption (all volume, zero price movement) — not missing data.
-    inf_mask = ~np.isfinite(ar)
-    if inf_mask.any():
-        finite_vals = ar[~inf_mask]
-        cap = np.percentile(finite_vals, 99) if len(finite_vals) > 0 else v.max()
-        ar[inf_mask] = cap
+    # Doji = maximum absorption (all volume, zero price movement) — not missing data. Capped causally.
+    ar = _cap_doji_causal(ar, cap_lookback)
 
     if is_series:
         return pd.Series(ar, index=index, name='bar_absorption_ratio')
@@ -226,14 +246,15 @@ def range_volume_depth(high: ArrayLike, low: ArrayLike, volume: ArrayLike, windo
     return pd.DataFrame({'rvd': rvd_s, 'rvd_z': rvd_z}, index=index)
 
 
-def absorption_weighted_depth_score(open_: ArrayLike, close: ArrayLike, volume: ArrayLike, window: int = 20) -> ArrayLike:
+def absorption_weighted_depth_score(open_: ArrayLike, close: ArrayLike, volume: ArrayLike, window: int = 20,
+                                    cap_lookback: int = DEFAULT_LOOKBACK) -> ArrayLike:
     """
     Absorption-Weighted Depth Score (DS). It combines bar direction with absorption ratio to produce a signed depth score.
     Positive = above-average absorption on the buy side.
     Negative = above-average absorption on the sell side.
 
     Formula:
-        AR(t) = V(t) / |C(t) - O(t)|
+        AR(t) = V(t) / |C(t) - O(t)|   (doji bars capped at the prior-window p99, see ``bar_absorption_ratio``)
         EMA_AR(t) = EMA(AR, span=window)
         DS(t) = sign(C(t) - O(t)) × (AR(t) / EMA_AR(t))
 
@@ -243,6 +264,8 @@ def absorption_weighted_depth_score(open_: ArrayLike, close: ArrayLike, volume: 
         OHLCV data (1-D float64 arrays or pd.Series, same length)
     window : int, default=20
         EMA span for baseline absorption normalization.
+    cap_lookback : int, default=500
+        Prior window (bars) for the causal doji cap.
 
     Returns
     -------
@@ -266,21 +289,18 @@ def absorption_weighted_depth_score(open_: ArrayLike, close: ArrayLike, volume: 
     c = np.asarray(close.values if isinstance(close, pd.Series) else close, dtype=np.float64)
     v = np.asarray(volume.values if isinstance(volume, pd.Series) else volume, dtype=np.float64)
 
-    ar_raw = _bar_absorption_ratio_kernel(v, o, c)
-    inf_mask = ~np.isfinite(ar_raw)
-    if inf_mask.any():
-        finite_vals = ar_raw[~inf_mask]
-        cap = np.percentile(finite_vals, 99) if len(finite_vals) > 0 else v.max()
-        ar_raw[inf_mask] = cap
+    ar_raw = _cap_doji_causal(_bar_absorption_ratio_kernel(v, o, c), cap_lookback)
 
     if index is None:
         index = pd.RangeIndex(len(ar_raw))
 
     ar_s = pd.Series(ar_raw, index=index)
-    ar_ema = ar_s.ewm(span=window, adjust=False).mean()
+    # ignore_na: a warm-up doji (NaN cap) must not reset or poison the EMA baseline
+    ar_ema = ar_s.ewm(span=window, adjust=False, ignore_na=True).mean()
 
     sign = np.sign(c - o)  # +1 bullish bar, -1 bearish bar, 0 doji
-    ds = sign * (ar_raw / (ar_ema.values + 1e-10))
+    # A doji has no direction, so its score is 0 whatever its (possibly not-yet-known) capped AR
+    ds = np.where(sign == 0.0, 0.0, sign * (ar_raw / (ar_ema.values + 1e-10)))
     if is_series:
         return pd.Series(ds, index=index, name='absorption_depth_score')
     return ds
@@ -302,7 +322,7 @@ def _multi_bar_depth_pressure_kernel(depth_score: np.ndarray, ar: np.ndarray, ar
 
 
 def multi_bar_depth_pressure(open_: pd.Series, close: pd.Series, volume: pd.Series, window: int = 20,
-                             threshold: float = 1.5) -> pd.Series:
+                             threshold: float = 1.5, cap_lookback: int = DEFAULT_LOOKBACK) -> pd.Series:
     """
     Multi-Bar Depth Pressure (DP_N). It cumulative directional depth score over a rolling window, counting only bars where
     absorption ratio is abnormally high (AR/EMA > threshold). Reveals sustained iceberg order campaigns.
@@ -321,6 +341,8 @@ def multi_bar_depth_pressure(open_: pd.Series, close: pd.Series, volume: pd.Seri
         Accumulation window.
     threshold : float, default=1.5
         AR / EMA(AR) threshold for "abnormal absorption".
+    cap_lookback : int, default=500
+        Prior window (bars) for the causal doji cap of AR.
 
     Returns
     -------
@@ -331,11 +353,11 @@ def multi_bar_depth_pressure(open_: pd.Series, close: pd.Series, volume: pd.Seri
         - DP < 0   : Sustained hidden selling
         - |DP| > 5 : Strong iceberg campaign over window
     """
-    ar = bar_absorption_ratio(open_, close, volume)
-    # Handle NaN AR for doji bars (leave as NaN in EMA; fill with 0 for kernel)
+    ar = bar_absorption_ratio(open_, close, volume, cap_lookback=cap_lookback)
+    # Warm-up doji bars have a NaN AR (cap not yet known): fill with 0 for the kernel, i.e. "not abnormal".
     ar_filled = ar.fillna(0.0)
     ar_ema = ar_filled.ewm(span=window, adjust=False).mean()
-    ds = absorption_weighted_depth_score(open_, close, volume, window)
+    ds = absorption_weighted_depth_score(open_, close, volume, window, cap_lookback=cap_lookback)
     dp = _multi_bar_depth_pressure_kernel(ds.values, ar_filled.values, ar_ema.values, threshold, window)
     return pd.Series(dp, index=open_.index, name=f'multi_bar_depth_pressure_{window}')
 

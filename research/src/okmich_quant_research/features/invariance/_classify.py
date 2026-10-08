@@ -21,6 +21,14 @@ PARITY_BAND = 0.90
 #: two is PARTIAL — reported honestly rather than forced into a cell.
 SCALE_CARRY = 0.60
 SCALE_FREE = 0.20
+#: Log-scale test. A LOG of a size measure (log RV, log ATR) answers rescaling with a constant SHIFT of
+#: ``k · log c`` rather than a change of spread, so its IQR exponent reads ~0 and it would be stamped scale-free —
+#: measured: ``log RV`` filed as even/scale-free, i.e. onto PATH_STRUCTURE instead of VOLATILITY. A feature is
+#: log-scale-carrying when the rescaled-minus-original difference is (a) a shift of at least LOG_SHIFT_MIN units of
+#: ``log c`` and (b) nearly constant: IQR(f' − f) at most LOG_SHIFT_PURITY_MAX of IQR(f). A scale-free ratio has
+#: f' − f ≈ 0 and fails (a); a price LEVEL moves non-uniformly and fails (b).
+LOG_SHIFT_MIN = 0.5
+LOG_SHIFT_PURITY_MAX = 0.05
 #: Minimum pairwise-complete observations before a correlation or an IQR is trusted.
 MIN_OBS = 200
 #: Correlation ceiling equivalent to MAX_VIF = 3.0, since VIF = 1/(1 - r**2) for a pair.
@@ -55,6 +63,21 @@ def scale_exponent(original: pd.Series, rescaled: pd.Series, c: float = SCALE_C)
     if not (np.isfinite(i0) and np.isfinite(i1) and i0 > 0.0 and i1 > 0.0):
         return float("nan")
     return float(np.log(i1 / i0) / np.log(c))
+
+
+def location_shift(original: pd.Series, rescaled: pd.Series, c: float = SCALE_C) -> tuple[float, float]:
+    """``(shift, purity)`` of ``f' − f`` under the ×``c`` rescaling — the log-scale test (see LOG_SHIFT_MIN).
+
+    ``shift = median(f' − f) / log c`` (≈ 2 for log-variance, ≈ 1 for log-volatility, 0 for a ratio);
+    ``purity = IQR(f' − f) / IQR(f)`` (≈ 0 when the response is a pure shift). NaN when unmeasurable.
+    """
+    i0 = iqr(original)
+    both = pd.concat([original, rescaled], axis=1, keys=["a", "b"]).dropna()
+    if not np.isfinite(i0) or len(both) < MIN_OBS:
+        return float("nan"), float("nan")
+    d = (both["b"] - both["a"]).to_numpy()
+    q1, q3 = np.percentile(d, [25.0, 75.0])
+    return float(np.median(d) / np.log(c)), float((q3 - q1) / i0)
 
 
 def cross_correlations(a: pd.DataFrame, b: pd.DataFrame, min_obs: int = MIN_OBS) -> pd.DataFrame:
@@ -123,11 +146,17 @@ def classify_parity(refl_corr: float, conj_corr: float = float("nan"), conj_is_s
     return Parity.MIXED
 
 
-def classify_scale(exponent: float) -> ScaleClass:
+def classify_scale(exponent: float, shift: float = float("nan"), purity: float = float("nan")) -> ScaleClass:
+    """Scale class from the IQR exponent, with the log-scale test (``location_shift``) as a second route to CARRYING.
+
+    ``shift``/``purity`` are optional so callers that never measured them keep the exponent-only verdict.
+    """
     if not np.isfinite(exponent):
         return ScaleClass.UNSCORED
     if exponent >= SCALE_CARRY:
         return ScaleClass.CARRYING
+    if np.isfinite(shift) and np.isfinite(purity) and abs(shift) >= LOG_SHIFT_MIN and purity <= LOG_SHIFT_PURITY_MAX:
+        return ScaleClass.CARRYING          # a log of a size measure: rescaling shifts it, it does not stretch it
     if exponent <= SCALE_FREE:
         return ScaleClass.FREE
     return ScaleClass.PARTIAL

@@ -329,7 +329,9 @@ class TestNormaliseMinmax:
         assert mn == mx
 
     def test_formula_correctness(self):
+        """Frozen bounds: (x - min) / (max - min). Default: row t scaled by the min/max of the rows up to t only."""
         s = pd.Series([2.0, 4.0, 6.0])
-        normed, mn, mx = normalise_minmax(s)
-        expected = (s - mn) / (mx - mn)
-        pd.testing.assert_series_equal(normed, expected)
+        normed, mn, mx = normalise_minmax(s, min_val=2.0, max_val=6.0)
+        pd.testing.assert_series_equal(normed, (s - mn) / (mx - mn))
+        causal, _, _ = normalise_minmax(s)
+        pd.testing.assert_series_equal(causal, pd.Series([0.0, 1.0, 1.0]))

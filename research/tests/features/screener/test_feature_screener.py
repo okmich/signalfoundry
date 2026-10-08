@@ -250,25 +250,45 @@ class TestStage2:
         )
         assert report.n_after == 2
 
+    @staticmethod
+    def _good_anti_flip(n: int = 600):
+        """'good' IC > 0 throughout, 'anti' IC < 0 throughout, 'flip' IC > 0 in the first half and < 0 in the second."""
+        rng = np.random.default_rng(42)
+        base = rng.standard_normal(n)
+        y = pd.Series(0.6 * base + rng.standard_normal(n) * 0.1)
+        flip = np.where(np.arange(n) < n // 2, base, -base)
+        return pd.DataFrame({"good": base, "anti": -base, "flip": flip}), y
+
     def test_walk_forward_pct_removes_inconsistent(self):
-        """Strict hit-rate threshold removes an anti-predictive feature (return task)."""
-        np.random.seed(42)
-        n = 500
-        # 'good': consistently positively correlated with forward returns
-        # 'anti': consistently negatively correlated with forward returns
-        base = np.random.randn(n)
-        y = pd.Series(0.6 * base + np.random.randn(n) * 0.1)
-        X = pd.DataFrame({
-            "good": base,               # IC > 0 in most windows
-            "anti": -base,              # IC < 0 in most windows (anti-predictive)
-        })
-        # With walk_forward_pct=0.70: 'anti' fails because <70% of IC windows > 0
-        X_strict, report, _ = stage2_temporal_stability(
-            X, y, task="return", window=60, min_icir=0.0,
-            walk_forward_pct=0.70, verbose=False,
-        )
-        assert "good" in X_strict.columns
-        assert "anti" not in X_strict.columns
+        """A feature whose IC changes sign half-way fails the hit rate whichever way it is oriented."""
+        X, y = self._good_anti_flip()
+        X_out, _, _ = stage2_temporal_stability(X, y, task="return", window=60, min_icir=0.0, walk_forward_pct=0.70,
+                                                verbose=False)
+        assert "good" in X_out.columns
+        assert "flip" not in X_out.columns
+
+    def test_reliable_negative_ic_feature_survives(self):
+        """A reliably anti-predictive feature is as informative as a predictive one; the default keeps it."""
+        X, y = self._good_anti_flip()
+        X_out, report, icir = stage2_temporal_stability(X, y, task="return", window=60, min_icir=0.30,
+                                                        walk_forward_pct=0.70, verbose=False)
+        assert {"good", "anti"} <= set(X_out.columns)
+        assert icir["anti"] < 0 < icir["good"]                      # the returned IC-IR keeps its sign
+        assert report.detail["negative_ic_kept"] == ["anti"]
+
+    def test_signed_rule_reproduces_the_old_behaviour(self):
+        X, y = self._good_anti_flip()
+        X_out, report, _ = stage2_temporal_stability(X, y, task="return", window=60, min_icir=0.0,
+                                                     walk_forward_pct=0.70, sign_agnostic=False, verbose=False)
+        assert list(X_out.columns) == ["good"]
+        assert report.detail["sign_agnostic"] is False
+
+    def test_block_ic_is_sign_agnostic_too(self):
+        X, y = self._good_anti_flip(n=3000)
+        X_out, _, _ = stage2_temporal_stability(X, y, task="return", window=100, min_icir=0.30, walk_forward_pct=0.70,
+                                                use_block_ic=True, verbose=False)
+        assert {"good", "anti"} <= set(X_out.columns)
+        assert "flip" not in X_out.columns
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,6 +313,12 @@ class TestStage3:
         X_out, report = stage3_redundancy(X_in, icir, corr_threshold=0.80, verbose=False)
         assert "feat_5" in X_out.columns
         assert "feat_0" not in X_out.columns
+
+    def test_keeps_strongest_icir_of_either_sign(self, synthetic_regime_data):
+        X, _ = synthetic_regime_data
+        X_in = X[["feat_0", "feat_5"]]  # near-identical
+        X_out, _ = stage3_redundancy(X_in, {"feat_0": 1.0, "feat_5": -3.0}, corr_threshold=0.80, verbose=False)
+        assert list(X_out.columns) == ["feat_5"]
 
     def test_single_feature_passthrough(self):
         X = pd.DataFrame({"a": np.random.randn(100)})

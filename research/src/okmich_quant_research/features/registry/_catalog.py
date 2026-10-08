@@ -942,12 +942,14 @@ _FILTERS = [
         notes="causal=True (default) uses backward-looking window. Robust alternative to EMA."),
     _fe("smooth_wavelet", "filters", "price_structure",
         "Wavelet denoising smoother — soft-threshold multi-resolution decomposition",
-        rr=L, ret=M, dr=N, hor=A, causal=False,
-        notes="NON-CAUSAL: uses future data. Research / offline analysis only. Not suitable for live trading."),
+        rr=L, ret=M, dr=N, hor=A,
+        notes="Causal by default (trailing-window denoise, value at t from the window ending at t). "
+              "causal=False denoises the whole series and uses future data — research/plotting only."),
     _fe("smooth_loess", "filters", "price_structure",
         "LOESS locally-weighted scatterplot smoother",
-        rr=L, ret=M, dr=N, hor=A, causal=False,
-        notes="NON-CAUSAL: uses future data. Research / offline analysis only. Not suitable for live trading."),
+        rr=L, ret=M, dr=N, hor=A,
+        notes="Causal by default (one-sided tricube local-linear fit over the trailing window). "
+              "causal=False is whole-series lowess and uses future data — research/plotting only."),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
