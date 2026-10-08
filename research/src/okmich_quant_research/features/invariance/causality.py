@@ -16,6 +16,15 @@ dataset builder carried three of them. ``test_catalogue_is_lookahead_free`` keep
 
     >>> report = truncation_audit(ohlcv, cut=len(ohlcv) * 2 // 3)
     >>> report[report.status == AuditStatus.LEAK]       # must be empty
+
+The end cut keeps the START fixed, so it cannot see the other way backtest and live disagree: a value that depends on
+where the history begins. A cumsum from the first bar is the case in point — causal, but an integrated level that a
+live process with a shorter history computes differently, and one that earns spurious-regression scores in a
+screen. ``start_cut_audit`` drops the first ``start`` bars instead and, after ``settle`` bars of history, requires
+the two runs to agree. It also names any output column that is an input column passed straight through.
+
+    >>> report = start_cut_audit(ohlcv, start=300, settle=1200)
+    >>> report[report.status == AuditStatus.ANCHORED]   # must be empty
 """
 from __future__ import annotations
 
@@ -35,6 +44,15 @@ RTOL = 1e-7
 ATOL = 1e-12
 #: Minimum shared finite rows before a column counts as checked.
 MIN_SHARED = 50
+#: Start-cut tolerance, relative to the column's standard deviation over the compared rows. Exact equality is the wrong
+#: test here: a new start legitimately perturbs a long-memory recursion (an EMA forgets its seed geometrically) and the
+#: running-sum rounding of a rolling window (measured: ~1e-8 of a std on Bollinger %B). A level that never forgets its
+#: start sits orders of magnitude above this.
+START_RTOL = 1e-6
+#: Share of compared rows that may still differ before a column counts as ANCHORED. A rank over a tie-rich series flips
+#: a few ties when the rounding changes (measured: 0.6% of rows for dv2's percent rank); an anchored level differs on
+#: every row.
+START_MAX_SHARE = 0.01
 
 
 class AuditStatus(enum.StrEnum):
@@ -42,6 +60,8 @@ class AuditStatus(enum.StrEnum):
     LEAK = "leak"                    # at least one shared row changed when later bars were appended
     UNCHECKABLE = "uncheckable"      # too few shared finite rows (warm-up longer than the cut)
     BLOCKED = "blocked"              # could not be bound or called (cross-market, event-indexed, error)
+    START_FREE = "start_free"        # after the settle period the value no longer depends on where the history starts
+    ANCHORED = "anchored"            # still depends on the first bar after the settle period (cumsum level, expanding)
 
 
 def compare_truncated(full: pd.Series, part: pd.Series, cut: int) -> tuple[int, int, float]:
@@ -124,3 +144,99 @@ def _blocked(entry: str, causal_flag: bool, reason: str) -> pd.DataFrame:
     return pd.DataFrame([{"entry": entry, "column": entry, "status": AuditStatus.BLOCKED.value, "shared_rows": 0,
                           "changed_rows": 0, "changed_share": float("nan"), "max_abs_diff": float("nan"),
                           "causal_flag": causal_flag, "reason": reason}])
+
+
+def compare_start_cut(full: pd.Series, part: pd.Series, start: int, settle: int) -> tuple[int, int, float]:
+    """``(shared_rows, changed_rows, max_rel_diff)`` on the rows ``part`` computed with ``settle``+ bars of history.
+
+    ``full`` covers the whole frame and ``part`` the frame from row ``start``; differences are scaled by the column's
+    standard deviation over the compared rows (absolute when that is zero).
+    """
+    a = np.asarray(full, dtype=float)[start + settle:]
+    b = np.asarray(part, dtype=float)[settle:]
+    both = np.isfinite(a) & np.isfinite(b)
+    one_sided = np.isfinite(a) ^ np.isfinite(b)
+    if not both.any():
+        return 0, int(one_sided.sum()), float("nan")
+    scale = float(np.std(a[both]))
+    rel = np.abs(a[both] - b[both]) / (scale if scale > 0 else 1.0)
+    return int(both.sum()), int((rel > START_RTOL).sum() + one_sided.sum()), float(rel.max())
+
+
+def passthrough_of(series: pd.Series, raw: pd.DataFrame) -> str:
+    """Name of the ``raw`` column that ``series`` reproduces exactly on its finite rows, or ``""``."""
+    a = np.asarray(series, dtype=float)
+    finite = np.isfinite(a)
+    if finite.sum() < MIN_SHARED:
+        return ""
+    for col in raw.columns:
+        if pd.api.types.is_numeric_dtype(raw[col]) and np.array_equal(a[finite], raw[col].to_numpy(float)[finite]):
+            return col
+    return ""
+
+
+def check_function_start(fn: Callable[[pd.DataFrame], object], raw: pd.DataFrame, start: int, settle: int,
+                         name: str = "feature") -> pd.DataFrame:
+    """Start-cut-check any ``fn(frame) -> Series | DataFrame | tuple``. One row per output column."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        full, _ = numeric_columns(fn(raw.copy()), name, len(raw))
+        part, _ = numeric_columns(fn(raw.iloc[start:].copy()), name, len(raw) - start)
+    return _start_rows(name, full, part, raw, start, settle, causal_flag=None)
+
+
+def _start_rows(entry: str, full: dict[str, pd.Series], part: dict[str, pd.Series], raw: pd.DataFrame, start: int,
+                settle: int, causal_flag: bool | None) -> pd.DataFrame:
+    rows = []
+    for col, series in full.items():
+        through = passthrough_of(series, raw)
+        if col not in part:
+            rows.append({"entry": entry, "column": col, "status": AuditStatus.BLOCKED.value, "shared_rows": 0,
+                         "changed_rows": 0, "changed_share": float("nan"), "max_rel_diff": float("nan"),
+                         "passthrough": through, "causal_flag": causal_flag, "reason": "column absent from the cut run"})
+            continue
+        shared, changed, max_rel = compare_start_cut(series, part[col], start, settle)
+        share = changed / max(1, shared)
+        if shared < MIN_SHARED:
+            status = AuditStatus.UNCHECKABLE
+        elif share > START_MAX_SHARE:
+            status = AuditStatus.ANCHORED
+        else:
+            status = AuditStatus.START_FREE
+        rows.append({"entry": entry, "column": col, "status": status.value, "shared_rows": shared,
+                     "changed_rows": changed, "changed_share": share, "max_rel_diff": max_rel, "passthrough": through,
+                     "causal_flag": causal_flag, "reason": ""})
+    return pd.DataFrame(rows)
+
+
+def start_cut_audit(raw: pd.DataFrame, start: int, settle: int, entries: Iterable[FeatureEntry] | None = None,
+                    overrides: dict[str, dict] | None = None) -> pd.DataFrame:
+    """Start-cut-check every bindable catalogue entry (or ``entries``) on ``raw``: computed on ``raw`` and on
+    ``raw[start:]``, the rows that have ``settle`` bars of history in the cut run must agree.
+
+    ``settle`` must outlast the longest legitimate warm-up and the forgetting time of the longest recursion in the
+    catalogue, or those show up as ANCHORED. Returns one row per output column (with ``passthrough`` naming an input
+    column reproduced exactly); entries that cannot be bound or called get one BLOCKED row with the reason.
+    """
+    if start <= 0 or start + settle + MIN_SHARED > len(raw):
+        raise ValueError(f"need 0 < start and start + settle + {MIN_SHARED} <= {len(raw)}, got start={start}, "
+                         f"settle={settle}")
+    fixed = {**derived_overrides(raw), **(overrides or {})}
+    frames = []
+    for e in (entries if entries is not None else FeatureRegistry()):
+        qn = e.qualified_name
+        b = build_binding(qn, e.module, e.name, raw, overrides=fixed.get(qn))
+        if b.fn is None:
+            frames.append(_blocked(qn, e.causal, f"{b.category}: {b.blocker}"))
+            continue
+        try:
+            full, why = call_feature(b, raw)
+            part, _ = call_feature(b, raw.iloc[start:])
+        except Exception as ex:
+            frames.append(_blocked(qn, e.causal, f"error: {type(ex).__name__}: {ex}"))
+            continue
+        if not full:
+            frames.append(_blocked(qn, e.causal, why or "no per-bar output"))
+            continue
+        frames.append(_start_rows(qn, full, part, raw, start, settle, causal_flag=e.causal))
+    return pd.concat(frames, ignore_index=True)

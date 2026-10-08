@@ -108,7 +108,8 @@ from ._classify import (LOG_SHIFT_MIN, LOG_SHIFT_PURITY_MAX, MIN_OBS, PARITY_BAN
 from ._transforms import OHLC, reflect_ohlc, rescale_ohlc
 from .probe import (PROBE_COLUMNS, STAMP_COLUMNS, aggregate_stamps, nearest_neighbour_redundancy,
                     probe_invariance, stamp_summary, unscored, write_stamps_csv)
-from .causality import AuditStatus, check_function, compare_truncated, truncation_audit
+from .causality import (AuditStatus, check_function, check_function_start, compare_start_cut, compare_truncated,
+                        passthrough_of, start_cut_audit, truncation_audit)
 
 __all__ = [
     # transforms
@@ -145,5 +146,9 @@ __all__ = [
     "truncation_audit",
     "check_function",
     "compare_truncated",
+    "start_cut_audit",
+    "check_function_start",
+    "compare_start_cut",
+    "passthrough_of",
     "STAMP_COLUMNS",
 ]

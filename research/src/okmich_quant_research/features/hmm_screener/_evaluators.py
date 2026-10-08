@@ -166,7 +166,11 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         return AxisEvaluation(0.0, 0.0, "n_significant_states",
                               raw_details={"error": "map_label_to_trend_direction returned no diagnostics",
                                            "horizon": primary_horizon})
-    n_significant = sum(1 for v in mapping.values() if v != 0)
+    # Count the states the conservative test itself signed. ``mapping`` is NOT the count: when the test signs fewer
+    # than min(n, 3) distinct directions the mapper ranks the states by mean and assigns -1/0/+1 anyway, so with three
+    # states it always holds two non-zero entries and the min_significant_states gate could never fire.
+    test_signed = diag.loc[~diag["insufficient_data"].astype(bool), "test_direction"]
+    n_significant = int((test_signed != 0).sum())
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median")
     return AxisEvaluation(
@@ -174,7 +178,9 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         secondary_robustness=float(n_significant),
         secondary_label="n_significant_states",
         axis_separation_range=raw_range,
-        raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()}},
+        raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()},
+                     "test_mapping": {int(s): int(d) for s, d in zip(diag["state"], diag["test_direction"])},
+                     "fallback_applied": bool(diag["fallback"].any())},
     )
 
 
