@@ -463,6 +463,29 @@ class TestMapLabelToTrendDirection:
         assert isinstance(mapping, dict)
         assert isinstance(diag, pd.DataFrame)
 
+    # ========== TEST THE PRE-FALLBACK VERDICT ==========
+
+    def test_driftless_states_are_ranked_but_not_tested_significant(self):
+        """Three states with no drift: the conservative test signs none, the fallback ranks them -1/0/+1 anyway.
+        ``direction`` carries the rank; ``test_direction`` keeps the test's own verdict (all 0)."""
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
+        with pytest.warns(UserWarning, match="ranking fallback"):
+            mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
+        assert sorted(mapping.values()) == [-1, 0, 1]
+        assert (diag["test_direction"] == 0).all()
+        assert diag["fallback"].all()
+
+    def test_significant_states_keep_their_test_direction(self):
+        """Drifts the test passes on its own: no fallback, and ``test_direction`` equals ``direction``."""
+        rng = np.random.default_rng(3)
+        returns = np.concatenate([rng.normal(0.002, 0.001, 400), rng.normal(0.0, 0.001, 400),
+                                  rng.normal(-0.002, 0.001, 400)])
+        df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": returns})
+        mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
+        assert not diag["fallback"].any()
+        assert diag["test_direction"].tolist() == diag["direction"].tolist() == [1, 0, -1]
+
 
 class TestMapLabelToMomentumScore:
     """Test suite for map_label_to_momentum_score"""

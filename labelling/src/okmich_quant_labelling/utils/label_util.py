@@ -310,6 +310,11 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
             f"Choose from: 'conservative', 'statistical', 'sharpe', 'simple'"
         )
 
+    # The method's own verdict, kept before the fallback below overwrites ``direction``: a fallback sign is a rank,
+    # not evidence, so a caller counting significant states must read ``test_direction``.
+    stats_df["test_direction"] = stats_df["direction"]
+    stats_df["fallback"] = False
+
     # ========== GUARANTEE: n states → min(n, 3) distinct signs ==========
     # If the statistical method didn't produce enough distinct signs, use ranking fallback
     valid_states = stats_df[~stats_df["insufficient_data"]]
@@ -367,6 +372,7 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
 
                 mapping[state] = new_direction
                 stats_df.at[idx, "direction"] = new_direction
+                stats_df.at[idx, "fallback"] = True
                 stats_df.at[idx, "reason"] = (
                     f"Fallback ranking: mean={row['mean']:.6e} {reason_suffix}"
                 )

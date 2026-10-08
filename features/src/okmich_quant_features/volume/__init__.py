@@ -379,7 +379,7 @@ def mfi_volume_features(df: pd.DataFrame, include_classic_mfi: bool = True, incl
 
     DIRECTIONAL FEATURES (if include_advanced_features=True and feature_type='directional' or 'both'):
     • Instantaneous: dmfi, dfp, bsdi, eom, dir_eff_ratio
-    • Cumulative: cum_dfp, cum_dmfi, cum_bsdi
+    • Accumulated over the trailing rolling_window bars: cum_dfp, cum_dmfi, cum_bsdi
     • Statistical: *_mean, *_z scores for regime detection
     • Normalized: norm_cum_bsdi, norm_cum_dfp, dominance_ratio
     • Momentum: flow_momentum_dfp, flow_momentum_bsdi
@@ -396,7 +396,7 @@ def mfi_volume_features(df: pd.DataFrame, include_classic_mfi: bool = True, incl
     - market_facilitation_index: Classic Bill Williams MFI implementation
     - mfi_features: Comprehensive MFI feature engineering
     """
-    result = df[["close"]]
+    result = pd.DataFrame(index=df.index)
 
     # Set default percentiles if not provided
     if bin_percentiles is None:

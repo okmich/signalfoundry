@@ -288,7 +288,7 @@ def mfi_features(df: pd.DataFrame, open_col: str = "open", high_col: str = "high
     • eom: Ease of Movement (Arms indicator)
     • dir_eff_ratio: abs(body) / range - body dominance
 
-    Cumulative (long-term flow):
+    Accumulated (trailing rolling_window bars, not a cumsum from the first bar):
     • cum_dfp, cum_dmfi, cum_bsdi: Accumulated flows
 
     Regime-level (statistical context):
@@ -296,10 +296,10 @@ def mfi_features(df: pd.DataFrame, open_col: str = "open", high_col: str = "high
     • dmfi_z, dfp_z, bsdi_z: Z-scores (extremes)
 
     Momentum:
-    • flow_momentum_dfp, flow_momentum_bsdi: Flow acceleration
+    • flow_momentum_dfp, flow_momentum_bsdi: one-bar change in the accumulated flow
 
     Normalized (bounded):
-    • norm_cum_bsdi, norm_cum_dfp: tanh-normalized cumulative
+    • norm_cum_bsdi, norm_cum_dfp: tanh-normalized accumulated flow
     • dominance_ratio: Rolling buyer/seller control (-1 to +1)
 
     [If short_window or long_window provided]:
@@ -511,10 +511,13 @@ def mfi_features(df: pd.DataFrame, open_col: str = "open", high_col: str = "high
         data["eom"] = data["delta_mid"] / ((v / (range_hl + eps)) + eps)
         data["dir_eff_ratio"] = body.abs() / (range_hl + eps)
 
-        # Cumulative flow features
-        data["cum_dfp"] = data["dfp"].cumsum()
-        data["cum_dmfi"] = data["dmfi"].cumsum()
-        data["cum_bsdi"] = data["bsdi"].cumsum()
+        # Accumulated flow over the trailing rolling_window bars. A cumsum from the first bar is an integrated level
+        # whose value depends on where the history starts, so backtest and live disagree and the level earns
+        # spurious-regression scores; the trailing sum keeps the "accumulated flow" reading without the anchor.
+        # A NaN flow (a zero-range bar: dmfi and bsdi divide by the NaN-guarded range) contributes nothing, as it did
+        # to the cumsum; left NaN, one such bar would blank the next rolling_window sums.
+        for col in ["dfp", "dmfi", "bsdi"]:
+            data[f"cum_{col}"] = adaptive_rolling_sum(data[col].fillna(0.0), rolling_window)
 
         # Flow momentum
         data["flow_momentum_dfp"] = data["cum_dfp"].diff()
