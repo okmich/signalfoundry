@@ -240,6 +240,48 @@ def test_evaluator_falls_back_to_horizons_when_no_primary_given():
     assert out.raw_details["horizon"] == 9
 
 
+# ── the directional count is the test's verdict, not the fallback's ranking ───────────────────────
+
+def _drift_frame(drifts: tuple[float, ...], block: int = 300, seed: int = 9) -> tuple[pd.DataFrame, np.ndarray]:
+    """Close path whose per-bar log drift is set by the state; states run in contiguous blocks."""
+    rng = np.random.default_rng(seed)
+    labels = np.repeat(np.arange(len(drifts)), block)
+    log_rets = rng.normal(0.0, 0.001, len(labels)) + np.asarray(drifts)[labels]
+    return pd.DataFrame({"close": 100.0 * np.exp(np.cumsum(log_rets))}), labels
+
+
+def test_driftless_states_count_zero_significant_although_the_fallback_signs_two():
+    """Measured 2026-10-08 on four FXPIG symbols: no state passed the conservative test in 87-99% of directional
+    subsets, yet every one reported 2 — the mapper's ranking fallback always signs two of three states."""
+    raw, labels = _drift_frame((0.0, 0.0, 0.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = get_evaluator(Axis.DIRECTIONAL)(gamma=None, state_labels=labels, raw_data=raw, horizons=(12,))
+    assert out.secondary_robustness == 0.0
+    assert out.raw_details["fallback_applied"]
+    assert sum(v != 0 for v in out.raw_details["mapping"].values()) == 2
+    assert set(out.raw_details["test_mapping"].values()) == {0}
+
+
+def test_drifting_states_count_as_significant():
+    raw, labels = _drift_frame((0.0006, 0.0, -0.0006))
+    out = get_evaluator(Axis.DIRECTIONAL)(gamma=None, state_labels=labels, raw_data=raw, horizons=(12,))
+    assert out.secondary_robustness == 2.0
+    assert not out.raw_details["fallback_applied"]
+    assert out.raw_details["test_mapping"] == {0: 1, 1: 0, 2: -1}
+
+
+def test_driftless_subset_is_fragile_under_the_default_gate():
+    """With the honest count the min_significant_states gate can fire for the directional axis at all."""
+    from okmich_quant_research.features.hmm_screener._result import SubsetEvaluation
+
+    screener, _ = _screener([])
+    ev = SubsetEvaluation(features=("f",), n_features=1, axis_separation=0.001, secondary_robustness=0.0,
+                          secondary_label="n_significant_states", honesty=0.1, state_balance_ratio=1.5,
+                          pareto_status=ParetoStatus.DOMINATED)
+    assert screener._is_fragile(ev)
+
+
 # ── acceptance criterion 8: the momentum path is gone ─────────────────────────────────────────────
 
 def test_evaluate_momentum_is_not_importable():

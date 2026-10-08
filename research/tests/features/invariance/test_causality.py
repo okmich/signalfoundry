@@ -4,6 +4,10 @@ Every bindable catalogue entry is computed on the doji/tie-rich fixture and on i
 rows the two must be identical. This is the guard that would have caught the 2026-10-07 finding — 7 entries flagged
 ``causal=True`` that read whole-series doji caps and volume bins — and it keeps the next one out.
 
+The start cut is its mirror: the catalogue is also computed without its first ``START`` rows, and after ``SETTLE``
+bars of history the two must agree — the guard for the 2026-10-08 finding (the MFI close passthrough and cumsum
+flows, levels anchored at the frame's first bar). Anchored columns found then and left for the analyst are listed.
+
 The planted-leak controls prove the audit can see a leak at all: a guard that never fails is not a guard.
 """
 import numpy as np
@@ -12,7 +16,8 @@ import pytest
 
 from okmich_quant_features.volume import tick_volume_how_zscore
 from okmich_quant_features.volume._volume import VolumePhase
-from okmich_quant_research.features.invariance import AuditStatus, check_function, compare_truncated, truncation_audit
+from okmich_quant_research.features.invariance import (AuditStatus, check_function, check_function_start,
+                                                       compare_truncated, start_cut_audit, truncation_audit)
 
 from ._fixture import make_ohlcv
 
@@ -113,3 +118,82 @@ def test_nan_in_one_run_counts_as_a_change():
 def test_cut_outside_the_frame_is_rejected(raw):
     with pytest.raises(ValueError):
         truncation_audit(raw, cut=len(raw), entries=[])
+
+
+# ── start cut: the value must not depend on where the history begins ──────────────────────────────
+
+START, SETTLE = 300, 1200
+#: Measured 2026-10-08 after the MFI flows were fixed; each is a definition decision for the analyst, not a slip:
+KNOWN_ANCHORED = {
+    "microstructure.order_flow.vwap_anchored": "bound without an anchor, so a cumulative VWAP from the first bar",
+    "volume.vwap_adjusted_roc": "ROC of a cumulative VWAP from the first bar",
+    "volume.vwap_dev_momentum": "deviation from a cumulative VWAP from the first bar",
+    "volume.core_volume_features@vwap_adjusted_roc": "as volume.vwap_adjusted_roc",
+    "volume.core_volume_features@vwap_dev_momentum": "as volume.vwap_dev_momentum",
+    "volume.ad@0": "the accumulation/distribution line, a cumsum",
+    "volume.tick_volume_phase_zscore": "expanding per-phase baseline, by design",
+    "directional_change.idc_parse@t_dc0": "a bar position in the frame",
+    "momentum.dv2": "rolling(2).mean() rounding flips ties in its strict percent rank on ~1% of bars",
+}
+#: identity defaults (p1 = p2 = p3 = 1): as a catalogue entry it returns the close.
+KNOWN_PASSTHROUGH = {"momentum._williamblau.triple_ema"}
+#: event-sparse or long-warm-up columns with fewer than MIN_SHARED compared rows on the fixture.
+KNOWN_START_UNCHECKABLE = KNOWN_UNCHECKABLE | {"directional_change.idc_parse"}
+
+
+@pytest.fixture(scope="module")
+def start_audit(raw) -> pd.DataFrame:
+    return start_cut_audit(raw, start=START, settle=SETTLE, overrides=OVERRIDES)
+
+
+def test_catalogue_has_no_new_anchored_column(start_audit):
+    anchored = set(start_audit.loc[start_audit.status == AuditStatus.ANCHORED, "column"])
+    assert anchored <= set(KNOWN_ANCHORED), sorted(anchored - set(KNOWN_ANCHORED))
+
+
+def test_mfi_flows_are_no_longer_anchored(start_audit):
+    mfi = start_audit[start_audit.entry.isin(["volume.mfi_features", "volume.mfi_volume_features"])]
+    assert len(mfi) > 50 and (mfi.status == AuditStatus.START_FREE).all(), mfi[mfi.status != AuditStatus.START_FREE]
+
+
+def test_catalogue_has_no_new_passthrough(start_audit):
+    through = set(start_audit.loc[start_audit.passthrough.fillna("") != "", "entry"])
+    assert through <= KNOWN_PASSTHROUGH, sorted(through - KNOWN_PASSTHROUGH)
+
+
+def test_start_audit_actually_checks_the_catalogue(start_audit):
+    assert (start_audit.status == AuditStatus.START_FREE).sum() >= MIN_CAUSAL_COLUMNS
+    unchecked = set(start_audit.loc[start_audit.status == AuditStatus.UNCHECKABLE, "entry"])
+    assert unchecked <= KNOWN_START_UNCHECKABLE, sorted(unchecked - KNOWN_START_UNCHECKABLE)
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("cumsum level", lambda d: np.log(d["close"]).diff().cumsum()),
+    ("bar position", lambda d: pd.Series(np.arange(len(d), dtype=float), index=d.index)),
+    ("expanding mean", lambda d: d["tick_volume"].expanding().mean()),
+])
+def test_planted_anchor_is_caught(raw, name, fn):
+    report = check_function_start(fn, raw, start=START, settle=SETTLE, name=name)
+    assert (report.status == AuditStatus.ANCHORED).all(), report.to_string()
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("trailing window", lambda d: d["close"].rolling(21).mean()),
+    ("trailing sum", lambda d: d["tick_volume"].rolling(60).sum()),
+    ("EMA forgets its seed", lambda d: d["close"].ewm(span=50, adjust=False).mean()),
+])
+def test_start_free_control_passes(raw, name, fn):
+    report = check_function_start(fn, raw, start=START, settle=SETTLE, name=name)
+    assert (report.status == AuditStatus.START_FREE).all(), report.to_string()
+
+
+def test_passthrough_is_named(raw):
+    report = check_function_start(lambda d: d["close"] * 1.0, raw, start=START, settle=SETTLE, name="close")
+    assert report.passthrough.tolist() == ["close"]
+    report = check_function_start(lambda d: d["close"] * 2.0, raw, start=START, settle=SETTLE, name="scaled")
+    assert report.passthrough.tolist() == [""]          # (close.shift(1) would be: the fixture's open IS it)
+
+
+def test_start_cut_without_room_is_rejected(raw):
+    with pytest.raises(ValueError):
+        start_cut_audit(raw, start=START, settle=len(raw), entries=[])

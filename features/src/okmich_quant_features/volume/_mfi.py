@@ -514,9 +514,10 @@ def mfi_features(df: pd.DataFrame, open_col: str = "open", high_col: str = "high
         # Accumulated flow over the trailing rolling_window bars. A cumsum from the first bar is an integrated level
         # whose value depends on where the history starts, so backtest and live disagree and the level earns
         # spurious-regression scores; the trailing sum keeps the "accumulated flow" reading without the anchor.
-        data["cum_dfp"] = adaptive_rolling_sum(data["dfp"], rolling_window)
-        data["cum_dmfi"] = adaptive_rolling_sum(data["dmfi"], rolling_window)
-        data["cum_bsdi"] = adaptive_rolling_sum(data["bsdi"], rolling_window)
+        # A NaN flow (a zero-range bar: dmfi and bsdi divide by the NaN-guarded range) contributes nothing, as it did
+        # to the cumsum; left NaN, one such bar would blank the next rolling_window sums.
+        for col in ["dfp", "dmfi", "bsdi"]:
+            data[f"cum_{col}"] = adaptive_rolling_sum(data[col].fillna(0.0), rolling_window)
 
         # Flow momentum
         data["flow_momentum_dfp"] = data["cum_dfp"].diff()
