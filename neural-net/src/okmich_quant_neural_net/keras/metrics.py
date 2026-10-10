@@ -29,12 +29,14 @@ Usage:
 
 import tensorflow as tf
 from keras import metrics
+from keras.saving import register_keras_serializable
 
 
 # ============================================================================
 # CLASSIFICATION METRICS
 # ============================================================================
 
+@register_keras_serializable()
 class BalancedAccuracy(metrics.Metric):
     """
     Balanced accuracy metric - robust to class imbalance.
@@ -84,7 +86,13 @@ class BalancedAccuracy(metrics.Metric):
     def reset_state(self):
         self.confusion_matrix.assign(tf.zeros_like(self.confusion_matrix))
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({"num_classes": self.num_classes})
+        return config
 
+
+@register_keras_serializable()
 class MacroF1Score(metrics.Metric):
     """
     Macro F1-score - robust to class imbalance.
@@ -142,6 +150,11 @@ class MacroF1Score(metrics.Metric):
 
     def reset_state(self):
         self.confusion_matrix.assign(tf.zeros_like(self.confusion_matrix))
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"num_classes": self.num_classes})
+        return config
 
 
 # ============================================================================
