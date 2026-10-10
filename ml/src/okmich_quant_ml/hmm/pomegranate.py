@@ -16,7 +16,19 @@ class PomegranateHMM(BasePomegranateHMM):
     time **and** exposes a unified API:
         fit / train / predict / predict_prob / transition_prob
     plus distribution–specific properties such as means, covs, etc.
+
+    Bernoulli emissions start from an explicit interior point instead of pomegranate's k-means initialiser. On 0/1
+    data k-means can only split the bars into "all zeros" and "all ones", so every state started at p = 0 or p = 1,
+    a fixed point EM never leaves (the fit came back NaN), and with more states than distinct values a cluster was
+    empty and the fit crashed. Each state now starts at the data mean shifted in logit space (states spread over
+    +/- ``_BERNOULLI_INIT_SPREAD``, a small seeded jitter per restart) with a sticky transition matrix
+    (``_BERNOULLI_INIT_STAY`` on the diagonal), so EM begins in the persistent-regime basin.
     """
+
+    _BERNOULLI_INIT_SPREAD: float = 1.0  # logit units from the data mean to the outermost starting state
+    _BERNOULLI_INIT_JITTER: float = 0.1  # sd of the seeded per-restart jitter, in logit units
+    _BERNOULLI_INIT_STAY: float = 0.95  # starting self-transition probability
+    _BERNOULLI_INIT_CLIP: float = 0.01  # starting probabilities are kept inside [clip, 1 - clip]
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,12 +184,46 @@ class PomegranateHMM(BasePomegranateHMM):
             d = self._build_distribution(k)
             distributions.append(d)
 
+        edges = self._bernoulli_init_edges() if self._has_bernoulli_init() else None
         return DenseHMM(
             distributions=distributions,
+            edges=edges,
             max_iter=self.max_iter,
             random_state=self.random_state,
             dtype=torch.float64,
         )
+
+    def _compute_init_stats(self, X: np.ndarray) -> dict:
+        if self.distribution_type != DistType.BERNOULLI:
+            return super()._compute_init_stats(X)
+        values = np.asarray(X, dtype=np.float64)
+        if values.ndim == 1:
+            values = values.reshape(-1, 1)
+        if values.shape[0] == 0 or np.any((values < 0.0) | (values > 1.0)):
+            raise ValueError("Bernoulli emissions need every value of X in [0, 1]")
+
+        clip = self._BERNOULLI_INIT_CLIP
+        centre = np.clip(values.mean(axis=0), clip, 1.0 - clip)
+        logit_centre = np.log(centre / (1.0 - centre))
+        offsets = np.linspace(-1.0, 1.0, self.n_states) if self.n_states > 1 else np.zeros(1)
+        rng = np.random.default_rng(self.random_state)
+        jitter = rng.normal(0.0, self._BERNOULLI_INIT_JITTER, size=(self.n_states, values.shape[1]))
+        logits = logit_centre[None, :] + self._BERNOULLI_INIT_SPREAD * offsets[:, None] + jitter
+        probs = np.clip(1.0 / (1.0 + np.exp(-logits)), clip, 1.0 - clip)
+        return {"bernoulli_init_probs": probs}
+
+    def _has_bernoulli_init(self) -> bool:
+        stats = getattr(self, "_kmeans_stats", None)
+        return (self.distribution_type == DistType.BERNOULLI and isinstance(stats, dict)
+                and "bernoulli_init_probs" in stats)
+
+    def _bernoulli_init_edges(self) -> np.ndarray:
+        if self.n_states == 1:
+            return np.ones((1, 1), dtype=np.float64)
+        stay = self._BERNOULLI_INIT_STAY
+        edges = np.full((self.n_states, self.n_states), (1.0 - stay) / (self.n_states - 1), dtype=np.float64)
+        np.fill_diagonal(edges, stay)
+        return edges
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -187,6 +233,8 @@ class PomegranateHMM(BasePomegranateHMM):
 
         match self.distribution_type:
             case DistType.BERNOULLI:
+                if self._has_bernoulli_init():
+                    return Bernoulli(probs=self._kmeans_stats["bernoulli_init_probs"][k], dtype=torch.float64)
                 return Bernoulli(dtype=torch.float64)
             case DistType.CATEGORICAL:
                 n_cats = self.dist_kwargs.get("n_categories", 3)

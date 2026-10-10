@@ -394,6 +394,72 @@ class TestDistributionTypes:
         assert predictions.shape == (len(positive_data),)
 
 
+def _planted_bernoulli(n: int, p0: float, p1: float, dwell: int, seed: int, n_features: int = 1):
+    rng = np.random.default_rng(seed)
+    z = np.cumsum(rng.random(n) < 1 / dwell) % 2
+    p = np.where(z == 0, p0, p1)[:, None]
+    return (rng.random((n, n_features)) < p).astype(float), z
+
+
+class TestBernoulliEmissions:
+    """0/1 data used to break the default fit: k-means started every state at p = 0 or 1 (NaN fit), or crashed."""
+
+    @pytest.mark.parametrize("n_states", [2, 3])
+    def test_default_fit_on_binary_data_is_finite_and_interior(self, n_states):
+        x, _ = _planted_bernoulli(1_500, 0.4, 0.6, 100, seed=0)
+        model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=n_states, random_state=7, max_iter=30)
+        model.fit(x)
+        probs = np.array([p["probs"] for p in model.parameters]).ravel()
+        assert np.all(np.isfinite(probs))
+        assert np.all((probs > 0.01) & (probs < 0.99)), probs
+        assert np.isfinite(model.log_likelihood(x))
+
+    def test_recovers_a_planted_two_regime_sequence(self):
+        x, z = _planted_bernoulli(2_000, 0.25, 0.75, 100, seed=3)
+        model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=2, random_state=7, max_iter=50)
+        model.fit(x)
+        probs = np.sort(np.array([p["probs"] for p in model.parameters]).ravel())
+        np.testing.assert_allclose(probs, [0.25, 0.75], atol=0.08)
+        labels = model.predict(x)
+        agreement = max(np.mean(labels == z), np.mean(labels != z))
+        assert agreement > 0.85, agreement
+        assert np.all(np.diag(model.transition_prob()) > 0.9)
+
+    def test_multi_feature_binary_data(self):
+        x, _ = _planted_bernoulli(1_200, 0.3, 0.7, 80, seed=5, n_features=3)
+        model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=2, random_state=7, max_iter=30)
+        model.fit(x)
+        probs = np.array([p["probs"] for p in model.parameters])
+        assert probs.shape == (2, 3)
+        assert np.all((probs > 0.01) & (probs < 0.99))
+
+    def test_same_seed_same_fit(self):
+        x, _ = _planted_bernoulli(1_000, 0.4, 0.6, 100, seed=1)
+        fits = []
+        for _ in range(2):
+            model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=2, random_state=11, max_iter=20)
+            fits.append(np.array([p["probs"] for p in model.fit(x).parameters]).ravel())
+        np.testing.assert_array_equal(fits[0], fits[1])
+
+    def test_rejects_values_outside_unit_interval(self):
+        model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=2, random_state=7, max_iter=5)
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            model.fit(np.array([[0.0], [1.0], [2.0]] * 50))
+
+    def test_starting_point_is_interior_and_sticky(self):
+        model = PomegranateHMM(distribution_type=DistType.BERNOULLI, n_states=3, random_state=7)
+        stats = model._compute_init_stats(np.array([[0.0], [1.0]] * 100))
+        init = stats["bernoulli_init_probs"].ravel()
+        assert np.all((init >= 0.01) & (init <= 0.99)) and len(np.unique(init)) == 3
+        edges = model._bernoulli_init_edges()
+        np.testing.assert_allclose(edges.sum(axis=1), 1.0)
+        assert np.all(np.diag(edges) == model._BERNOULLI_INIT_STAY)
+
+    def test_other_distributions_keep_the_kmeans_start(self, sample_sequence_data):
+        model = PomegranateHMM(distribution_type=DistType.NORMAL, n_states=2, random_state=7)
+        assert "centroids" in model._compute_init_stats(sample_sequence_data)
+
+
 # ============================================================================
 # Error Handling Tests
 # ============================================================================

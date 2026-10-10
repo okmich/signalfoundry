@@ -120,7 +120,7 @@ class BasePomegranateHMM(ABC):
         self._model = None
 
         original_seed = self.random_state
-        best_ll, best_model, last_error = -np.inf, None, None
+        best_ll, best_model, last_error, n_nonfinite = -np.inf, None, None, 0
         try:
             # Each restart is a distinct initialisation; +1000 spacing keeps a restart's seed clear of
             # the +attempt covariance-retry seeds used inside a single start. n_restarts=1 reproduces the
@@ -131,11 +131,19 @@ class BasePomegranateHMM(ABC):
                     last_error = err
                     continue
                 ll = self._fitted_log_prob(model, X_list)
-                if np.isfinite(ll) and ll > best_ll:
+                if not np.isfinite(ll):
+                    n_nonfinite += 1
+                elif ll > best_ll:
                     best_ll, best_model = ll, model
         finally:
             self.random_state = original_seed  # never leak a perturbed seed to the caller
 
+        if best_model is None and n_nonfinite:
+            raise RuntimeError(
+                f"EM fitting produced a non-finite log-likelihood in {n_nonfinite} of {self.n_restarts} restart(s): "
+                f"the emission parameters degenerated (NaN or boundary values). "
+                f"Last covariance error, if any: {type(last_error).__name__}: {last_error}"
+            ) from last_error
         if best_model is None:
             raise RuntimeError(
                 f"EM fitting failed across {self.n_restarts} restart(s), each retried "
@@ -155,7 +163,7 @@ class BasePomegranateHMM(ABC):
         last_error = None
         for attempt in range(self._FIT_MAX_RETRIES):
             self.random_state = start_seed + attempt
-            self._kmeans_stats = self._compute_kmeans_init(X_all)
+            self._kmeans_stats = self._compute_init_stats(X_all)
             model = self._build_model()
             try:
                 model.fit(X_list)
@@ -1093,6 +1101,13 @@ class BasePomegranateHMM(ABC):
             inst_kwargs = dict(self.dist_kwargs)
             inst_kwargs["covariance_type"] = cov_type
             yield inst_kwargs
+
+    def _compute_init_stats(self, X: np.ndarray) -> dict:
+        """Statistics the emission builders start EM from, recomputed per start (stored as ``_kmeans_stats``).
+
+        Defaults to the k-means pass. Subclasses override it for emissions where k-means is meaningless.
+        """
+        return self._compute_kmeans_init(X)
 
     def _compute_kmeans_init(self, X: np.ndarray) -> dict:
         """
