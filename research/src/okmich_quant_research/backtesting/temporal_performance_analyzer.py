@@ -17,8 +17,19 @@ Dual-mode, like its sibling:
     # Alpha-hunting mode — from a values DataFrame + a signal function (no backtest needed)
     ta = TemporalPerformanceAnalyzer.from_signal(df, signal_fn, close_col="close")
     ta.show_dashboard(output_html="dashboard.html")
+
+Clock: every time dimension is read in the DATA's timezone. A tz-aware index is used as it is; naive timestamps are
+localised with ``source_tz``. Hour / day-of-week / month are that zone's wall clock. Sessions are not fixed UTC hours:
+each session opens at a wall-clock time on its own market's clock (Tokyo, London, New York), so the boundaries follow
+each centre's daylight-saving switches. Custom sessions (``sessions=``) are read in the data's timezone unless a
+``SessionOpen`` names its own.
 """
 
+import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -28,27 +39,84 @@ from plotly.subplots import make_subplots
 # Session / duration helpers
 # ---------------------------------------------------------------------------
 
-# Session hour ranges are defined in UTC.
-SESSION_RANGES = {
-    "Asian":          (0,  8),
-    "London":         (8,  13),
-    "NY–London OL":   (13, 16),
-    "New York":       (16, 21),
-    "Off-hours":      (21, 24),
-}
+@dataclass(frozen=True)
+class SessionOpen:
+    """A session opens at ``hour:minute`` on the wall clock of ``tz`` and runs until the next session opens.
+
+    ``tz=None`` means the data's own timezone. A timestamp belongs to the session whose most recent opening is the
+    latest, so the sessions always partition the day with no gaps and no overlaps.
+    """
+
+    name: str
+    hour: int
+    minute: int = 0
+    tz: str | None = None
+
+    def __post_init__(self):
+        if not (0 <= self.hour < 24 and 0 <= self.minute < 60):
+            raise ValueError(f"SessionOpen {self.name!r}: hour must be in [0, 24) and minute in [0, 60)")
+
+
+# FX centres on their own clocks. In northern winter (no DST anywhere) these are exactly the old UTC table:
+# Asian 00-08, London 08-13, NY-London overlap 13-16, New York 16-21, Off-hours 21-24 UTC. In summer every European
+# and US boundary moves one hour earlier in UTC, and in the weeks when US and UK DST disagree the overlap stretches.
+DEFAULT_SESSIONS = (
+    SessionOpen("Asian", 9, tz="Asia/Tokyo"),
+    SessionOpen("London", 8, tz="Europe/London"),
+    SessionOpen("NY–London OL", 8, tz="America/New_York"),
+    SessionOpen("New York", 16, tz="Europe/London"),
+    SessionOpen("Off-hours", 16, tz="America/New_York"),
+)
 SESSION_UNKNOWN = "Unknown"
 
 DURATION_LABELS = ["Scalp (<1h)", "Intraday (1–8h)", "Swing (8h–3d)", "Position (>3d)", "Unknown"]
 
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-SESSION_ORDER = list(SESSION_RANGES.keys()) + [SESSION_UNKNOWN]
+SESSION_ORDER = [s.name for s in DEFAULT_SESSIONS] + [SESSION_UNKNOWN]
+
+# The pre-DST table, kept only for the deprecated ``_get_session``.
+_LEGACY_UTC_RANGES = {"Asian": (0, 8), "London": (8, 13), "NY–London OL": (13, 16), "New York": (16, 21),
+                      "Off-hours": (21, 24)}
+
+
+def assign_sessions(timestamps, sessions: Sequence[SessionOpen] = DEFAULT_SESSIONS, data_tz=None) -> np.ndarray:
+    """Session name per timestamp. ``timestamps`` must be tz-aware (NaT maps to ``SESSION_UNKNOWN``).
+
+    ``data_tz`` resolves sessions declared with ``tz=None``; it defaults to the timestamps' own timezone.
+    """
+    ts = pd.DatetimeIndex(timestamps)
+    if ts.tz is None:
+        raise ValueError("assign_sessions needs tz-aware timestamps; localise them to the data's timezone first")
+    if not sessions:
+        raise ValueError("sessions must contain at least one SessionOpen")
+    data_tz = data_tz if data_tz is not None else ts.tz
+    ts_utc = ts.tz_convert("UTC")
+    n = len(ts_utc)
+    elapsed = np.full((len(sessions), n), np.inf)
+    for j, session in enumerate(sessions):
+        tz = session.tz if session.tz is not None else data_tz
+        wall = ts_utc.tz_convert(tz).tz_localize(None)
+        opened = wall.normalize() + pd.Timedelta(hours=session.hour, minutes=session.minute)
+        opened = opened.where(opened <= wall, opened - pd.Timedelta(days=1))
+        # A custom opening inside a DST gap or fold resolves to the first valid instant; the default openings never do.
+        opened_utc = opened.tz_localize(tz, ambiguous=np.ones(n, dtype=bool), nonexistent="shift_forward")
+        seconds = (ts_utc - opened_utc.tz_convert("UTC")).total_seconds().to_numpy()
+        seconds = np.where(seconds < 0, seconds + 86_400, seconds)
+        elapsed[j] = np.where(np.isnan(seconds), np.inf, seconds)
+    names = np.array([s.name for s in sessions] + [SESSION_UNKNOWN], dtype=object)
+    pick = np.argmin(elapsed, axis=0)
+    pick[np.isinf(elapsed.min(axis=0)) | ts_utc.isna()] = len(sessions)
+    return names[pick]
 
 
 def _get_session(hour: float) -> str:
+    """Deprecated: maps a UTC hour to the fixed, DST-blind table. Use ``assign_sessions`` on tz-aware timestamps."""
+    warnings.warn("_get_session uses fixed UTC hours and ignores daylight saving; use assign_sessions",
+                  DeprecationWarning, stacklevel=2)
     if pd.isna(hour):
         return SESSION_UNKNOWN
-    for name, (start, end) in SESSION_RANGES.items():
+    for name, (start, end) in _LEGACY_UTC_RANGES.items():
         if start <= hour < end:
             return name
     return "Off-hours"
@@ -107,17 +175,28 @@ class TemporalPerformanceAnalyzer:
         SESSION_UNKNOWN: "#8b949e",
     }
 
-    def __init__(self, trades_df: pd.DataFrame, source_tz: str = "UTC"):
+    def __init__(self, trades_df: pd.DataFrame, source_tz: str | None = None,
+                 sessions: Sequence[SessionOpen] | None = None):
         """
         Parameters
         ----------
         trades_df : DataFrame from pf.trades.records_readable.
-        source_tz : IANA timezone of the timestamps (e.g. "Europe/Moscow", "US/Eastern").
-                    Timestamps are converted to UTC internally for all time dimensions.
-                    Defaults to "UTC" (no conversion needed).
+        source_tz : IANA timezone of NAIVE timestamps (e.g. "America/New_York"). Tz-aware timestamps already carry
+                    their zone and are used as they are; passing a source_tz that disagrees with them raises. Naive
+                    timestamps without a source_tz are assumed UTC, with a warning.
+        sessions : session openings (``SessionOpen``); defaults to ``DEFAULT_SESSIONS`` (Tokyo / London / New York
+                   on their own DST-aware clocks). A ``SessionOpen`` with ``tz=None`` is read in the data's timezone.
         """
         self.raw = trades_df.copy()
         self._source_tz = source_tz
+        self._sessions = tuple(sessions) if sessions is not None else DEFAULT_SESSIONS
+        if not self._sessions:
+            raise ValueError("sessions must contain at least one SessionOpen")
+        names = [s.name for s in self._sessions]
+        if len(set(names)) != len(names) or SESSION_UNKNOWN in names:
+            raise ValueError(f"session names must be unique and not {SESSION_UNKNOWN!r}: {names}")
+        self._session_order = names + [SESSION_UNKNOWN]
+        self.tz = None  # the data's timezone, resolved in _prepare
         self._entry_df, self._exit_df = self._prepare(trades_df)
 
     # ------------------------------------------------------------------
@@ -125,24 +204,26 @@ class TemporalPerformanceAnalyzer:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_portfolio(cls, portfolio, source_tz: str = "UTC") -> "TemporalPerformanceAnalyzer":
+    def from_portfolio(cls, portfolio, source_tz: str | None = None,
+                       sessions: Sequence[SessionOpen] | None = None) -> "TemporalPerformanceAnalyzer":
         """Backtest mode: build from a vectorbt ``Portfolio`` via ``portfolio.trades.records_readable``."""
-        return cls(portfolio.trades.records_readable, source_tz=source_tz)
+        return cls(portfolio.trades.records_readable, source_tz=source_tz, sessions=sessions)
 
     @classmethod
-    def from_signal(cls, data: pd.DataFrame, signal_fn, source_tz: str = "UTC", close_col: str = "close",
-                    **vbt_kwargs) -> "TemporalPerformanceAnalyzer":
+    def from_signal(cls, data: pd.DataFrame, signal_fn, source_tz: str | None = None, close_col: str = "close",
+                    sessions: Sequence[SessionOpen] | None = None, **vbt_kwargs) -> "TemporalPerformanceAnalyzer":
         """Alpha-hunting mode: build trades from a values DataFrame and a signal function.
 
         ``signal_fn(data)`` returns a signed position series ({-1, 0, +1}); it is run through
         vectorbt (see ``signal_adapter.signal_to_portfolio``) and the resulting trades are
         analysed. Extra ``vbt_kwargs`` (``fees``, ``slippage``, ``init_cash``, ``freq`` ...)
         pass through to the portfolio build. The time condition (session/hour/...) is intrinsic
-        to the trade timestamps, so no label is supplied.
+        to the trade timestamps, so no label is supplied. A tz-aware ``data.index`` carries its
+        timezone through to the trades.
         """
         from .signal_adapter import signal_to_portfolio
         pf = signal_to_portfolio(data, signal_fn, close_col=close_col, **vbt_kwargs)
-        return cls.from_portfolio(pf, source_tz=source_tz)
+        return cls.from_portfolio(pf, source_tz=source_tz, sessions=sessions)
 
     # ------------------------------------------------------------------
     # Data preparation — returns (entry_df, exit_df)
@@ -164,8 +245,8 @@ class TemporalPerformanceAnalyzer:
             raise ValueError(f"trades_df is missing required columns: {sorted(missing)}. "
                              f"Expected columns from pf.trades.records_readable: {sorted(self._REQUIRED_COLUMNS)}")
 
-        df["Entry Timestamp"] = pd.to_datetime(df["Entry Timestamp"])
-        df["Exit Timestamp"]  = pd.to_datetime(df["Exit Timestamp"])
+        df["Entry Timestamp"] = self._localise(pd.to_datetime(df["Entry Timestamp"]), "Entry Timestamp")
+        df["Exit Timestamp"]  = self._localise(pd.to_datetime(df["Exit Timestamp"]), "Exit Timestamp")
 
         df["duration_min"] = (df["Exit Timestamp"] - df["Entry Timestamp"]).dt.total_seconds() / 60
         df["duration_bucket"] = df["duration_min"].map(_get_duration_bucket)
@@ -176,30 +257,43 @@ class TemporalPerformanceAnalyzer:
         else:
             df["direction"] = SESSION_UNKNOWN
 
-        entry_df = self._add_time_dims(df, "Entry Timestamp", self._source_tz)
-        exit_df  = self._add_time_dims(df, "Exit Timestamp", self._source_tz)
+        entry_df = self._add_time_dims(df, "Entry Timestamp")
+        exit_df  = self._add_time_dims(df, "Exit Timestamp")
 
         return entry_df, exit_df
 
-    @staticmethod
-    def _add_time_dims(df: pd.DataFrame, idx_col: str, source_tz: str = "UTC") -> pd.DataFrame:
+    def _localise(self, ts: pd.Series, col: str) -> pd.Series:
+        """Make timestamps tz-aware in the DATA's timezone and record that zone in ``self.tz``."""
+        if ts.dt.tz is not None:
+            if self._source_tz is not None:
+                relabelled = ts.dt.tz_convert(self._source_tz).dt.tz_localize(None)
+                if not relabelled.equals(ts.dt.tz_localize(None)):
+                    raise ValueError(f"'{col}' is tz-aware ({ts.dt.tz}) but source_tz={self._source_tz!r} disagrees. "
+                                     "source_tz only labels naive timestamps; convert the index instead.")
+            self.tz = ts.dt.tz
+            return ts
+        tz = self._source_tz
+        if tz is None:
+            if self.tz is None and len(ts):
+                warnings.warn("Trade timestamps are naive and no source_tz was given: assuming UTC. Sessions and "
+                              "hour-of-day are wrong if the data is on another clock; pass source_tz or a tz-aware "
+                              "index.", UserWarning, stacklevel=4)
+            tz = "UTC"
+        self.tz = self.tz if self.tz is not None else tz
+        return ts.dt.tz_localize(tz, ambiguous="NaT", nonexistent="NaT")
+
+    def _add_time_dims(self, df: pd.DataFrame, idx_col: str) -> pd.DataFrame:
         df = df.copy()
-        ts = df[idx_col]
-        # Keep hour/dow/month in the input data's native tz so analytics align with whatever
-        # clock the live system reads (typically broker-local). Only convert to UTC for the
-        # session lookup, since sessions are defined against universal market hours.
-        if ts.dt.tz is None:
-            ts_local = ts.dt.tz_localize(source_tz, ambiguous="NaT", nonexistent="NaT")
-        else:
-            ts_local = ts
-        ts_utc = ts_local.dt.tz_convert("UTC")
+        ts_local = df[idx_col]
+        # hour/dow/month are the data's own wall clock, so analytics align with whatever clock the live system reads
+        # (typically broker-local). Sessions open on each market's own clock (see assign_sessions).
         df["_ts"] = ts_local
         df["hour"] = ts_local.dt.hour
         df["dow"] = ts_local.dt.day_name()
         df["month"] = ts_local.dt.month_name()
         df["month_n"] = ts_local.dt.month
         df["quarter"] = ts_local.dt.quarter.map(lambda q: f"Q{q}")
-        df["session"]  = ts_utc.dt.hour.map(_get_session)
+        df["session"] = assign_sessions(ts_local, self._sessions, data_tz=self.tz) if len(df) else []
         return df
 
     # ------------------------------------------------------------------
@@ -494,7 +588,7 @@ class TemporalPerformanceAnalyzer:
 
         # ③ Session
         s = self._pnl_by(df, "session")
-        s["session"] = pd.Categorical(s["session"], categories=SESSION_ORDER, ordered=True)
+        s["session"] = pd.Categorical(s["session"], categories=self._session_order, ordered=True)
         s = s.sort_values("session")
         traces.append({"trace": bar(s["session"], s["PnL"], "Session PnL"), "row": 2, "col": 1})
 
@@ -572,7 +666,7 @@ class TemporalPerformanceAnalyzer:
         fig = make_subplots(
             rows=7, cols=2,
             subplot_titles=[
-                "① PnL by Hour of Day",        "② PnL by Day of Week",
+                f"① PnL by Hour of Day ({self.tz})", "② PnL by Day of Week",
                 "③ PnL by Market Session",      "④ PnL by Month",
                 "⑤ PnL by Quarter",             "⑥ PnL by Trade Duration",
                 "⑦ PnL by Direction",           "⑧ Trade Count Heatmap (Hour × Day)",

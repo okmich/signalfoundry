@@ -5,7 +5,7 @@ from .keras_models_wfa_optimizer_with_backtester import ModelWalkForwardAnalysis
 from .utils import generate_seq_feature_func_for_training, generate_seq_features_for_inference
 from .vectorbt_backtester import VectorBtBacktester
 from .regime_performance_analyzer import RegimePerformanceAnalyzer
-from .temporal_performance_analyzer import TemporalPerformanceAnalyzer
+from .temporal_performance_analyzer import DEFAULT_SESSIONS, SessionOpen, TemporalPerformanceAnalyzer, assign_sessions
 from .excursion_lens import ExcursionLens, ExcursionConfig, EntryFill
 from .signal_adapter import signal_to_portfolio, positions_to_signals
 from .vbt_export import QuantframeExportMixin, FileFormat
@@ -32,6 +32,9 @@ __all__ = [
     "VectorBtBacktester",
     "RegimePerformanceAnalyzer",
     "TemporalPerformanceAnalyzer",
+    "SessionOpen",
+    "DEFAULT_SESSIONS",
+    "assign_sessions",
     "ExcursionLens",
     "ExcursionConfig",
     "EntryFill",
