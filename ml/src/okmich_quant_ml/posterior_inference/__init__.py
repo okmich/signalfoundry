@@ -23,7 +23,8 @@ from .diagnostics import CalibrationRecommendation, CalibrationReport, DynamicsR
 from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
     rolling_max_prob_std, step_kl, top_prob, validate_posterior_matrix
 from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, ConfidenceHysteresisInferer,\
-    ConfidenceWeightedModeInferer, EntropyGateInferer, MarginGateInferer, StabilityGateInferer, ViterbiInferer
+    ConfidenceWeightedModeInferer, DeadbandHysteresisInferer, EntropyGateInferer, MarginGateInferer,\
+    StabilityGateInferer, ViterbiInferer
 from .monitoring import FeatureHealthBaselines, FeatureHealthReport, LoglikDriftBaselines, LoglikDriftReport,\
     PosteriorHealthBaselines, PosteriorHealthReport, RefitAuditReport, RefitMetricVerdict, audit_refit_metrics,\
     entropy_staleness, feature_ks_drift, fit_feature_health_baselines, fit_loglik_drift_baselines,\
@@ -55,6 +56,7 @@ __all__ = [
     "ViterbiInferer",
     "ConfidenceWeightedModeInferer",
     "ConfidenceHysteresisInferer",
+    "DeadbandHysteresisInferer",
     "EmaPosteriorTransformer",
     "RollingMeanPosteriorTransformer",
     "KalmanPosteriorTransformer",

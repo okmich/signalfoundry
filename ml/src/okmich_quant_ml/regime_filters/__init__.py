@@ -25,7 +25,8 @@ Causal Processors (Safe for Live Trading):
 ------------------------------------------
 - MedianFilter (causal=True by default)
 - MinimumDurationFilter (inherently causal)
-- HysteresisProcessor (inherently causal — count-based only)
+- HysteresisProcessor (inherently causal — count-based only; the posterior probability band is
+  posterior_inference.DeadbandHysteresisInferer)
 - TransitionRateLimiter (inherently causal)
 - MarkovJumpProcessRegularizer (inherently causal)
 """

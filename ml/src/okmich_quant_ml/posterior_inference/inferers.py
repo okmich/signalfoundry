@@ -577,3 +577,88 @@ class ConfidenceHysteresisInferer:
 
     def get_metadata(self) -> dict:
         return dict(self._metadata)
+
+
+@njit(cache=True)
+def _deadband_hysteresis_core(probs: np.ndarray, theta_hi: np.ndarray, theta_lo: np.ndarray) -> np.ndarray:
+    T, K = probs.shape
+    out = np.empty(T, dtype=np.int64)
+    if T == 0:
+        return out
+    incumbent = np.argmax(probs[0])
+    out[0] = incumbent
+    for t in range(1, T):
+        best = np.argmax(probs[t])
+        if best != incumbent and probs[t, best] >= theta_hi[t]:
+            incumbent = best  # the challenger cleared the entry bar
+        elif probs[t, incumbent] < theta_lo[t]:
+            incumbent = best  # the incumbent collapsed below the exit bar: take the best available state
+        out[t] = incumbent
+    return out
+
+
+class DeadbandHysteresisInferer:
+    """Probability-band hysteresis on the argmax decision: a deadband on the decision, not on the belief.
+
+    Hold the incumbent regime. Adopt a challenger only when its posterior reaches the entry bar ``theta_hi``;
+    abandon the incumbent only when its own posterior falls below the exit bar ``theta_lo``, then take the argmax.
+    Posteriors that wander inside the band ``[theta_lo, theta_hi]`` (near-ties) leave the label unchanged, which is
+    what removes flicker. With two states and ``theta_lo = 1 - theta_hi`` the two rules coincide and the label
+    switches when the challenger's posterior reaches ``theta_hi``.
+
+    It reduces flicker; it does not create edge. In the lab's posterior-hysteresis study (trend and path_structure
+    axes) this fixed band sat on the same flicker-vs-lag frontier as an entropy-scaled band, and both dominated a
+    minimum-duration timer. Compare operators at MATCHED PERSISTENCE: sweep the band and read lag off the frontier.
+
+    The band can move bar by bar: ``infer(probs, theta_hi=..., theta_lo=...)`` takes ``(T,)`` arrays (for example an
+    entropy-scaled or change-hazard-scaled band). They must be causal themselves, computed from data up to each bar.
+
+    Causal: the label at ``t`` depends only on rows ``0..t``, the band at ``t`` and the running incumbent. Feed it the
+    FILTERED posterior, never a smoothed one.
+    """
+
+    def __init__(self, theta_hi: float = 0.6, theta_lo: float = 0.4) -> None:
+        self.theta_hi = float(theta_hi)
+        self.theta_lo = float(theta_lo)
+        _check_unit_interval(self.theta_hi, "theta_hi")
+        _check_unit_interval(self.theta_lo, "theta_lo")
+        if self.theta_lo > self.theta_hi:
+            raise ValueError(f"theta_lo ({self.theta_lo}) must not exceed theta_hi ({self.theta_hi})")
+        self._metadata: dict = {}
+
+    def infer(self, probs: NDArray, theta_hi: NDArray | None = None, theta_lo: NDArray | None = None) -> NDArray:
+        """Labels for ``probs`` (T, K). ``theta_hi`` / ``theta_lo`` optionally override the band per bar, shape (T,)."""
+        p = _validate_posterior_matrix(probs, "DeadbandHysteresisInferer")
+        T, K = p.shape
+        hi = self._band(self.theta_hi if theta_hi is None else theta_hi, T, "theta_hi")
+        lo = self._band(self.theta_lo if theta_lo is None else theta_lo, T, "theta_lo")
+        if np.any(lo > hi):
+            raise ValueError("theta_lo must not exceed theta_hi on any bar")
+        labels = _deadband_hysteresis_core(p, hi, lo)
+        argmax = np.argmax(p, axis=1)
+        transitions = int((labels[1:] != labels[:-1]).sum()) if T > 0 else 0
+        argmax_transitions = int((argmax[1:] != argmax[:-1]).sum()) if T > 0 else 0
+        self._metadata = {
+            "inferer": "DeadbandHysteresisInferer",
+            "theta_hi": self.theta_hi if theta_hi is None else "per-bar",
+            "theta_lo": self.theta_lo if theta_lo is None else "per-bar",
+            "n_bars": int(T), "n_states": int(K),
+            "n_label_transitions": transitions,
+            "n_argmax_transitions": argmax_transitions,
+            "smoothing_ratio": (1.0 - transitions / argmax_transitions) if argmax_transitions > 0 else 0.0,
+        }
+        return labels
+
+    @staticmethod
+    def _band(value, T: int, name: str) -> np.ndarray:
+        band = np.asarray(value, dtype=np.float64)
+        if band.ndim == 0:
+            band = np.full(T, float(band))
+        if band.shape != (T,):
+            raise ValueError(f"{name} must be a scalar or have shape ({T},), got {band.shape}")
+        if not np.all(np.isfinite(band)) or np.any((band < 0.0) | (band > 1.0)):
+            raise ValueError(f"{name} must be finite and in [0, 1] on every bar")
+        return band
+
+    def get_metadata(self) -> dict:
+        return dict(self._metadata)

@@ -214,14 +214,32 @@ class TestHysteresisProcessor:
             results.append(result)
 
         results = np.array(results)
-        # Should stay in regime 0 until exit threshold (2) and entry threshold (3) met
-        # First 3 are regime 0, then need 2 exits + 3 consecutive entries
-        # Index 3-4: 2 exits met
-        # Index 4-6: 3 consecutive for entry
-        assert results[3] == 0
-        assert results[4] == 0
-        # After enough consecutive observations, should transition
-        assert results[8] == 1  # Should have transitioned by now
+        # The switch needs >= 2 bars without regime 0 AND >= 3 consecutive 1s: both first hold at index 5.
+        np.testing.assert_array_equal(results, np.array([0, 0, 0, 0, 0, 1, 1, 1, 1]))
+        np.testing.assert_array_equal(results, processor.process(np.array(states)))
+
+    @pytest.mark.parametrize("config", [
+        {"entry_threshold": 4, "exit_threshold": 2},
+        {"entry_threshold": 2, "exit_threshold": 5},
+        {"entry_threshold": 1, "exit_threshold": 1},
+        {"per_state_params": {0: {"entry": 5, "exit": 2}, 1: {"entry": 2, "exit": 4}, 2: {"entry": 3, "exit": 3}}},
+    ])
+    def test_online_matches_batch(self, config):
+        """Streaming a sequence must return exactly what process() returns for it (it diverged on most inputs)."""
+        rng = np.random.default_rng(3)
+        processor = HysteresisProcessor(dict(config))
+        for _ in range(200):
+            seq = np.repeat(rng.integers(0, 3, 150), rng.integers(1, 6, 150))[:300]
+            processor.reset()
+            online = np.array([processor.process_online(int(s)) for s in seq])
+            np.testing.assert_array_equal(online, processor.process(seq))
+
+    def test_online_does_not_join_broken_runs(self):
+        """Runs of two separated by the incumbent never make three consecutive observations."""
+        processor = HysteresisProcessor({"entry_threshold": 3, "exit_threshold": 2})
+        seq = [0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0]
+        processor.reset()
+        assert [processor.process_online(s) for s in seq] == [0] * len(seq)
 
     def test_config_validation(self):
         """Test configuration validation."""
