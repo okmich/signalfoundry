@@ -1,6 +1,7 @@
 from .crf import CRF
 from .esn import EchoStateNetwork, DeepEchoStateNetwork
 from .feature_attention import FeatureAttention
+from .hierarchical_cell_attention import HierarchicalCellAttention
 from .light_weight_attention import LightweightAttention
 from .mdn import MixtureDensityLayer, split_mdn_params, mdn_loss, sample_from_mdn, get_mdn_predictions, \
     get_mdn_uncertainty

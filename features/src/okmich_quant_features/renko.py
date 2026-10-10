@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import Optional, List, Tuple
 
 import matplotlib.patches as patches
@@ -8,12 +9,37 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 
+class RenkoAnchor(StrEnum):
+    """Where the reference level for the next brick sits once a brick has formed."""
+
+    GRID = "grid"  # classic Renko: bricks sit on the fixed levels k * brick_size
+    CLOSE = "close"  # re-anchor at the close that formed the brick (close-only, variable brick height)
+
+
 class Renko:
     """
     A production-ready Renko chart builder that converts OHLCV data into Renko bricks.
 
     Renko charts filter out minor price movements and only display price changes
     that exceed a specified brick size, making trend identification clearer.
+
+    Brick construction and its bias
+    -------------------------------
+    A brick forms one ``brick_size`` above or below the current reference level, so on a driftless random walk the
+    next brick's direction should be a fair coin (reversal share 0.5). How close each mode gets to that:
+
+    * ``anchor=GRID, use_high_low=True`` (default) walks every bar along the path its OHLC implies:
+      open -> low -> high -> close when close >= open, open -> high -> low -> close otherwise (the previous close
+      stands in for the open when there is no open column). The last brick of a bar therefore agrees with where the
+      bar closed. A fixed grid on sampled prices keeps a small momentum bias, because the price that crosses a level
+      overshoots it and the next brick in the same direction is nearer than a reversal: the reversal share is about
+      0.48 at ``brick_size`` = 2 bar sigmas, the same as a grid built tick by tick.
+    * ``anchor=GRID, use_high_low=False`` sees closes only, so the overshoot is a whole bar's worth: reversal share
+      about 0.39 at 2 bar sigmas and 0.32 at 1. Use it for charts, not for statistics on brick sequences.
+    * ``anchor=CLOSE`` (requires ``use_high_low=False``) re-anchors at the close that formed each brick. One brick
+      per bar at most, with height >= ``brick_size``. Under symmetric iid increments the next brick's direction is
+      independent of every earlier brick, so reversal fractions and run lengths have an exact null. Use this mode for
+      path-structure statistics.
 
     Parameters
     ----------
@@ -28,8 +54,12 @@ class Renko:
     volume_col : str, default='volume'
         Column name for volume data
     use_high_low : bool, default=True
-        If True, uses high/low prices for more accurate brick detection.
+        If True, walks each bar's open/high/low/close path for brick detection.
         If False, only uses close_col.
+    open_col : str, default='open'
+        Column name for open prices. Optional: when it is absent the previous close is used as the bar's open.
+    anchor : RenkoAnchor, default=RenkoAnchor.GRID
+        GRID for classic fixed-level bricks, CLOSE for close-anchored bricks (see above).
 
     Attributes
     ----------
@@ -73,15 +103,9 @@ class Renko:
     UP_DIRECTION = 1
     DOWN_DIRECTION = -1
 
-    def __init__(
-        self,
-        brick_size: float,
-        high_col: str = "high",
-        low_col: str = "low",
-        close_col: str = "close",
-        volume_col: str = "volume",
-        use_high_low: bool = True,
-    ):
+    def __init__(self, brick_size: float, high_col: str = "high", low_col: str = "low", close_col: str = "close",
+                 volume_col: str = "volume", use_high_low: bool = True, open_col: str = "open",
+                 anchor: RenkoAnchor = RenkoAnchor.GRID):
         """
         Initialize the Renko chart builder.
 
@@ -98,12 +122,16 @@ class Renko:
         volume_col : str, default='volume'
             Column name for volume data
         use_high_low : bool, default=True
-            If True, uses high/low prices for brick detection
+            If True, uses the bar's open/high/low/close path for brick detection
+        open_col : str, default='open'
+            Column name for open prices (optional in the data)
+        anchor : RenkoAnchor, default=RenkoAnchor.GRID
+            Reference level after a brick: the fixed grid, or the close that formed it
 
         Raises
         ------
         ValueError
-            If brick_size is not positive or column names are empty
+            If brick_size is not positive, column names are empty, or anchor=CLOSE is combined with use_high_low
         TypeError
             If brick_size cannot be converted to float
         """
@@ -123,15 +151,21 @@ class Renko:
             ("low_col", low_col),
             ("close_col", close_col),
             ("volume_col", volume_col),
+            ("open_col", open_col),
         ]:
             if not isinstance(col_value, str) or not col_value.strip():
                 raise ValueError(f"{col_name} must be a non-empty string")
+
+        self.anchor = RenkoAnchor(anchor)
+        if self.anchor is RenkoAnchor.CLOSE and use_high_low:
+            raise ValueError("anchor=RenkoAnchor.CLOSE re-anchors at closes only; pass use_high_low=False")
 
         # Store configuration
         self.high_col = high_col
         self.low_col = low_col
         self.close_col = close_col
         self.volume_col = volume_col
+        self.open_col = open_col
         self.use_high_low = use_high_low
 
         # Result storage
@@ -228,46 +262,87 @@ class Renko:
         List[dict]
             List of brick dictionaries
         """
-        bricks = []
+        close = df[self.close_col].to_numpy(dtype=float)
+        volume = np.nan_to_num(df[self.volume_col].to_numpy(dtype=float)) if has_volume else np.zeros(len(df))
+        finite = np.flatnonzero(np.isfinite(close))
+        if finite.size == 0:
+            return []
+        # The first finite close is the reference: price action before it (that bar's own high/low) is history.
+        start = int(finite[0])
 
-        # Determine starting price - use close price
-        start_price = df.iloc[0][self.close_col]
-        current_brick_open = self._round_to_brick(start_price)
+        if self.anchor is RenkoAnchor.CLOSE:
+            bricks = self._close_anchored_bricks(df.index, close, volume, start)
+        else:
+            bricks = self._grid_bricks(df, close, volume, start)
 
-        accumulated_volume = 0.0
-        brick_num = 0
-
-        # Process each row
-        for idx, row in df.iterrows():
-            # Get prices based on mode
-            if self.use_high_low:
-                high = row[self.high_col]
-                low = row[self.low_col]
-            else:
-                price = row[self.close_col]
-                high = low = price
-
-            # Accumulate volume
-            if has_volume:
-                accumulated_volume += row[self.volume_col]
-
-            # Evaluate and create new bricks
-            new_bricks = self._evaluate_price_movement(
-                current_brick_open, high, low, idx, accumulated_volume
-            )
-
-            if new_bricks:
-                # Add brick numbers
-                for brick in new_bricks:
-                    brick[self.BRICK_NUM_COL] = brick_num
-                    bricks.append(brick)
-                    brick_num += 1
-
-                # Update state
-                current_brick_open = new_bricks[-1][self.CLOSE_COL]
-                accumulated_volume = 0.0
-
+        for brick_num, brick in enumerate(bricks):
+            brick[self.BRICK_NUM_COL] = brick_num
         return bricks
+
+    def _bar_paths(self, df: pd.DataFrame, close: np.ndarray) -> np.ndarray:
+        """Per-bar price path, shape (T, 4) in high/low mode and (T, 1) in close-only mode.
+
+        High/low mode orders the extremes by the bar's direction: open -> low -> high -> close for an up bar,
+        open -> high -> low -> close for a down bar. Taking the high first on every bar (the old behaviour) leaves the
+        last brick pointing away from the close and manufactures reversals.
+        """
+        if not self.use_high_low:
+            return close[:, None]
+        high = df[self.high_col].to_numpy(dtype=float)
+        low = df[self.low_col].to_numpy(dtype=float)
+        if self.open_col in df.columns:
+            opens = df[self.open_col].to_numpy(dtype=float)
+        else:
+            opens = np.r_[close[0], close[:-1]]
+        up_bar = close >= opens
+        first = np.where(up_bar, low, high)
+        second = np.where(up_bar, high, low)
+        return np.column_stack([opens, first, second, close])
+
+    def _grid_bricks(self, df: pd.DataFrame, close: np.ndarray, volume: np.ndarray, start: int) -> List[dict]:
+        """Classic bricks on the fixed levels k * brick_size, crossed in path order within each bar."""
+        paths = self._bar_paths(df, close)
+        index = df.index
+        b = self.brick_size
+        level = int(round(close[start] / b))  # integer level index, so repeated steps never drift
+        bricks: List[dict] = []
+        accumulated_volume = volume[start]
+        for i in range(start + 1, len(close)):
+            accumulated_volume += volume[i]
+            formed = 0
+            for price in paths[i]:  # NaN compares False, so missing prices form no bricks
+                while price >= (level + 1) * b:
+                    bricks.append(self._brick(level * b, (level + 1) * b, self.UP_DIRECTION, index[i],
+                                              accumulated_volume if formed == 0 else 0.0))
+                    level += 1
+                    formed += 1
+                while price <= (level - 1) * b:
+                    bricks.append(self._brick(level * b, (level - 1) * b, self.DOWN_DIRECTION, index[i],
+                                              accumulated_volume if formed == 0 else 0.0))
+                    level -= 1
+                    formed += 1
+            if formed:
+                accumulated_volume = 0.0
+        return bricks
+
+    def _close_anchored_bricks(self, index: pd.Index, close: np.ndarray, volume: np.ndarray, start: int) -> List[dict]:
+        """One brick per bar whose close is >= brick_size from the last anchor; that close becomes the anchor."""
+        anchor = close[start]
+        bricks: List[dict] = []
+        accumulated_volume = volume[start]
+        for i in range(start + 1, len(close)):
+            accumulated_volume += volume[i]
+            move = close[i] - anchor
+            if abs(move) >= self.brick_size:  # False for NaN
+                direction = self.UP_DIRECTION if move > 0 else self.DOWN_DIRECTION
+                bricks.append(self._brick(anchor, close[i], direction, index[i], accumulated_volume))
+                anchor = close[i]
+                accumulated_volume = 0.0
+        return bricks
+
+    def _brick(self, open_price: float, close_price: float, direction: int, timestamp, volume: float) -> dict:
+        return {self.OPEN_COL: open_price, self.CLOSE_COL: close_price, self.DIRECTION_COL: direction,
+                self.TIMESTAMP_COL: timestamp, self.VOLUME_COL: volume}
 
     def _create_result_dataframe(
         self, bricks: List[dict], has_volume: bool
@@ -301,84 +376,6 @@ class Renko:
             self.VOLUME_COL,
         ]
         return result_df[column_order]
-
-    def _round_to_brick(self, price: float) -> float:
-        """
-        Round price to nearest brick boundary.
-
-        Parameters
-        ----------
-        price : float
-            Price to round
-
-        Returns
-        -------
-        float
-            Price rounded to brick boundary
-        """
-        return round(price / self.brick_size) * self.brick_size
-
-    def _evaluate_price_movement(
-        self, current_open: float, high: float, low: float, timestamp, volume: float
-    ) -> List[dict]:
-        """
-        Evaluate if price movement creates new brick(s).
-
-        This method can create multiple bricks if price moved significantly
-        in a single period.
-
-        Parameters
-        ----------
-        current_open : float
-            Current brick's open price
-        high : float
-            Period's high price
-        low : float
-            Period's low price
-        timestamp : Any
-            Timestamp for the period
-        volume : float
-            Accumulated volume
-
-        Returns
-        -------
-        List[dict]
-            List of new bricks formed (can be empty)
-        """
-        bricks = []
-        volume_assigned = False
-
-        # Check for upward bricks
-        while high >= current_open + self.brick_size:
-            brick_volume = volume if not volume_assigned else 0.0
-            bricks.append(
-                {
-                    self.OPEN_COL: current_open,
-                    self.CLOSE_COL: current_open + self.brick_size,
-                    self.DIRECTION_COL: self.UP_DIRECTION,
-                    self.TIMESTAMP_COL: timestamp,
-                    self.VOLUME_COL: brick_volume,
-                }
-            )
-            current_open += self.brick_size
-            volume_assigned = True
-
-        # Check for downward bricks
-        while low <= current_open - self.brick_size:
-            brick_volume = volume if not volume_assigned else 0.0
-            bricks.append(
-                {
-                    self.OPEN_COL: current_open,
-                    self.CLOSE_COL: current_open - self.brick_size,
-                    self.DIRECTION_COL: self.DOWN_DIRECTION,
-                    self.TIMESTAMP_COL: timestamp,
-                    self.VOLUME_COL: brick_volume,
-                }
-            )
-            current_open -= self.brick_size
-            volume_assigned = True
-
-        return bricks
 
     def get_trend_changes(self) -> pd.DataFrame:
         """
@@ -696,6 +693,6 @@ class Renko:
         brick_count = len(self.renko_df) if self.renko_df is not None else 0
         mode = "high/low" if self.use_high_low else "close-only"
         return (
-            f"Renko(brick_size={self.brick_size}, mode={mode}, "
+            f"Renko(brick_size={self.brick_size}, mode={mode}, anchor={self.anchor.value}, "
             f"status={built_status}, bricks={brick_count})"
         )

@@ -294,3 +294,31 @@ class TestRegimeTransitionPrecision:
         metric.reset_state()
         assert float(metric.correct_predictions.numpy()) == 0.0
         assert float(metric.total_predictions.numpy()) == 0.0
+
+
+class TestImbalanceMetricsSerialization:
+    """BalancedAccuracy / MacroF1Score must survive compile-config serialization (clone_model, model.save)."""
+
+    @staticmethod
+    def _round_trip(metric):
+        import keras
+        config = keras.saving.serialize_keras_object(metric)
+        return keras.saving.deserialize_keras_object(config)
+
+    def test_balanced_accuracy_round_trip_keeps_num_classes_and_values(self):
+        from okmich_quant_neural_net.keras.metrics import BalancedAccuracy
+        metric = BalancedAccuracy(num_classes=3, name="bal")
+        clone = self._round_trip(metric)
+        assert isinstance(clone, BalancedAccuracy) and clone.num_classes == 3 and clone.name == "bal"
+        y_true = np.array([0, 1, 2, 2])
+        y_pred = _classes_to_logits(np.array([[0, 1, 1, 2]]), 3)[0]
+        np.testing.assert_allclose(_reset_and_call(clone, y_true, y_pred), _reset_and_call(metric, y_true, y_pred))
+
+    def test_macro_f1_round_trip_keeps_num_classes_and_values(self):
+        from okmich_quant_neural_net.keras.metrics import MacroF1Score
+        metric = MacroF1Score(num_classes=4)
+        clone = self._round_trip(metric)
+        assert isinstance(clone, MacroF1Score) and clone.num_classes == 4 and clone.name == "macro_f1"
+        y_true = np.array([0, 1, 2, 3, 3])
+        y_pred = _classes_to_logits(np.array([[0, 1, 1, 3, 2]]), 4)[0]
+        np.testing.assert_allclose(_reset_and_call(clone, y_true, y_pred), _reset_and_call(metric, y_true, y_pred))

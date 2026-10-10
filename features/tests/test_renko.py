@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-from okmich_quant_features.renko import Renko
+from okmich_quant_features.renko import Renko, RenkoAnchor
 
 
 # Fixtures
@@ -1106,3 +1106,69 @@ class TestIntegration:
         len2 = len(result2)
 
         assert len
+
+
+# Test brick bias on a driftless random walk (the reversal share of consecutive bricks is 0.5 under the null)
+def _random_walk_bars(n_bars: int, ticks_per_bar: int, seed: int) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    ticks = np.cumsum(rng.standard_normal(n_bars * ticks_per_bar)) + 10_000.0
+    path = ticks.reshape(n_bars, ticks_per_bar)
+    bars = pd.DataFrame({"open": path[:, 0], "high": path.max(1), "low": path.min(1), "close": path[:, -1]},
+                        index=pd.date_range("2024-01-01", periods=n_bars, freq="5min"))
+    return bars, ticks
+
+
+def _reversal_share(direction) -> float:
+    d = np.asarray(direction)
+    return float((d[1:] != d[:-1]).mean())
+
+
+class TestBrickBias:
+    """Brick sequences must not manufacture reversion or momentum that the price path does not contain."""
+
+    def test_high_low_mode_follows_the_bar_path(self):
+        # Up bar that dips first: anchor 100, low 97, high 103, close 102.5. The bar ends near its high, so the last
+        # brick must be up. Taking the high before the low on every bar ended this bar on a down brick at 98.
+        df = pd.DataFrame({"open": [100.0, 100.0], "high": [100.0, 103.0], "low": [100.0, 97.0],
+                           "close": [100.0, 102.5]})
+        result = Renko(brick_size=2.0).build(df)
+        assert list(result["direction"]) == [-1, 1, 1]
+        assert result["close"].iloc[-1] == 102.0
+
+    def test_missing_open_uses_previous_close(self):
+        df = pd.DataFrame({"high": [100.0, 103.0, 103.5], "low": [100.0, 97.0, 99.0], "close": [100.0, 102.5, 99.5]})
+        with_open = df.assign(open=df["close"].shift(1).fillna(df["close"].iloc[0]))
+        pd.testing.assert_frame_equal(Renko(brick_size=2.0).build(df), Renko(brick_size=2.0).build(with_open))
+
+    def test_high_low_grid_matches_a_tick_level_grid(self):
+        bars, ticks = _random_walk_bars(n_bars=20_000, ticks_per_bar=60, seed=11)
+        brick = 2.0 * np.sqrt(60)
+        from_bars = _reversal_share(Renko(brick_size=brick).build(bars)["direction"])
+        tick_frame = pd.DataFrame({"close": ticks[59:]})
+        from_ticks = _reversal_share(Renko(brick_size=brick, use_high_low=False).build(tick_frame)["direction"])
+        # Bars processed high-first gave 0.516 here against 0.477 tick by tick (fake reversion).
+        assert abs(from_bars - from_ticks) < 0.015
+        assert from_bars < 0.5
+
+    def test_close_anchor_has_an_exact_coin_flip_null(self):
+        bars, _ = _random_walk_bars(n_bars=40_000, ticks_per_bar=60, seed=5)
+        for k in (1.0, 2.0):
+            result = Renko(brick_size=k * np.sqrt(60), use_high_low=False, anchor=RenkoAnchor.CLOSE).build(bars)
+            share = _reversal_share(result["direction"])
+            se = 0.5 / np.sqrt(len(result) - 1)
+            # A fixed grid on closes gives 0.32 at k=1 and 0.39 at k=2 (fake momentum).
+            assert abs(share - 0.5) < 4 * se, (k, share, len(result))
+
+    def test_close_anchor_bricks_chain_and_respect_the_minimum_move(self):
+        bars, _ = _random_walk_bars(n_bars=2_000, ticks_per_bar=20, seed=2)
+        brick = 1.5 * np.sqrt(20)
+        result = Renko(brick_size=brick, use_high_low=False, anchor=RenkoAnchor.CLOSE).build(bars)
+        assert len(result) > 50
+        assert (result["timestamp"].diff().dropna() > pd.Timedelta(0)).all()  # at most one brick per bar
+        assert np.allclose(result["open"].iloc[1:].to_numpy(), result["close"].iloc[:-1].to_numpy())
+        assert ((result["close"] - result["open"]).abs() >= brick).all()
+        assert set(result["close"]).issubset(set(bars["close"]))
+
+    def test_close_anchor_rejects_high_low_mode(self):
+        with pytest.raises(ValueError, match="use_high_low=False"):
+            Renko(brick_size=2.0, anchor=RenkoAnchor.CLOSE)

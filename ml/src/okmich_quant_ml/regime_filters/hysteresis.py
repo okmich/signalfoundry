@@ -87,13 +87,20 @@ class HysteresisProcessor(BasePostProcessor):
     """
     Create 'sticky' regimes with different entry/exit thresholds (count-based).
 
-    This processor models asymmetric market behavior (e.g., "stairs up,
-    elevator down") by requiring different levels of evidence to enter
-    vs. exit a regime. Operates purely on label sequences — counts
-    consecutive observations for entry / exit gating.
+    Operates purely on label sequences. The incumbent regime is held until a challenger qualifies; at bar ``t`` the
+    label switches from incumbent ``a`` to the observed state ``b`` only when both hold:
 
-    For posterior-aware hysteresis (cumulative-confidence entry/exit thresholds gated on per-bar
-    posterior probability), use
+    * exit:  ``a`` has been absent for at least ``exit(a)`` consecutive bars, and
+    * entry: ``b`` has been observed for at least ``entry(b)`` consecutive bars ending at ``t``.
+
+    There is no exit to a neutral state: until a challenger qualifies, the incumbent is held. With two states the
+    absence run and the challenger run are the same run, so the switch delay is ``max(exit(a), entry(b))`` and an exit
+    threshold at or below the challenger's entry threshold has no effect. ``process_online`` applies the same rule bar
+    by bar, so streaming a sequence returns exactly what ``process`` returns for it.
+
+    This is a timer on labels. For a probability band on the posterior (hold the incumbent until a challenger's
+    posterior clears an entry bar or the incumbent's collapses below an exit bar) use
+    ``okmich_quant_ml.posterior_inference.DeadbandHysteresisInferer``; for cumulative-confidence thresholds use
     ``okmich_quant_ml.posterior_inference.ConfidenceHysteresisInferer``.
 
     Parameters
@@ -101,9 +108,9 @@ class HysteresisProcessor(BasePostProcessor):
     config : dict
         Configuration with keys:
         - entry_threshold : int, default=10
-            Consecutive observations required to enter regime
+            Consecutive observations of a challenger required before it can take over
         - exit_threshold : int, default=3
-            Consecutive violations required to exit regime
+            Consecutive bars without the incumbent required before any switch
         - per_state_params : dict, optional
             Regime-specific thresholds mapping state -> {'entry': x, 'exit': y}
 
@@ -120,12 +127,9 @@ class HysteresisProcessor(BasePostProcessor):
 
     Notes
     -----
-    For trading applications:
-    - Bull markets: Higher entry threshold (resist entering too early),
-      lower exit threshold (exit quickly on weakness)
-    - Bear markets: Lower entry threshold (detect crashes quickly),
-      higher exit threshold (avoid whipsaws in recovery)
-    - Crisis: Very low entry threshold, very high exit threshold
+    The delay to leave ``a`` for ``b`` is ``max(exit(a), entry(b))`` in the two-state case, so in the example above
+    bull -> bear takes 5 bars (max(5, 5)) and bear -> bull takes 15 (max(10, 15)). "Fast exit" only shortens a
+    switch when the challenger's entry threshold is also short.
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -250,49 +254,28 @@ class HysteresisProcessor(BasePostProcessor):
 
     def process_online(self, state: int, return_value: Optional[float] = None,
                        timestamp: Optional[pd.Timestamp] = None) -> int:
-        # Initialize state on first call
-        if self._online_state is None:
-            self._online_state = {
-                "current_regime": state,
-                "entry_count": 1,
-                "exit_count": 0,
-                "recent_states": [],
-            }
+        """Streaming counterpart of ``process``: same rule, same output, one state per call."""
+        online = self._online_state
+        if online is None:
+            self._online_state = {"current_regime": state, "exit_count": 0, "run_state": state, "run_length": 1}
             return state
 
-        current_regime = self._online_state["current_regime"]
+        # Length of the run of identical observations ending now (the entry evidence for `state`).
+        if state == online["run_state"]:
+            online["run_length"] += 1
+        else:
+            online["run_state"] = state
+            online["run_length"] = 1
+
+        current_regime = online["current_regime"]
+        if state == current_regime:
+            online["exit_count"] = 0
+            return current_regime
+
+        online["exit_count"] += 1
         entry_thresh, _ = self._get_thresholds_for_state(state)
         _, exit_thresh = self._get_thresholds_for_state(current_regime)
-
-        if state == current_regime:
-            self._online_state["exit_count"] = 0
-            return current_regime
-        else:
-            self._online_state["exit_count"] += 1
-
-            if self._online_state["exit_count"] >= exit_thresh:
-                # Track recent states for entry check
-                self._online_state["recent_states"].append(state)
-
-                # Keep only recent window
-                max_lookback = int(entry_thresh * 2)
-                if len(self._online_state["recent_states"]) > max_lookback:
-                    self._online_state["recent_states"] = self._online_state["recent_states"][-max_lookback:]
-
-                # Count consecutive observations of new state
-                entry_count = 0
-                for s in reversed(self._online_state["recent_states"]):
-                    if s == state:
-                        entry_count += 1
-                    else:
-                        break
-
-                if entry_count >= entry_thresh:
-                    # Enter new regime
-                    self._online_state["current_regime"] = state
-                    self._online_state["exit_count"] = 0
-                    self._online_state["entry_count"] = entry_count
-                    self._online_state["recent_states"] = []
-                    return state
-
-            return current_regime
+        if online["exit_count"] >= exit_thresh and online["run_length"] >= entry_thresh:
+            online["current_regime"] = state
+            online["exit_count"] = 0
+        return online["current_regime"]

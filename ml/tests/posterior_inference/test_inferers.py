@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from okmich_quant_ml.posterior_inference import (
+    DeadbandHysteresisInferer,
     AbstainMode,
     ArgmaxInferer,
     CompositeGateInferer,
@@ -319,3 +320,86 @@ def test_argmax_inferer_rejects_non_simplex_rows() -> None:
     bad = np.array([[0.75, 0.75]], dtype=float)
     with pytest.raises(ValueError, match="must sum to 1"):
         ArgmaxInferer().infer(bad)
+
+
+def _deadband_reference(probs: np.ndarray, theta_hi, theta_lo) -> np.ndarray:
+    """The lab's research implementation (posteriors_hysteresis_signal_processing/hyst_lab.hysteresis)."""
+    hi = np.broadcast_to(np.asarray(theta_hi, float), (len(probs),))
+    lo = np.broadcast_to(np.asarray(theta_lo, float), (len(probs),))
+    out = np.empty(len(probs), np.int64)
+    inc = int(np.argmax(probs[0]))
+    out[0] = inc
+    for t in range(1, len(probs)):
+        a = int(np.argmax(probs[t]))
+        if a != inc and probs[t, a] >= hi[t]:
+            inc = a
+        elif probs[t, inc] < lo[t]:
+            inc = a
+        out[t] = inc
+    return out
+
+
+def _random_posteriors(n: int, k: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    logits = np.cumsum(rng.standard_normal((n, k)) * 0.6, axis=0) * 0.3 + rng.standard_normal((n, k))
+    e = np.exp(logits - logits.max(axis=1, keepdims=True))
+    return e / e.sum(axis=1, keepdims=True)
+
+
+@pytest.mark.parametrize("k, theta_hi, theta_lo", [(2, 0.6, 0.4), (3, 0.55, 0.3), (4, 0.5, 0.2)])
+def test_deadband_hysteresis_matches_the_lab_reference(k: int, theta_hi: float, theta_lo: float) -> None:
+    probs = _random_posteriors(3_000, k, seed=k)
+    labels = DeadbandHysteresisInferer(theta_hi, theta_lo).infer(probs)
+    np.testing.assert_array_equal(labels, _deadband_reference(probs, theta_hi, theta_lo))
+
+
+def test_deadband_hysteresis_holds_through_near_ties_and_switches_on_the_entry_bar() -> None:
+    p_one = np.array([0.30, 0.55, 0.45, 0.58, 0.62, 0.50, 0.42, 0.38])
+    probs = np.column_stack([1 - p_one, p_one])
+    labels = DeadbandHysteresisInferer(theta_hi=0.6, theta_lo=0.4).infer(probs)
+    # argmax flickers 0,1,0,1,1,0/1,0,0; the band holds 0 until state 1 reaches 0.6, then holds 1 until it drops
+    # below 0.4 (state 0 above 0.6).
+    np.testing.assert_array_equal(labels, np.array([0, 0, 0, 0, 1, 1, 1, 0]))
+
+
+def test_deadband_hysteresis_is_causal() -> None:
+    probs = _random_posteriors(1_000, 3, seed=9)
+    inferer = DeadbandHysteresisInferer(0.55, 0.3)
+    full = inferer.infer(probs)
+    for t in (1, 17, 250, 999):
+        np.testing.assert_array_equal(inferer.infer(probs[: t + 1]), full[: t + 1])
+
+
+def test_deadband_hysteresis_reduces_flicker_and_reports_it() -> None:
+    probs = _random_posteriors(5_000, 2, seed=4)
+    inferer = DeadbandHysteresisInferer(0.65, 0.35)
+    labels = inferer.infer(probs)
+    meta = inferer.get_metadata()
+    assert meta["n_label_transitions"] == int((labels[1:] != labels[:-1]).sum())
+    assert meta["n_label_transitions"] < meta["n_argmax_transitions"]
+    assert 0.0 < meta["smoothing_ratio"] <= 1.0
+
+
+def test_deadband_hysteresis_validates_its_band() -> None:
+    with pytest.raises(ValueError, match="must not exceed"):
+        DeadbandHysteresisInferer(theta_hi=0.4, theta_lo=0.6)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        DeadbandHysteresisInferer(theta_hi=1.2, theta_lo=0.4)
+    assert DeadbandHysteresisInferer().infer(np.empty((0, 2))).shape == (0,)
+
+
+def test_deadband_hysteresis_accepts_a_per_bar_band() -> None:
+    probs = _random_posteriors(2_000, 3, seed=12)
+    rng = np.random.default_rng(1)
+    wide = rng.random(2_000) < 0.5
+    hi = np.where(wide, 0.75, 0.55)
+    lo = np.where(wide, 0.25, 0.40)
+    inferer = DeadbandHysteresisInferer()
+    np.testing.assert_array_equal(inferer.infer(probs, theta_hi=hi, theta_lo=lo), _deadband_reference(probs, hi, lo))
+    assert inferer.get_metadata()["theta_hi"] == "per-bar"
+    constant = inferer.infer(probs, theta_hi=np.full(2_000, 0.6), theta_lo=np.full(2_000, 0.4))
+    np.testing.assert_array_equal(constant, DeadbandHysteresisInferer(0.6, 0.4).infer(probs))
+    with pytest.raises(ValueError, match="shape"):
+        inferer.infer(probs, theta_hi=hi[:-1])
+    with pytest.raises(ValueError, match="on any bar"):
+        inferer.infer(probs, theta_hi=lo, theta_lo=hi)
