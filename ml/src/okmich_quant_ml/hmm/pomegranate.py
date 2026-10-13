@@ -7,7 +7,7 @@ from typing import Optional, Sequence
 
 from .base_pomegranate import BasePomegranateHMM
 from .distribution import Lambda
-from .util import InferenceMode, DistType
+from .util import InferenceMode, DistType, SelectionCriterion, as_selection_criterion
 
 
 class PomegranateHMM(BasePomegranateHMM):
@@ -33,11 +33,16 @@ class PomegranateHMM(BasePomegranateHMM):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None, n_states_range: Sequence[int] = (2, 3, 4, 5), criterion: str = "aic") -> "PomegranateHMM":
-        """Train model with automatic state selection via AIC or BIC."""
-        _VALID_CRITERIA = {"aic", "bic"}
-        if criterion not in _VALID_CRITERIA:
-            raise ValueError(f"Unknown criterion '{criterion}'. Allowed values: {sorted(_VALID_CRITERIA)}")
+    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None,
+              n_states_range: Sequence[int] = (2, 3, 4, 5), criterion: SelectionCriterion | str = SelectionCriterion.AIC) -> "PomegranateHMM":
+        """Fit every (n_states, covariance type) candidate and return the one with the lowest AIC, BIC or ICL.
+
+        ``criterion`` takes a :class:`SelectionCriterion` or its string value. ICL is BIC plus twice the exact path
+        entropy (:meth:`selection_scores`). With ``lengths``, candidates are scored on the sequences they were fitted
+        on, not on their concatenation.
+        """
+        criterion = as_selection_criterion(criterion)
+        with_entropy = criterion is SelectionCriterion.ICL
 
         best_score, best_inst = np.inf, None
         for k in n_states_range:
@@ -46,30 +51,19 @@ class PomegranateHMM(BasePomegranateHMM):
                                       max_iter=self.max_iter, n_restarts=self.n_restarts,
                                       inference_mode=self.inference_mode, **inst_kwargs)
                 inst.fit(X, lengths)
-                aic, bic = inst.get_aic_bic(X)
-                score = aic if criterion == "aic" else bic
+                score = inst.selection_scores(X, lengths, with_entropy=with_entropy).score(criterion)
                 if score < best_score:
                     best_score, best_inst = score, inst
         return best_inst
 
     def get_aic_bic(self, X: np.ndarray) -> tuple[float, float]:
-        if self._model is None:
-            raise RuntimeError("Model has not been fitted yet.")
+        scores = self.selection_scores(X, with_entropy=False)
+        return scores.aic, scores.bic
 
-        X = X.reshape(-1, 1) if X.ndim == 1 else X
-
-        ll = float(self.log_likelihood(X))
-
-        # Parameter counting
-        n_features = X.shape[1]
-        n_emission_params = self.n_states * (n_features + self._cov_param_count(n_features))
-        n_trans_params = self.n_states * (self.n_states - 1)
-        n_params = (self.n_states - 1) + n_trans_params + n_emission_params
-
-        aic = -2 * ll + 2 * n_params
-        bic = -2 * ll + n_params * np.log(X.shape[0])
-
-        return float(aic), float(bic)
+    def _n_free_params(self, n_features: int) -> int:
+        """Start probabilities, transition rows and the per-state emission parameters."""
+        k = self.n_states
+        return (k - 1) + k * (k - 1) + k * self._component_param_count(n_features)
 
     # ------------------------------------------------------------------
     # Distribution–specific properties

@@ -1,4 +1,8 @@
+from dataclasses import dataclass
 from enum import Enum, StrEnum, auto
+from typing import Optional
+
+import numpy as np
 
 
 # ----------------------------------------------------------
@@ -45,3 +49,64 @@ class InferenceMode(StrEnum):
     SMOOTHING = "smoothing"  # Non-causal
     VITERBI = "viterbi"  # Most likely path - NON-CAUSAL (backward traceback)
     CAUSAL_VITERBI = "causal_viterbi"  # Most likely path SO FAR - causal, no traceback
+
+
+class SelectionCriterion(StrEnum):
+    """
+    Information criterion ``train()`` uses to choose among fitted candidates. Lower is better for all three.
+
+    - AIC: ``-2 log L + 2 nu``.
+    - BIC: ``-2 log L + nu log n``.
+    - ICL: ``BIC + 2 H(z | x)``, the integrated completed likelihood in its BIC form (Biernacki, Celeux & Govaert,
+           2000). ``H(z | x)`` is the entropy of the posterior over the whole state path, so ICL also penalises
+           states the posterior cannot tell apart. It looks for well-separated states, not for the number of
+           density components, which BIC estimates consistently and ICL does not.
+
+    All three compare models fitted to the same X only. None of them can rank feature sets.
+    """
+
+    AIC = "aic"
+    BIC = "bic"
+    ICL = "icl"
+
+
+def as_selection_criterion(value: "SelectionCriterion | str") -> SelectionCriterion:
+    """Coerce a criterion given as an enum member or its string value; an unknown value raises, naming the allowed."""
+    try:
+        return SelectionCriterion(value)
+    except ValueError:
+        allowed = [c.value for c in SelectionCriterion]
+        raise ValueError(f"Unknown criterion '{value}'. Allowed values: {allowed}") from None
+
+
+@dataclass(frozen=True)
+class SelectionScores:
+    """
+    One fitted model's selection scores on one dataset.
+
+    ``path_entropy`` is the exact ``H(z_1:T | x)`` in nats (``BasePomegranateHMM.path_entropy``). It is ``None`` when
+    it was not computed, and ``icl`` then raises.
+    """
+
+    log_likelihood: float
+    n_params: int
+    n_obs: int
+    path_entropy: Optional[float] = None
+
+    @property
+    def aic(self) -> float:
+        return float(-2 * self.log_likelihood + 2 * self.n_params)
+
+    @property
+    def bic(self) -> float:
+        return float(-2 * self.log_likelihood + self.n_params * np.log(self.n_obs))
+
+    @property
+    def icl(self) -> float:
+        if self.path_entropy is None:
+            raise ValueError("ICL needs the path entropy: score with with_entropy=True.")
+        return self.bic + 2 * self.path_entropy
+
+    def score(self, criterion: "SelectionCriterion | str") -> float:
+        """The value of ``criterion`` (lower is better)."""
+        return getattr(self, as_selection_criterion(criterion).value)

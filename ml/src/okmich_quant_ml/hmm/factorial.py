@@ -8,7 +8,7 @@ import numpy as np
 
 from .pomegranate import PomegranateHMM
 from .pomegranate_mm import PomegranateMixtureHMM
-from .util import InferenceMode
+from .util import InferenceMode, SelectionCriterion
 
 
 class FactorialHMM:
@@ -117,10 +117,14 @@ class FactorialHMM:
         lengths: Optional[Sequence[int]] = None,
         feature_assignment: Optional[List[List[int]]] = None,
         n_states_range: Optional[List[Sequence[int]]] = None,
-        criterion: str = "aic",
+        criterion: SelectionCriterion | str = SelectionCriterion.AIC,
     ) -> "FactorialHMM":
         """
         Train with grid search over n_states for each chain.
+
+        Each chain picks its own n_states by ``criterion`` (a :class:`SelectionCriterion` or its string value). The
+        chains are independent, so AIC, BIC and ICL of the factorial model are the sums over the chains, and
+        minimising each chain's minimises the sum.
 
         Examples
         --------
