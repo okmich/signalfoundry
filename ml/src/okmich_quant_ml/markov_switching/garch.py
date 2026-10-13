@@ -138,14 +138,17 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
                 "All EM restarts failed. Try fewer regimes, lower order, or more data."
             )
 
-        params, alpha_fwd, gamma, garch_s2 = best_result
+        # The EM loop's last E-step ran on the parameters *before* its final M-step. Re-run it on the final parameters
+        # so the filtered/smoothed probabilities, GARCH state and log-likelihood all describe the stored model.
+        params = best_result[0]
+        alpha_fwd, gamma, _, best_loglik, garch_s2 = self._e_step(y, params)
         self._params_ = params
         self.transition_matrix_ = params["P"]
         self.filtered_probabilities_ = alpha_fwd          # (n_obs, K)
         self.regime_probabilities_ = gamma                 # (n_obs, K)  smoothed
 
         # Store GARCH state at last observation for forecasting
-        self._last_garch_sigma2_ = garch_s2[-1]           # (K,)
+        self._last_garch_sigma2_ = garch_s2[-1].copy()    # (K,)
         self._last_ar_residuals_ = np.array([
             self._compute_ar_residuals(y, params["intercepts"][k], params["ar_coeffs"][k])[-1]
             for k in range(self.n_regimes)
@@ -392,16 +395,67 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
 
     # ─── Inference ──────────────────────────────────────────────────────────────
 
-    def predict_regime(self, causal: bool = False) -> np.ndarray:
-        """Most likely regime at each time step (length T − order)."""
+    def predict_regime(self, causal: bool = True) -> np.ndarray:
+        """Most likely regime at each time step (length T − order). ``causal=False`` → smoothed (look-ahead)."""
         self._validate_fitted()
         probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
         return np.argmax(probs, axis=1)
 
-    def predict_regime_proba(self, causal: bool = False) -> np.ndarray:
-        """Regime probabilities, shape (T − order, n_regimes)."""
+    def predict_regime_proba(self, causal: bool = True) -> np.ndarray:
+        """Regime probabilities, shape (T − order, n_regimes). ``causal=False`` → smoothed (look-ahead)."""
         self._validate_fitted()
         return self.filtered_probabilities_ if causal else self.regime_probabilities_
+
+    # ─── Online Learning L1: streaming filter ───────────────────────────────────
+
+    def update(self, y_new: float | np.ndarray) -> MarkovSwitchingGARCH:
+        """
+        Filter one or more new observations causally without refitting.
+
+        Each regime's GARCH recursion and AR residual are advanced by one bar and the forward probabilities updated
+        with the same arithmetic as the E-step, so streaming a series bar by bar reproduces the filter of a batch
+        E-step over the extended series. Parameters stay at their fit-time values.
+
+        Parameters
+        ----------
+        y_new : float or array-like
+            New observation(s) in arrival order.
+
+        Returns
+        -------
+        self
+        """
+        self._validate_fitted()
+        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        prm = self._params_
+        P = np.asarray(self.transition_matrix_, dtype=np.float64)
+        K = self.n_regimes
+        LOG_2PI = 1.8378770664093455
+
+        for y in observations:
+            log_liks = np.empty(K)
+            sigma2_new = np.empty(K)
+            resid_new = np.empty(K)
+            for k in range(K):
+                omega, alpha, beta = prm["omega"][k], prm["alpha"][k], prm["beta"][k]
+                s2 = omega + alpha * self._last_ar_residuals_[k] ** 2 + beta * self._last_garch_sigma2_[k]
+                if s2 < 1e-300:  # same underflow guard as _garch_filter_kernel
+                    s2 = omega / (1.0 - (alpha + beta))
+                ar_mean = prm["intercepts"][k]
+                for j in range(self.order):
+                    ar_mean += prm["ar_coeffs"][k][j] * self._history_buffer_[-1 - j]
+                eps = y - ar_mean
+                sigma2_new[k] = s2
+                resid_new[k] = eps
+                log_liks[k] = -0.5 * (LOG_2PI + np.log(s2) + eps ** 2 / s2)
+
+            self._last_forward_alpha_ = self._forward_update(self._last_forward_alpha_, P, log_liks)
+            self._last_garch_sigma2_ = sigma2_new
+            self._last_ar_residuals_ = resid_new
+            self._history_buffer_ = np.append(self._history_buffer_[1:], y)
+            self._n_updates_ += 1
+
+        return self
 
     # ─── Forecasting ────────────────────────────────────────────────────────────
 

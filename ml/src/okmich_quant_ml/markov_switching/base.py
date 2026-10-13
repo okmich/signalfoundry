@@ -15,9 +15,11 @@ class BaseMarkovSwitching:
     Abstract base class for Markov-switching time series models.
 
     Provides shared infrastructure: fitted-state tracking, transition-matrix
-    access, regime-probability propagation, AIC/BIC retrieval, and
-    serialization.  Concrete subclasses must implement ``fit()``,
+    access, regime-probability propagation, the streaming belief state
+    (``current_regime_proba()`` / ``current_regime()``), AIC/BIC retrieval, and
+    serialization.  Concrete subclasses must implement ``fit()``, ``update()``,
     ``predict_regime()``, ``predict_regime_proba()``, and ``forecast()``.
+    ``predict_regime*`` default to ``causal=True`` (filtered, no look-ahead).
 
     Parameters
     ----------
@@ -93,7 +95,8 @@ class BaseMarkovSwitching:
         steps : int
         causal : bool, default=True
             True  → start from filtered probability at T (causal).
-            False → start from smoothed probability (not valid for live use).
+            False → start from smoothed probability at T. At the last observed bar the two coincide, so this only
+            matters for custom subclasses whose sequences differ there.
 
         Returns
         -------
@@ -101,14 +104,53 @@ class BaseMarkovSwitching:
             P(s_{T+h} = k | y_{1:T}) for h = 1, …, steps
         """
         self._validate_fitted()
-        if causal and getattr(self, "_n_updates_", 0) > 0:
-            # Streaming updates have advanced the belief state past training data
+        if getattr(self, "_n_updates_", 0) > 0:
+            # Streaming updates have advanced the belief state past the training data; at the newest bar the
+            # filtered and smoothed beliefs are the same object, so both modes start here.
             initial = np.asarray(self._last_forward_alpha_, dtype=np.float64)
         else:
             src = self.filtered_probabilities_ if causal else self.regime_probabilities_
             initial = np.asarray(src[-1], dtype=np.float64)
-        P = np.asarray(self.transition_matrix_, dtype=np.float64)
+        P = np.ascontiguousarray(self.transition_matrix_, dtype=np.float64)
         return _propagate_regime_probs(P, initial, steps)
+
+    # ─── Streaming belief state ─────────────────────────────────────────────────
+
+    def current_regime_proba(self) -> np.ndarray:
+        """
+        Return filtered regime probabilities at the most recent bar.
+
+        Returns the training-time filtered probability if no ``update()``
+        calls have been made, or the streaming belief state otherwise.
+
+        Returns
+        -------
+        proba : np.ndarray, shape (n_regimes,)
+        """
+        self._validate_fitted()
+        return self._last_forward_alpha_.copy()
+
+    def current_regime(self) -> int:
+        """
+        Return the most likely regime at the most recent bar.
+
+        Returns
+        -------
+        regime : int
+        """
+        self._validate_fitted()
+        return int(np.argmax(self._last_forward_alpha_))
+
+    @staticmethod
+    def _forward_update(alpha_prev: np.ndarray, transition_matrix: np.ndarray, log_liks: np.ndarray) -> np.ndarray:
+        """One scaled forward step: α_t ∝ (α_{t-1} P) · exp(log p(y_t | s_t)), same arithmetic as the EM E-steps."""
+        K = len(alpha_prev)
+        liks = np.exp(log_liks - log_liks.max())
+        alpha = (alpha_prev @ transition_matrix) * liks
+        c = alpha.sum()
+        if c > 1e-300:
+            return alpha / c
+        return np.full(K, 1.0 / K)
 
     # ─── Persistence ────────────────────────────────────────────────────────────
 

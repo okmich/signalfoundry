@@ -155,7 +155,10 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
                 "All EM restarts failed. Try fewer regimes, lower order, or more data."
             )
 
-        params, alpha_fwd, gamma = best_result
+        # If EM stopped on maxiter, its last E-step ran on the parameters before the final M-step. Re-run it on the
+        # final parameters so the stored probabilities and log-likelihood describe the stored model.
+        params = best_result[0]
+        alpha_fwd, gamma, _, best_loglik = self._e_step(X=X, Y_eff=Y_eff, params=params)
         self._params_ = params
         self.transition_matrix_ = params["P"]
         self.filtered_probabilities_ = alpha_fwd
@@ -449,16 +452,54 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
     # Inference
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def predict_regime(self, causal: bool = False) -> np.ndarray:
-        """Most likely regime at each time step (length T − order)."""
+    def predict_regime(self, causal: bool = True) -> np.ndarray:
+        """Most likely regime at each time step (length T − order). ``causal=False`` → smoothed (look-ahead)."""
         self._validate_fitted()
         probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
         return np.argmax(probs, axis=1)
 
-    def predict_regime_proba(self, causal: bool = False) -> np.ndarray:
-        """Regime probabilities, shape (T − order, n_regimes)."""
+    def predict_regime_proba(self, causal: bool = True) -> np.ndarray:
+        """Regime probabilities, shape (T − order, n_regimes). ``causal=False`` → smoothed (look-ahead)."""
         self._validate_fitted()
         return self.filtered_probabilities_ if causal else self.regime_probabilities_
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Online Learning L1: streaming filter
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def update(self, Y_new: np.ndarray) -> MarkovSwitchingVAR:
+        """
+        Filter one or more new observation rows causally without refitting.
+
+        Uses the E-step's own per-regime Gaussian log-likelihood and forward arithmetic, so streaming rows one by one
+        reproduces the filter of a batch E-step over the extended series. Parameters stay at their fit-time values.
+
+        Parameters
+        ----------
+        Y_new : np.ndarray, shape (n_assets,) or (m, n_assets)
+            New observation row(s) in arrival order.
+
+        Returns
+        -------
+        self
+        """
+        self._validate_fitted()
+        rows = np.atleast_2d(np.asarray(Y_new, dtype=np.float64))
+        if rows.shape[1] != self.n_assets_:
+            raise ValueError(f"Y_new must have {self.n_assets_} columns, got {rows.shape[1]}")
+        P = np.asarray(self.transition_matrix_, dtype=np.float64)
+        B = [self._pack_B(self._params_["intercepts"][k], self._params_["ar_coeffs"][k]) for k in range(self.n_regimes)]
+
+        for row in rows:
+            # Design row matches _build_design_matrix: [1, Y_{t-1}', Y_{t-2}', …, Y_{t-p}']
+            x = np.concatenate(([1.0], self._history_buffer_[::-1].reshape(-1)))[None, :]
+            log_liks = np.array([self._mvn_loglik(row[None, :], x, B[k], self._params_["Sigma"][k])[0]
+                                 for k in range(self.n_regimes)])
+            self._last_forward_alpha_ = self._forward_update(self._last_forward_alpha_, P, log_liks)
+            self._history_buffer_ = np.vstack((self._history_buffer_[1:], row))
+            self._n_updates_ += 1
+
+        return self
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Forecasting
