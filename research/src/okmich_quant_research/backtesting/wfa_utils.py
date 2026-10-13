@@ -11,7 +11,7 @@ from joblib import Parallel, delayed
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 
 from okmich_quant_labelling.utils.label_eval_util import label_path_structure_statistics
-from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM
+from okmich_quant_ml.hmm import PomegranateHMM, PomegranateMixtureHMM, SelectionCriterion
 from okmich_quant_ml.hmm.pomegranate import DistType
 from okmich_quant_research.backtesting.cluster_comparison_pipeline import (
     HMM_ALGOS,
@@ -174,7 +174,7 @@ def _train_single_hmm_config(
     Args:
         config: HMM configuration dict
         train_features: Training features (2D numpy array)
-        criterion: 'aic', 'bic', 'silhouette', or 'combined'
+        criterion: 'aic', 'bic', 'icl', 'silhouette', or 'combined'
         hmm_params: HMM parameters dict
 
     Returns:
@@ -191,8 +191,12 @@ def _train_single_hmm_config(
         model = _create_hmm_model_static(config, hmm_params)
         model.fit(train_features)
 
-        # Calculate AIC/BIC
-        aic, bic = model.get_aic_bic(train_features)
+        # Calculate AIC/BIC, and ICL (BIC + 2 x exact path entropy) when it is the criterion
+        if criterion == SelectionCriterion.ICL:
+            scores = model.selection_scores(train_features)
+            aic, bic, icl = scores.aic, scores.bic, scores.icl
+        else:
+            aic, bic = model.get_aic_bic(train_features)
 
         # Get state predictions for clustering metrics
         state_predictions = model.predict(train_features)
@@ -216,6 +220,8 @@ def _train_single_hmm_config(
             score = aic
         elif criterion == "bic":
             score = bic
+        elif criterion == SelectionCriterion.ICL:
+            score = icl
         elif criterion == "silhouette":
             score = -silhouette  # Negate so lower is better (consistent with AIC/BIC)
         elif criterion == "combined":

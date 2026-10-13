@@ -11,7 +11,7 @@ import torch
 from pomegranate.hmm import DenseHMM
 from scipy.special import logsumexp
 
-from .util import DistType, InferenceMode
+from .util import DistType, InferenceMode, SelectionScores
 
 
 class BasePomegranateHMM(ABC):
@@ -512,20 +512,30 @@ class BasePomegranateHMM(ABC):
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
         log_B = self._compute_log_emissions(X)
-
-        def _to_log_numpy(param):
-            arr = param
-            if hasattr(arr, "detach"):
-                arr = arr.detach().cpu().numpy()
-            arr = np.asarray(arr, dtype=np.float64)
-            if np.all(arr >= 0):
-                arr = np.log(np.maximum(arr, 1e-300))
-            return arr
-
-        log_A = _to_log_numpy(self._model.edges)
-        log_pi = _to_log_numpy(self._model.starts)
-
+        log_A = self._to_log_numpy(self._model.edges)
+        log_pi = self._to_log_numpy(self._model.starts)
         return log_pi, log_A, log_B
+
+    @staticmethod
+    def _to_log_numpy(param) -> np.ndarray:
+        """A pomegranate start / edge / end parameter as a float64 log array (pomegranate stores them as logs)."""
+        arr = param
+        if hasattr(arr, "detach"):
+            arr = arr.detach().cpu().numpy()
+        arr = np.asarray(arr, dtype=np.float64)
+        if np.all(arr >= 0):
+            arr = np.log(np.maximum(arr, 1e-300))
+        return arr
+
+    def _log_end_probs(self) -> np.ndarray:
+        """Log end probabilities, shape ``(K,)``. Pomegranate learns them, and its likelihood and smoother use them.
+
+        A model without them is open-ended (``log_end = 0``).
+        """
+        ends = getattr(self._model, "ends", None)
+        if ends is None:
+            return np.zeros(self.n_states, dtype=np.float64)
+        return self._to_log_numpy(ends)
 
     @staticmethod
     def _forward_pass(log_pi: np.ndarray, log_A: np.ndarray, log_B: np.ndarray) -> np.ndarray:
@@ -546,6 +556,21 @@ class BasePomegranateHMM(ABC):
         for t in range(1, T):
             log_alpha[t] = np.logaddexp.reduce(log_alpha[t - 1, :, np.newaxis] + log_A, axis=0) + log_B[t]
         return log_alpha
+
+    @staticmethod
+    def _backward_pass(log_A: np.ndarray, log_B: np.ndarray, log_end: np.ndarray) -> np.ndarray:
+        """HMM backward-algorithm log-beta, shape ``(T, K)``: ``log_beta[t, i] = log P(o_{t+1:T}, end | z_t = i)``.
+
+        Initialises ``log_beta[T-1] = log_end`` and recurses
+        ``log_beta[t] = logaddexp_reduce(log_A + (log_B[t+1] + log_beta[t+1])[None, :], axis=1)``, the mirror of
+        :meth:`_forward_pass`. Pass ``log_end = 0`` for an open-ended sequence.
+        """
+        T, K = log_B.shape
+        log_beta = np.empty((T, K), dtype=np.float64)
+        log_beta[-1] = log_end
+        for t in range(T - 2, -1, -1):
+            log_beta[t] = np.logaddexp.reduce(log_A + (log_B[t + 1] + log_beta[t + 1])[np.newaxis, :], axis=1)
+        return log_beta
 
     @staticmethod
     def _max_product_forward_pass(log_pi: np.ndarray, log_A: np.ndarray, log_B: np.ndarray) -> np.ndarray:
@@ -1044,6 +1069,101 @@ class BasePomegranateHMM(ABC):
                 lp = lp.detach().cpu().numpy()
             log_emit[:, j] = np.asarray(lp, dtype=np.float64)
         return log_emit
+
+    # ------------------------------------------------------------------
+    # Model selection: AIC, BIC, ICL
+    # ------------------------------------------------------------------
+    _ENTROPY_CHUNK_BARS: int = 65_536  # bars per vectorised block of the path-entropy sum (bounds memory at T*K*K)
+
+    def _component_param_count(self, n_features: int) -> int:
+        """Free parameters of one emission density: one state's, or one mixture component's.
+
+        - NORMAL, LOGNORMAL, STUDENTT: the means plus the covariance (:meth:`_cov_param_count`). The StudentT
+          ``dofs`` is a fixed buffer in pomegranate, never learned, so it is not counted.
+        - GAMMA: shapes and rates, ``2 d``.
+        - LAMDA: ``mu``, ``sigma`` and ``lambda_``, ``3 d``.
+        - CATEGORICAL: ``n_categories - 1`` free probabilities per feature.
+        - EXPONENTIAL, POISSON, BERNOULLI: one parameter per feature.
+        """
+        match self.distribution_type:
+            case DistType.NORMAL | DistType.LOGNORMAL | DistType.STUDENTT:
+                return n_features + self._cov_param_count(n_features)
+            case DistType.GAMMA:
+                return 2 * n_features
+            case DistType.LAMDA:
+                return 3 * n_features
+            case DistType.CATEGORICAL:
+                return (int(self.dist_kwargs.get("n_categories", 3)) - 1) * n_features
+            case _:
+                return n_features
+
+    def _n_free_params(self, n_features: int) -> int:
+        """Total free parameters of the fitted model, the ``nu`` of AIC, BIC and ICL. Implemented by subclasses."""
+        raise NotImplementedError(f"{type(self).__name__} does not define its free-parameter count.")
+
+    def selection_scores(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None, *,
+                         with_entropy: bool = True) -> SelectionScores:
+        """Log-likelihood, free-parameter count and exact path entropy of the fitted model on X.
+
+        The result gives AIC, BIC and ICL from one pass (``.aic``, ``.bic``, ``.icl``, ``.score(criterion)``).
+
+        With ``lengths``, X is scored as the separate sequences it was fitted as: the log-likelihood and the entropy
+        are sums over the sequences, and ``n`` is the total number of bars. ``with_entropy=False`` skips the
+        forward-backward pass the entropy needs, and ICL is then unavailable.
+        """
+        if self._model is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        X = self._preprocess_input(X)
+        X_list = self._split_sequences(X, lengths)
+        # one sequence per call: pomegranate batches only equal-length sequences
+        ll = float(sum(self._fitted_log_prob(self._model, [x]) for x in X_list))
+        entropy =float(sum(self._path_entropy_one(x) for x in X_list)) if with_entropy else None
+        return SelectionScores(log_likelihood=ll, n_params=self._n_free_params(X.shape[1]), n_obs=X.shape[0],
+                               path_entropy=entropy)
+
+    def path_entropy(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None) -> float:
+        """Exact entropy of the posterior over state paths, ``H(z_1:T | x)``, in nats: the entropy term of ICL.
+
+        It is **not** the sum of the per-bar entropies of the smoothed marginals, ``sum_t H(z_t | x)``. That sum is
+        an upper bound (subadditivity). A switch whose bar is uncertain over a window of ``w`` bars adds about
+        ``log w`` nats to the path entropy, but up to about ``w * log 2`` to the per-bar sum.
+
+        The posterior over paths is itself a Markov chain, so
+
+            H = H(z_1 | x) + sum_t sum_i gamma_{t-1}(i) * H(z_t | z_{t-1} = i, x),
+            p(z_t = j | z_{t-1} = i, x) = A_ij * b_j(x_t) * beta_t(j) / beta_{t-1}(i),
+
+        from one forward-backward pass in float64. The learned end probabilities start the backward pass, as they do
+        in pomegranate's likelihood and smoother. With ``lengths`` the result is the sum over the sequences.
+        """
+        if self._model is None:
+            raise RuntimeError("Model has not been fitted yet.")
+        X = self._preprocess_input(X)
+        return float(sum(self._path_entropy_one(x) for x in self._split_sequences(X, lengths)))
+
+    def _path_entropy_one(self, X: np.ndarray) -> float:
+        """:meth:`path_entropy` of one sequence (X already preprocessed)."""
+        log_pi, log_A, log_B = self._extract_hmm_parameters(X)
+        log_end = self._log_end_probs()
+        log_alpha = self._forward_pass(log_pi, log_A, log_B)
+        log_beta = self._backward_pass(log_A, log_B, log_end)
+        log_z = logsumexp(log_alpha[-1] + log_end)
+        T = log_B.shape[0]
+        # 0 * log 0 = 0 throughout. Forbidden transitions (log_A = -inf) and dead states (log_beta = -inf) give
+        # inf / nan only in cells the masks drop.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            gamma_0 = np.exp(log_alpha[0] + log_beta[0] - log_z)
+            entropy = -float(np.sum(np.where(gamma_0 > 0, gamma_0 * np.log(np.where(gamma_0 > 0, gamma_0, 1.0)), 0.0)))
+            for start in range(1, T, self._ENTROPY_CHUNK_BARS):
+                stop = min(start + self._ENTROPY_CHUNK_BARS, T)
+                # log p(z_t = j | z_{t-1} = i, x), shape (n, K, K)
+                log_q = (log_A[np.newaxis] + (log_B[start:stop] + log_beta[start:stop])[:, np.newaxis, :]
+                         - log_beta[start - 1:stop - 1][:, :, np.newaxis])
+                q = np.exp(log_q)
+                cond_entropy = -np.sum(np.where(q > 0, q * log_q, 0.0), axis=2)
+                gamma_prev = np.exp(log_alpha[start - 1:stop - 1] + log_beta[start - 1:stop - 1] - log_z)
+                entropy += float(np.sum(np.where(gamma_prev > 0, gamma_prev * cond_entropy, 0.0)))
+        return entropy
 
     # ------------------------------------------------------------------
     # Utility

@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from okmich_quant_ml.hmm import InferenceMode
-from okmich_quant_ml.posterior_inference import top_prob
+from okmich_quant_ml.posterior_inference import entropy, top_prob
 
 from ..registry import (Axis, FeatureEntry, FeatureRegistry, PRICE_PATH_AXES, Parity, is_eligible,
                         stamp_for)
@@ -422,6 +422,11 @@ class HmmFeatureScreener:
 
             tp = top_prob(gamma)
             honesty = float((tp > self.config.honesty_threshold).mean())
+            try:
+                filtered_entropy, smoothed_entropy, hindsight_gap = self._hindsight_entropy(model, X, gamma)
+            except Exception as exc:  # a reported-only diagnostic never fails the subset
+                filtered_entropy = smoothed_entropy = hindsight_gap = float("nan")
+                per_subset_warnings.append(f"hindsight_entropy_error: {type(exc).__name__}: {exc}")
             balance_ratio = self._state_balance_ratio(state_labels, self.config.n_states)
             axis_eval, evaluator_warnings = self._call_evaluator(gamma, state_labels, joined)
             per_subset_warnings += evaluator_warnings
@@ -444,6 +449,9 @@ class HmmFeatureScreener:
                 raw_details=raw_details,
                 elapsed_sec=float(time.time() - t0),
                 error=None,
+                filtered_entropy=filtered_entropy,
+                smoothed_entropy=smoothed_entropy,
+                hindsight_gap=hindsight_gap,
             )
         except Exception as exc:  # capture per-subset failure, continue
             per_subset_warnings.append(f"evaluation_error: {type(exc).__name__}: {exc}")
@@ -462,6 +470,24 @@ class HmmFeatureScreener:
                 elapsed_sec=float(time.time() - t0),
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    @staticmethod
+    def _hindsight_entropy(model, X: np.ndarray, gamma_filtered: np.ndarray) -> tuple[float, float, float]:
+        """(filtered, smoothed, gap): mean per-bar posterior entropy over log K, and filtered minus smoothed.
+
+        Reported only. It is in-sample, on the bars the model was fitted to, like every other diagnostic here. The
+        gap is how much of the label's certainty depends on bars after it: a subset whose smoothed labels look clean
+        but whose filtered ones do not will not deliver its hindsight quality to a live gate.
+        """
+        log_k = np.log(gamma_filtered.shape[1])
+        model.inference_mode = InferenceMode.SMOOTHING
+        try:
+            gamma_smoothed = model.predict_proba(X)
+        finally:
+            model.inference_mode = InferenceMode.FILTERING
+        filtered = float(entropy(gamma_filtered).mean() / log_k)
+        smoothed = float(entropy(np.asarray(gamma_smoothed, dtype=np.float64)).mean() / log_k)
+        return filtered, smoothed, filtered - smoothed
 
     def _call_evaluator(self, gamma: np.ndarray, state_labels: np.ndarray,
                         evaluator_df: pd.DataFrame) -> tuple[AxisEvaluation, list[str]]:
@@ -698,6 +724,8 @@ class HmmFeatureScreener:
             axis_separation_range=ev.axis_separation_range,
             warnings=ev.warnings, raw_details=ev.raw_details,
             elapsed_sec=ev.elapsed_sec, error=ev.error,
+            filtered_entropy=ev.filtered_entropy, smoothed_entropy=ev.smoothed_entropy,
+            hindsight_gap=ev.hindsight_gap,
         )
 
     @staticmethod
@@ -718,6 +746,9 @@ class HmmFeatureScreener:
                 "secondary_robustness": ev.secondary_robustness,
                 "secondary_label": ev.secondary_label,
                 "honesty": ev.honesty,
+                "filtered_entropy": ev.filtered_entropy,
+                "smoothed_entropy": ev.smoothed_entropy,
+                "hindsight_gap": ev.hindsight_gap,
                 "state_balance_ratio": ev.state_balance_ratio,
                 "pareto_status": ev.pareto_status.value,
                 "warnings": "; ".join(ev.warnings),

@@ -153,6 +153,14 @@ class SubsetEvaluation:
     raw_details: dict[str, Any] = field(default_factory=dict)
     elapsed_sec: float = 0.0
     error: str | None = None  # populated if the fit / evaluation raised
+    filtered_entropy: float = float("nan")
+    """Mean per-bar entropy of the filtered posterior over log K, in [0, 1]. Reported only: no gate or ranking reads
+    it, and lower is NOT better (a near-0 value is the concentration the honesty TRAP flags)."""
+    smoothed_entropy: float = float("nan")
+    """The same for the smoothed (hindsight) posterior, on the same bars."""
+    hindsight_gap: float = float("nan")
+    """``filtered_entropy - smoothed_entropy``: how much of the label's certainty arrives only with FUTURE bars, which
+    a live gate never has. Honesty cannot see this. Reported only."""
 
 
 @dataclass

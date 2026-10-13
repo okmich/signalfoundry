@@ -10,6 +10,8 @@ Uses small synthetic data so the test runs in a few seconds, and exercises:
 """
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -71,6 +73,40 @@ def test_screener_end_to_end_direction_axis_returns_populated_result() -> None:
     # Pareto statuses must be one of the four values.
     valid_statuses = {ParetoStatus.ASYMMETRY_CANDIDATE, ParetoStatus.TRAP, ParetoStatus.FRAGILE, ParetoStatus.DOMINATED}
     assert all(e.pareto_status in valid_statuses for e in result.evaluations)
+
+
+@pytest.mark.slow
+def test_screener_reports_hindsight_entropy_on_every_fitted_subset() -> None:
+    """Filtered and smoothed posterior entropy (over log K) and their gap ride along on each fitted row."""
+    raw = _make_synthetic_ohlc(T=2000)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_pmgnt", n_states=2, data_size=2000, horizons=(12, 60),
+                               random_state=42)
+    screener = HmmFeatureScreener(config, raw, _feature_engineering)
+    result = screener.screen(["log_rets_smooth_24", "log_rets_smooth_48"], strategy=ScreenStrategy.ABLATION)
+
+    fitted = [e for e in result.evaluations if e.error is None]
+    assert fitted
+    for e in fitted:
+        assert 0.0 <= e.filtered_entropy <= 1.0
+        assert 0.0 <= e.smoothed_entropy <= 1.0
+        assert e.hindsight_gap == pytest.approx(e.filtered_entropy - e.smoothed_entropy)
+    for col in ("filtered_entropy", "smoothed_entropy", "hindsight_gap"):
+        assert result.results_[col].notna().sum() == len(fitted)
+
+
+def test_screener_classification_ignores_the_hindsight_entropy() -> None:
+    """Reported only: the entropy columns change no Pareto status and survive the status rebuild."""
+    raw = _make_synthetic_ohlc(T=200)
+    config = HmmScreenerConfig(axis=Axis.DIRECTIONAL, algo="hmm_lambda", n_states=2, data_size=200)
+    screener = HmmFeatureScreener(config, raw, _feature_engineering)
+    evs = [_make_subset_eval(features=("a",), axis_sep=2.0, honesty=0.05),
+           _make_subset_eval(features=("b",), axis_sep=1.0, honesty=0.02),
+           _make_subset_eval(features=("c",), axis_sep=1.5, honesty=0.6)]
+    with_entropy = [dataclasses.replace(e, filtered_entropy=f, smoothed_entropy=s, hindsight_gap=f - s)
+                    for e, (f, s) in zip(evs, ((0.9, 0.1), (0.05, 0.0), (0.5, 0.5)))]
+    assert screener._classify(with_entropy) == screener._classify(evs)
+    rebuilt = screener._with_status(with_entropy[0], ParetoStatus.TRAP)
+    assert (rebuilt.filtered_entropy, rebuilt.smoothed_entropy, rebuilt.hindsight_gap) == (0.9, 0.1, 0.9 - 0.1)
 
 
 def test_screener_rejects_missing_close_column_at_construction() -> None:

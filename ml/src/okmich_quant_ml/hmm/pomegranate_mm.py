@@ -12,7 +12,7 @@ from typing import Optional, Sequence
 
 from .base_pomegranate import BasePomegranateHMM
 from .distribution import Lambda
-from .util import DistType, InferenceMode
+from .util import DistType, InferenceMode, SelectionCriterion, as_selection_criterion
 
 
 class PomegranateMixtureHMM(BasePomegranateHMM):
@@ -49,11 +49,16 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None, n_states_range: Sequence[int] = (2, 3, 4, 5), n_criteria_range: Sequence[int] = (2, 3, 4, 5), criterion: str = "aic") -> "PomegranateMixtureHMM":
-        """Pick the best configuration using AIC or BIC."""
-        _VALID_CRITERIA = {"aic", "bic"}
-        if criterion not in _VALID_CRITERIA:
-            raise ValueError(f"Unknown criterion '{criterion}'. Allowed values: {sorted(_VALID_CRITERIA)}")
+    def train(self, X: np.ndarray, lengths: Optional[Sequence[int]] = None,
+              n_states_range: Sequence[int] = (2, 3, 4, 5), n_criteria_range: Sequence[int] = (2, 3, 4, 5),
+              criterion: SelectionCriterion | str = SelectionCriterion.AIC) -> "PomegranateMixtureHMM":
+        """Pick the (n_components, n_states, covariance type) with the lowest AIC, BIC or ICL.
+
+        The ICL entropy is over the state path only: mixture components are part of each state's emission density,
+        not labels. With ``lengths``, candidates are scored on the sequences they were fitted on.
+        """
+        criterion = as_selection_criterion(criterion)
+        with_entropy = criterion is SelectionCriterion.ICL
 
         best_score, best_inst = np.inf, None
         for j in n_criteria_range:
@@ -64,40 +69,24 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
                                           n_restarts=self.n_restarts, inference_mode=self.inference_mode,
                                           **inst_kwargs)
                     inst.fit(X, lengths)
-                    aic, bic = inst.get_aic_bic(X)
-                    score = aic if criterion == "aic" else bic
+                    score = inst.selection_scores(X, lengths, with_entropy=with_entropy).score(criterion)
                     if score < best_score:
                         best_score, best_inst = score, inst
         return best_inst
 
     def get_aic_bic(self, X: np.ndarray) -> tuple[float, float]:
         """Calculate AIC and BIC scores for the fitted model."""
-        if self._model is None:
-            raise RuntimeError("Model has not been fitted yet.")
+        scores = self.selection_scores(X, with_entropy=False)
+        return scores.aic, scores.bic
 
-        X = X.reshape(-1, 1) if X.ndim == 1 else X
+    def _n_free_params(self, n_features: int) -> int:
+        """Start probabilities, transition rows, and per state the component parameters plus the mixture weights.
 
-        ll = float(self.log_likelihood(X))
-
-        # Emission parameter counting for mixture model
-        n_features = X.shape[1]
-        cov_params = self._cov_param_count(n_features)
-        params_per_state = (
-            self.n_components * n_features  # means
-            + self.n_components * cov_params  # covariances (structure-aware)
-            + (self.n_components - 1)  # mixture weights
-        )
-        if self.distribution_type == DistType.STUDENTT:
-            params_per_state += self.n_components  # dofs per component
-
-        n_emission_params = self.n_states * params_per_state
-        n_trans_params = self.n_states * (self.n_states - 1)
-        n_params = (self.n_states - 1) + n_trans_params + n_emission_params
-
-        aic = -2 * ll + 2 * n_params
-        bic = -2 * ll + n_params * np.log(X.shape[0])
-
-        return float(aic), float(bic)
+        A StudentT component's ``dofs`` is fixed, not learned, so it is not counted (:meth:`_component_param_count`).
+        """
+        k, c = self.n_states, self.n_components
+        per_state = c * self._component_param_count(n_features) + (c - 1)
+        return (k - 1) + k * (k - 1) + k * per_state
 
     # ------------------------------------------------------------------
     # Interpretation & Visualization Methods

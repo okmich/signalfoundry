@@ -8,7 +8,7 @@ from scipy import stats
 
 def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", return_col: str = "returns",
                                  method: str = "conservative", min_samples: int = 30, confidence_level: float = 0.95,
-                                 mapping_dict: Dict[float, str] = None, min_sharpe: float = 0.3,
+                                 mapping_dict: Optional[Dict[Any, int]] = None, min_sharpe: float = 0.3,
                                  cost_threshold: Optional[float] = None,
                                  return_diagnostics: bool = False, **kwargs, ) -> Dict[Any, int] | Tuple[Dict[Any, int], pd.DataFrame]:
     """
@@ -42,6 +42,10 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         States with fewer samples → labeled as 0 (no trade)
     confidence_level : float, default=0.95
         Confidence level for statistical tests (95% = alpha of 0.05)
+    mapping_dict : dict, optional
+        A frozen {state: direction} map, e.g. one fitted on a training block. A copy is returned as-is: ``method``
+        and the distinct-sign fallback are skipped, because ``df`` is then usually the evaluation block and
+        re-ranking states on it would be look-ahead. States in ``df`` that the map does not cover get 0, with a warning.
     min_sharpe : float, default=0.3
         Minimum Sharpe ratio to consider a state tradable
         (Sharpe < min_sharpe → labeled as 0)
@@ -193,8 +197,11 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
 
     alpha = 1 - confidence_level
 
-    if mapping_dict:
-        mapping = mapping_dict
+    frozen = bool(mapping_dict)
+    if frozen:
+        mapping = dict(mapping_dict)
+        stats_df["direction"] = stats_df["state"].map(mapping).fillna(0).astype(int)
+        stats_df["reason"] = "Supplied mapping_dict"
     elif method == "conservative":
         # Multi-criteria: ALL must pass for non-zero label
         # 1. Statistical significance (p < alpha)
@@ -316,11 +323,12 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
     stats_df["fallback"] = False
 
     # ========== GUARANTEE: n states → min(n, 3) distinct signs ==========
-    # If the statistical method didn't produce enough distinct signs, use ranking fallback
+    # If the statistical method didn't produce enough distinct signs, use ranking fallback. Never on a supplied map:
+    # that would re-rank its states on ``df``, which is usually the evaluation block.
     valid_states = stats_df[~stats_df["insufficient_data"]]
     n_valid_states = len(valid_states)
 
-    if n_valid_states > 0:
+    if n_valid_states > 0 and not frozen:
         # Count distinct signs assigned (excluding states with insufficient data)
         assigned_signs = set()
         for idx, row in valid_states.iterrows():
