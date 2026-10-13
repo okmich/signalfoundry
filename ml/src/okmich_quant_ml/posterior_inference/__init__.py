@@ -1,7 +1,8 @@
 """Posterior-first probabilistic inference abstractions.
 
 All temporal primitives in this package (``step_kl``, ``posterior_delta``, ``rolling_flip_rate``, ``rolling_max_prob_std``,
-``rolling_entropy_std``, ``dwell_length``, and the drift functions in ``monitoring``) plus the rolling transformers
+``rolling_entropy_std``, ``dwell_length``, the regime-switch features ``switch_indicator``, ``posterior_shift``,
+``last_transition``, ``entry_confidence``, ``typical_dwell``, ``dwell_ratio``, and the drift functions in ``monitoring``) plus the rolling transformers
 (``EmaPosteriorTransformer``, ``RollingMeanPosteriorTransformer``) assume the input is a **single contiguous time series**.
 They do not detect segment boundaries: concatenating multiple symbols, sessions, or training periods will leak state across
 the boundary (deltas, rolling means, dwell counts, flip-rate moving averages will all span the seam). Callers spanning
@@ -20,8 +21,9 @@ from .adaptive_lag import AdaptiveLagResult, AdaptiveLagInferer, StabilityCriter
     lag_commitment_audit
 from .diagnostics import CalibrationRecommendation, CalibrationReport, DynamicsReport, SmoothingRecommendation,\
     posterior_calibration_report, recommend_calibration, recommend_smoothing, summarize_posterior_dynamics
-from .features import dwell_length, entropy, margin, posterior_delta, rolling_entropy_std, rolling_flip_rate,\
-    rolling_max_prob_std, step_kl, top_prob, validate_posterior_matrix
+from .features import DwellStatistic, dwell_length, dwell_ratio, entropy, entry_confidence, last_transition, margin,\
+    posterior_delta, posterior_shift, rolling_entropy_std, rolling_flip_rate, rolling_max_prob_std, step_kl,\
+    switch_indicator, top_prob, typical_dwell, validate_posterior_matrix
 from .inferers import AbstainMode, ArgmaxInferer, CompositeGateInferer, ConfidenceHysteresisInferer,\
     ConfidenceWeightedModeInferer, DeadbandHysteresisInferer, EntropyGateInferer, MarginGateInferer,\
     StabilityGateInferer, ViterbiInferer
@@ -71,6 +73,13 @@ __all__ = [
     "rolling_max_prob_std",
     "rolling_entropy_std",
     "dwell_length",
+    "switch_indicator",
+    "posterior_shift",
+    "last_transition",
+    "entry_confidence",
+    "typical_dwell",
+    "dwell_ratio",
+    "DwellStatistic",
     "validate_posterior_matrix",
     "PosteriorHealthBaselines",
     "PosteriorHealthReport",
