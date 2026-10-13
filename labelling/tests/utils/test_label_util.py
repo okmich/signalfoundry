@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -485,6 +487,33 @@ class TestMapLabelToTrendDirection:
         mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
         assert not diag["fallback"].any()
         assert diag["test_direction"].tolist() == diag["direction"].tolist() == [1, 0, -1]
+
+    # ========== A SUPPLIED (FROZEN) MAP ==========
+
+    def test_supplied_mapping_is_not_reranked_by_the_fallback(self):
+        """A long-only gate has 2 distinct signs for 3 states, which used to trip the fallback: it re-ranked the states
+        on ``df`` (the evaluation block, so look-ahead) and wrote the result into the caller's dict."""
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
+        gate = {0: 1, 1: 0, 2: 0}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mapping, diag = map_label_to_trend_direction(df, mapping_dict=gate, return_diagnostics=True)
+        assert mapping == {0: 1, 1: 0, 2: 0}
+        assert mapping is not gate
+        assert gate == {0: 1, 1: 0, 2: 0}
+        assert diag["direction"].tolist() == [1, 0, 0]
+        assert not diag["fallback"].any()
+
+    def test_supplied_mapping_sends_uncovered_states_flat(self):
+        """A state the frozen map never saw trades flat, and the caller's dict does not grow the new key."""
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
+        frozen = {0: -1, 1: 1}
+        with pytest.warns(UserWarning, match="not in mapping"):
+            mapping = map_label_to_trend_direction(df, mapping_dict=frozen)
+        assert mapping == {0: -1, 1: 1, 2: 0}
+        assert frozen == {0: -1, 1: 1}
 
 
 class TestMapLabelToMomentumScore:
