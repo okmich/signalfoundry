@@ -125,7 +125,7 @@ class HMMWalkForwardAnalysisBacktestOptimizer(CheckpointingMixin, WindowGenerati
     hmm_params = {
         'model_variants': ['hmm_learn', 'hmm_pmgnt', 'hmm_student'],
         'n_states_range': [2, 3, 4, 5],
-        'criterion': 'aic',  # or 'bic'
+        'criterion': 'aic',  # or 'bic', 'icl'
         'random_state': 42,
         'covariance_type': 'full',  # for hmm_learn
         'dist_kwargs': {'dofs': 3}  # for hmm_student
