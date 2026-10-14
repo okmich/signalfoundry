@@ -2,7 +2,8 @@
 
 All temporal primitives in this package (``step_kl``, ``posterior_delta``, ``rolling_flip_rate``, ``rolling_max_prob_std``,
 ``rolling_entropy_std``, ``dwell_length``, the regime-switch features ``switch_indicator``, ``posterior_shift``,
-``last_transition``, ``entry_confidence``, ``typical_dwell``, ``dwell_ratio``, and the drift functions in ``monitoring``) plus the rolling transformers
+``last_transition``, ``entry_confidence``, ``typical_dwell``, ``dwell_ratio``, and the drift functions in
+``monitoring``) plus the rolling transformers
 (``EmaPosteriorTransformer``, ``RollingMeanPosteriorTransformer``) assume the input is a **single contiguous time series**.
 They do not detect segment boundaries: concatenating multiple symbols, sessions, or training periods will leak state across
 the boundary (deltas, rolling means, dwell counts, flip-rate moving averages will all span the seam). Callers spanning

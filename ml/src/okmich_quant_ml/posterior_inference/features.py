@@ -231,6 +231,8 @@ class DwellStatistic(StrEnum):
 def _argmax_runs(p: NDArray) -> tuple[NDArray, NDArray]:
     """Return ``(argmax, run_start)``: the argmax per row and the row at which its current run began."""
     argmax = np.argmax(p, axis=1)
+    if argmax.size == 0:
+        return argmax, np.zeros(0, dtype=np.int64)
     positions = np.arange(p.shape[0])
     change = np.concatenate([[True], argmax[1:] != argmax[:-1]])
     run_start = np.maximum.accumulate(np.where(change, positions, -1))
@@ -337,9 +339,8 @@ def dwell_ratio(probs: NDArray, typical: NDArray) -> NDArray:
     finite = typical[np.isfinite(typical)]
     if finite.size and finite.min() <= 0.0:
         raise ValueError(f"dwell_ratio: typical dwell lengths must be > 0, got min={finite.min()}")
-    if p.shape[0] == 0:
-        return np.zeros(0, dtype=float)
-    return dwell_length(p) / typical[np.argmax(p, axis=1)]
+    argmax, run_start = _argmax_runs(p)
+    return (np.arange(p.shape[0]) - run_start + 1) / typical[argmax]
 
 
 def _rolling_mean_1d(x: NDArray, window: int) -> NDArray:

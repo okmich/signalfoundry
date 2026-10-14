@@ -1,4 +1,4 @@
-"""Regime-switch features: switch_indicator, posterior_shift, last_transition, entry_confidence, typical_dwell, dwell_ratio."""
+"""Regime-switch features in ``posterior_inference.features``: switches, transitions, entry confidence, dwell."""
 
 import numpy as np
 import pytest
