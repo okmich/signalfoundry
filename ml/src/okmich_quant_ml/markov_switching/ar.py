@@ -15,9 +15,9 @@ Model (Hamilton 1989 mean form, as statsmodels fits it)
 active at that lag, so the conditional mean depends on the last p+1 regimes and the exact filter, streaming
 ``update()`` and forecasts all run on the joint path (s_t, …, s_{t−p}).
 
-statsmodels 0.14.5 (the pinned version) keys the switching innovation variance on s_{t−p+1} instead of s_t whenever order ≥ 2 (a
-broadcasting slip in ``_conditional_loglikelihoods``). ``_HamiltonMarkovAutoregression`` corrects it, so σ² always
-follows the current regime.
+statsmodels 0.14.5 (the pinned version) keys the switching innovation variance on s_{t−p+1} instead of s_t whenever
+order ≥ 2 (a broadcasting slip in ``_conditional_loglikelihoods``). ``_HamiltonMarkovAutoregression`` corrects it, so
+σ² always follows the current regime.
 
 Causality notes
 ---------------
@@ -55,7 +55,8 @@ class _HamiltonMarkovAutoregression(MarkovAutoregression):
 
     Upstream reshapes the variance to ``(k_regimes, 1, 1)``, which broadcasts against the trailing three axes of the
     ``(k_regimes,) * (order + 1) + (nobs,)`` residual array: correct for order 1, but for order ≥ 2 σ² follows
-    s_{t−order+1}. Its EM variance step already weights by P(s_t), so this also makes EM and the likelihood agree.
+    s_{t−order+1}. Upstream's EM variance step already weights by P(s_t), so after this fix EM (which only supplies
+    start values for the MLE) and the likelihood key σ² on the same regime.
     """
 
     def _conditional_loglikelihoods(self, params):
@@ -154,12 +155,18 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         exog : np.ndarray, shape (n_samples, n_exog), optional
             Exogenous variables
         num_restarts : int, default=3
-            Number of random start-parameter searches (statsmodels ``search_reps``). The search draws from a
-            generator seeded with ``random_state``, so fits are reproducible; the global NumPy RNG is left as found.
+            Number of random start-parameter searches (statsmodels ``search_reps``). The search draws from the global
+            NumPy RNG, which is seeded with ``random_state`` for the fit and restored afterwards, so fits are
+            reproducible. Not thread-safe: concurrent fits in threads of one process share that global RNG.
 
         Returns
         -------
         self
+
+        Notes
+        -----
+        If the statsmodels fit raises, the model keeps its previous fitted state untouched (``refit_window`` relies on
+        this to fall back to ``update()``).
         """
         y = np.asarray(y).flatten()
         if len(y) < self.order + 10:
@@ -167,9 +174,6 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
                 f"Time series too short. Need at least {self.order + 10} samples, "
                 f"got {len(y)}"
             )
-
-        self.data_ = y
-        self._exog_used = exog is not None
 
         # statsmodels draws its start-parameter search from the global RNG — seed it locally, then restore.
         global_rng_state = np.random.get_state()
@@ -184,6 +188,8 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         finally:
             np.random.set_state(global_rng_state)
 
+        self.data_ = y
+        self._exog_used = exog is not None
         self.fitted_model_ = best_model
         self.regime_probabilities_ = best_model.smoothed_marginal_probabilities
         self.filtered_probabilities_ = best_model.filtered_marginal_probabilities
@@ -197,9 +203,7 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         self._is_fitted = True
 
         # Streaming state (Online Learning L1): joint P(s_T, …, s_{T−p} | y_{1:T}), flattened (s_T most significant)
-        self._last_forward_joint_ = np.ascontiguousarray(
-            best_model.filtered_joint_probabilities[..., -1].reshape(-1), dtype=np.float64)
-        self._last_forward_alpha_ = np.asarray(self.filtered_probabilities_[-1], dtype=np.float64)
+        self._set_joint_state(best_model.filtered_joint_probabilities[..., -1].reshape(-1))
         self._history_buffer_ = np.asarray(self.data_[-self.order:], dtype=np.float64)
         self._n_updates_ = 0
         self._cached_ar_coeffs_, self._cached_means_, self._cached_sigma2s_ = (
@@ -222,43 +226,6 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
                     f"Regime {regime} rarely occurs (<5% of time). "
                     "Consider reducing n_regimes."
                 )
-
-    # ─── Inference ──────────────────────────────────────────────────────────────
-
-    def predict_regime(self, causal: bool = True) -> np.ndarray:
-        """
-        Return most likely regime at each time step.
-
-        Parameters
-        ----------
-        causal : bool, default=True
-            True  → filtered P(s_t | y_{1:t}), no look-ahead — use for ML labels / live trading.
-            False → smoothed P(s_t | y_{1:T}), look-ahead  — use for diagnostics only.
-
-        Returns
-        -------
-        regimes : np.ndarray, shape (n_samples,)
-        """
-        self._validate_fitted()
-        probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
-        return np.argmax(probs, axis=1)
-
-    def predict_regime_proba(self, causal: bool = True) -> np.ndarray:
-        """
-        Return regime probabilities for the training series.
-
-        Parameters
-        ----------
-        causal : bool, default=True
-            True  → filtered probabilities (causal).
-            False → smoothed probabilities (look-ahead).
-
-        Returns
-        -------
-        probabilities : np.ndarray, shape (n_samples, n_regimes)
-        """
-        self._validate_fitted()
-        return self.filtered_probabilities_ if causal else self.regime_probabilities_
 
     # ─── Forecasting ────────────────────────────────────────────────────────────
 
@@ -303,17 +270,18 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         ar_coeffs, means, sigma2s = self._cached_ar_coeffs_, self._cached_means_, self._cached_sigma2s_
         weight0, first0, second0 = _ms_ar_deviation_moments(means, self._last_forward_joint_, self._history_buffer_)
         P = np.ascontiguousarray(self.transition_matrix_, dtype=np.float64)
-        probs, first, second = _ms_ar_forecast_moments(ar_coeffs, sigma2s, P, weight0, first0, second0, steps)
+        probs, first, second = _ms_ar_forecast_moments(ar_coeffs, sigma2s, P, weight0, first0, second0, steps,
+                                                       return_variance)
 
         # Moments conditional on the terminal regime s_{T+h} = r, then law of total expectation / variance
         safe = np.where(probs > 0.0, probs, 1.0)
         cond_dev = first / safe                                            # E[z | s = r]
         cond_mean = means[None, :] + cond_dev                              # E[y | s = r]
-        cond_var = np.maximum(second / safe - cond_dev ** 2, 0.0)          # Var[y | s = r]
         mean = np.sum(probs * cond_mean, axis=1)
         if not return_variance:
             return mean
 
+        cond_var = np.maximum(second / safe - cond_dev ** 2, 0.0)          # Var[y | s = r]
         variance = np.sum(probs * cond_var, axis=1) + np.sum(probs * (cond_mean - mean[:, None]) ** 2, axis=1)
         return {
             "mean": mean,
@@ -337,7 +305,10 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         joint = self._last_forward_joint_
         s_now = np.arange(len(joint)) // (self.n_regimes ** self.order)
         conditioned = joint * np.asarray(self.transition_matrix_)[s_now, regime]
-        conditioned = conditioned / conditioned.sum()
+        total = conditioned.sum()
+        if not total > 0.0:
+            raise ValueError(f"regime {regime} is unreachable from the current regime belief (P(s_T → {regime}) = 0)")
+        conditioned = conditioned / total
         _, first, second = _ms_ar_deviation_moments(means, conditioned, self._history_buffer_)
         ez = first.sum(axis=0)
         cov_z = second.sum(axis=0) - np.outer(ez, ez)
@@ -360,6 +331,20 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
                 f"{caller} does not support exogenous variables: the model was fitted with exog, and the "
                 "mean-form conditional mean needs the exog values of every new bar."
             )
+
+    def _set_joint_state(self, joint: np.ndarray) -> None:
+        """Set the streaming joint path belief and its regime marginal together (they must never disagree)."""
+        self._last_forward_joint_ = np.ascontiguousarray(joint, dtype=np.float64)
+        self._last_forward_alpha_ = self._last_forward_joint_.reshape(self.n_regimes, -1).sum(axis=1)
+
+    def __setstate__(self, state: dict) -> None:
+        """Refuse fitted models pickled before v2.1: their filter state, OU θ and order ≥ 2 likelihood are wrong."""
+        if state.get("_is_fitted") and "_last_forward_joint_" not in state:
+            raise ValueError(
+                f"{type(self).__name__} was saved before markov_switching v2.1 (intercept-form filter, MS-OU "
+                "θ = const/(1−φ), variance keyed on a lagged regime for order ≥ 2). Refit it with the current version."
+            )
+        self.__dict__.update(state)
 
     # ─── Online Learning L1: streaming filter ───────────────────────────────────
 
@@ -395,13 +380,13 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         self._validate_fitted()
         self._require_no_exog("update()")
         observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        self._require_finite(observations, "update()")
         P = np.ascontiguousarray(self.transition_matrix_, dtype=np.float64)
 
         for y in observations:
-            self._last_forward_joint_ = _ms_ar_joint_forward_step(self._cached_ar_coeffs_, self._cached_means_,
-                                                                  self._cached_sigma2s_, P, self._last_forward_joint_,
-                                                                  self._history_buffer_, float(y))
-            self._last_forward_alpha_ = self._last_forward_joint_.reshape(self.n_regimes, -1).sum(axis=1)
+            self._set_joint_state(_ms_ar_joint_forward_step(self._cached_ar_coeffs_, self._cached_means_,
+                                                            self._cached_sigma2s_, P, self._last_forward_joint_,
+                                                            self._history_buffer_, float(y)))
             # Roll history buffer: drop oldest, append new observation
             self._history_buffer_ = np.roll(self._history_buffer_, -1)
             self._history_buffer_[-1] = y
@@ -448,6 +433,8 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         ``refit_window()`` call.
         """
         self._validate_fitted()
+        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        self._require_finite(observations, "refit_window()")
 
         from collections import deque
 
@@ -457,8 +444,6 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
             self._window_buffer_ = deque(seed, maxlen=window)
             self._bars_since_refit_ = 0
             self._n_refits_ = 0
-
-        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
 
         for y in observations:
             self._window_buffer_.append(float(y))

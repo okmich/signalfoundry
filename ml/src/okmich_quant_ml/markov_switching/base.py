@@ -7,19 +7,17 @@ from __future__ import annotations
 import numpy as np
 import joblib
 
-from .kernels import _propagate_regime_probs
+from .kernels import _predict_regime_probs, _propagate_regime_probs, _scaled_update
 
 
 class BaseMarkovSwitching:
     """
     Abstract base class for Markov-switching time series models.
 
-    Provides shared infrastructure: fitted-state tracking, transition-matrix
-    access, regime-probability propagation, the streaming belief state
-    (``current_regime_proba()`` / ``current_regime()``), AIC/BIC retrieval, and
-    serialization.  Concrete subclasses must implement ``fit()``, ``update()``,
-    ``predict_regime()``, ``predict_regime_proba()``, and ``forecast()``.
-    ``predict_regime*`` default to ``causal=True`` (filtered, no look-ahead).
+    Provides shared infrastructure: fitted-state tracking, transition-matrix access, regime-probability
+    propagation, ``predict_regime()`` / ``predict_regime_proba()`` (default ``causal=True``: filtered, no
+    look-ahead), the streaming belief state (``current_regime_proba()`` / ``current_regime()``), AIC/BIC retrieval
+    and serialization.  Concrete subclasses must implement ``fit()``, ``update()`` and ``forecast()``.
 
     Parameters
     ----------
@@ -86,6 +84,43 @@ class BaseMarkovSwitching:
         self._validate_fitted()
         return self.aic, self.bic
 
+    def predict_regime(self, causal: bool = True) -> np.ndarray:
+        """
+        Most likely regime at each fitted time step.
+
+        Parameters
+        ----------
+        causal : bool, default=True
+            True  → filtered P(s_t | y_{1:t}), no look-ahead — use for ML labels / live trading.
+            False → smoothed P(s_t | y_{1:T}), look-ahead  — use for diagnostics only.
+
+        Returns
+        -------
+        regimes : np.ndarray, shape (n_fitted,)
+        """
+        return np.argmax(self.predict_regime_proba(causal=causal), axis=1)
+
+    def predict_regime_proba(self, causal: bool = True) -> np.ndarray:
+        """
+        Regime probabilities over the fitted series.
+
+        Parameters
+        ----------
+        causal : bool, default=True
+            True  → filtered probabilities (causal). False → smoothed probabilities (look-ahead).
+
+        Returns
+        -------
+        probabilities : np.ndarray, shape (n_fitted, n_regimes)
+
+        Notes
+        -----
+        Filtered is causal but still in-sample: the parameters were fitted on these bars. For out-of-sample labels,
+        fit on a training window and ``update()`` through the test window.
+        """
+        self._validate_fitted()
+        return self.filtered_probabilities_ if causal else self.regime_probabilities_
+
     def forecast_regime_probabilities(self, steps: int = 10, causal: bool = True) -> np.ndarray:
         """
         Propagate regime probabilities forward through the transition matrix.
@@ -142,15 +177,20 @@ class BaseMarkovSwitching:
         return int(np.argmax(self._last_forward_alpha_))
 
     @staticmethod
+    def _require_finite(observations: np.ndarray, caller: str) -> None:
+        """Reject the whole batch before any state changes: one NaN/inf bar would make the belief state NaN for good."""
+        if not np.all(np.isfinite(observations)):
+            raise ValueError(f"{caller}: observations must be finite (NaN/inf would corrupt the belief state)")
+
+    @staticmethod
     def _forward_update(alpha_prev: np.ndarray, transition_matrix: np.ndarray, log_liks: np.ndarray) -> np.ndarray:
-        """One scaled forward step: α_t ∝ (α_{t-1} P) · exp(log p(y_t | s_t)), same arithmetic as the EM E-steps."""
-        K = len(alpha_prev)
-        liks = np.exp(log_liks - log_liks.max())
-        alpha = (alpha_prev @ transition_matrix) * liks
-        c = alpha.sum()
-        if c > 1e-300:
-            return alpha / c
-        return np.full(K, 1.0 / K)
+        """One forward step α_t ∝ (α_{t-1} P) · exp(log p(y_t | s_t)).
+
+        Uses the same kernels as ``_scaled_forward_filter`` in the E-steps, so streaming matches batch bit for bit.
+        """
+        prior = _predict_regime_probs(np.ascontiguousarray(alpha_prev, dtype=np.float64),
+                                      np.ascontiguousarray(transition_matrix, dtype=np.float64))
+        return _scaled_update(prior, np.ascontiguousarray(log_liks, dtype=np.float64))[0]
 
     # ─── Persistence ────────────────────────────────────────────────────────────
 

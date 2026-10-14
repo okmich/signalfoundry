@@ -48,7 +48,7 @@ projects/ml/tests/markov_switching/
 ├── test_sliding_window.py    # 17 tests  (L2 sliding-window refit)
 ├── test_ms_garch.py     # 31 tests
 ├── test_ms_var.py       # 41 tests
-└── test_mean_form_and_streaming.py  # 20 tests (mean-form filter/forecast exactness, θ, GARCH/VAR streaming)
+└── test_mean_form_and_streaming.py  # 25 tests (mean-form filter/forecast exactness, θ, GARCH/VAR streaming, guards)
 ```
 
 ---
@@ -371,7 +371,7 @@ regime labels, fit on a training window and `update()` through the test window.
 | `test_sliding_window.py` | 17 | L2 sliding-window refit |
 | `test_ms_garch.py` | 31 | GARCH filter, EM, forecasting |
 | `test_ms_var.py` | 41 | Multivariate: VAR(1), VAR(2), 2-asset, PSD checks |
-| `test_mean_form_and_streaming.py` | 20 | Streaming == batch filter (AR p=1,2; GARCH; VAR p=1,2); forecasts == brute-force path enumeration; θ recovery; variance keyed on s_t; causal defaults; seeded fits |
+| `test_mean_form_and_streaming.py` | 25 | Streaming == batch filter (AR K=2 p=1,2,3 and K=3 p=1; GARCH; VAR p=1,2); non-finite bars rejected; forecasts == brute-force path enumeration; θ recovery; variance keyed on s_t; causal defaults; seeded fits |
 
 ---
 
@@ -403,6 +403,19 @@ regime labels, fit on a training window and `update()` through the test window.
 - **Causal defaults.** `predict_regime()` / `predict_regime_proba()` default to `causal=True` on AR, OU, GARCH, VAR.
 - **GARCH / VAR `update()`.** Causal out-of-sample filtering without refit; `fit()` re-runs the E-step on the final
   parameters so stored probabilities match them.
+- **Forward-step underflow.** Every forward step (MS-AR joint filter, GARCH/VAR E-steps and `update()`) now
+  normalises in log space over states with prior mass (`_scaled_update`). Shifting by the max log-likelihood let an
+  impossible state set the scale, underflow every possible one and fall back to uniform — e.g. on level series
+  whose regime means are tens of σ apart. MS-AR also floors transitions at 1e-20 like statsmodels.
+- **One filter implementation.** GARCH/VAR E-steps and `update()` call the same numba kernels
+  (`_scaled_forward_filter` / `_predict_regime_probs` + `_scaled_update`; `_garch_variance_step`, `_gaussian_loglik`),
+  so streaming equals batch by construction. `predict_regime*` live once, in the base class.
+- **Guards.** `update()` / `refit_window()` reject non-finite bars before touching state. Fitted MS-AR/OU models
+  pickled before v2.1 are refused on load (`__setstate__`), as their θ, filter state and likelihood are wrong.
+  `fit()` leaves the previous state intact if statsmodels raises.
+- **Performance.** `MarkovSwitchingGARCH._compute_ar_residuals` is vectorised (bitwise-identical): a 3,000-bar,
+  30-iteration fit drops from 12.9 s to 2.3 s. MS-VAR `update()` caches Σ Cholesky factors per fit. Mean-only
+  MS-AR forecasts skip the second-moment recursion.
 - `current_regime_proba()` / `current_regime()` moved to the base class (all families).
 - `MarkovSwitchingAR.fit()` honours `random_state`; `train()` adopts the winner's streaming state.
 - Removed kernels `_forward_step` and `_ar_forecast_kernel` (intercept form).

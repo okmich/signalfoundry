@@ -15,7 +15,7 @@ from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoreg
 from okmich_quant_ml.markov_switching import MarkovSwitchingAR, MarkovSwitchingGARCH, MarkovSwitchingOU, \
     MarkovSwitchingVAR
 from okmich_quant_ml.markov_switching.ar import _HamiltonMarkovAutoregression
-from okmich_quant_ml.markov_switching.kernels import _companion
+from okmich_quant_ml.markov_switching.kernels import _companion, _ms_ar_joint_forward_step, _scaled_update
 
 
 # ─── Simulation ─────────────────────────────────────────────────────────────────
@@ -23,7 +23,8 @@ from okmich_quant_ml.markov_switching.kernels import _companion
 STICKY_P = np.array([[0.98, 0.02], [0.03, 0.97]])
 
 
-def simulate_mean_form(T: int, mu: np.ndarray, phi: np.ndarray, sigma: np.ndarray, P: np.ndarray, seed: int) -> np.ndarray:
+def simulate_mean_form(T: int, mu: np.ndarray, phi: np.ndarray, sigma: np.ndarray, P: np.ndarray,
+                       seed: int) -> np.ndarray:
     """y_t − μ_{s_t} = Σ_l φ_{s_t,l} (y_{t−l} − μ_{s_{t−l}}) + σ_{s_t} e_t, burn-in 50 bars."""
     rng = np.random.default_rng(seed)
     p = phi.shape[1]
@@ -44,6 +45,14 @@ def level_series():
 
 
 @pytest.fixture(scope="module")
+def three_regime_series():
+    """K=3 needs three real regimes: statsmodels' EM can fail (SVD) fitting a superfluous one."""
+    P = np.array([[0.97, 0.02, 0.01], [0.02, 0.96, 0.02], [0.01, 0.03, 0.96]])
+    return simulate_mean_form(1150, np.array([-1.0, 0.0, 1.5]), np.array([[0.5], [0.2], [0.7]]),
+                              np.array([0.3, 0.2, 0.4]), P, seed=4)
+
+
+@pytest.fixture(scope="module")
 def fitted_level_ar(level_series):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -54,7 +63,7 @@ def fitted_level_ar(level_series):
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_conditional_variance_keyed_on_current_regime(level_series, order):
-    """σ² must follow s_t. Upstream keys it on s_{t-order+1}; the subclass fixes it and agrees with upstream at order 1."""
+    """σ² must follow s_t. Upstream keys it on s_{t-order+1}; the subclass fixes it and matches upstream at order 1."""
     kw = dict(k_regimes=2, order=order, switching_ar=True, switching_variance=True)
     fixed = _HamiltonMarkovAutoregression(level_series[:300], **kw)
     stock = MarkovAutoregression(level_series[:300], **kw)
@@ -75,19 +84,21 @@ def test_conditional_variance_keyed_on_current_regime(level_series, order):
 
 # ─── MS-AR streaming filter ─────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("order", [1, 2])
-def test_ar_update_reproduces_batch_filter(level_series, order):
+@pytest.mark.parametrize("n_regimes, order", [(2, 1), (2, 2), (2, 3), (3, 1)])
+def test_ar_update_reproduces_batch_filter(request, n_regimes, order):
+    """Covers the joint-path digit decoding for K^(p+1) = 4, 8, 16 and 9 states."""
+    level_series = request.getfixturevalue("level_series" if n_regimes == 2 else "three_regime_series")
     N, M = 800, 300
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        ms = MarkovSwitchingAR(n_regimes=2, order=order, random_state=1).fit(level_series[:N])
+        ms = MarkovSwitchingAR(n_regimes=n_regimes, order=order, random_state=1).fit(level_series[:N])
 
     streamed = []
     for v in level_series[N:N + M]:
         ms.update(v)
         streamed.append(ms.current_regime_proba())
 
-    batch = _HamiltonMarkovAutoregression(level_series[:N + M], k_regimes=2, order=order, switching_ar=True,
+    batch = _HamiltonMarkovAutoregression(level_series[:N + M], k_regimes=n_regimes, order=order, switching_ar=True,
                                           switching_variance=True).filter(ms.fitted_model_.params)
     np.testing.assert_allclose(np.array(streamed), batch.filtered_marginal_probabilities[-M:], atol=1e-10)
     np.testing.assert_allclose(ms._last_forward_joint_, batch.filtered_joint_probabilities[..., -1].reshape(-1),
@@ -97,8 +108,7 @@ def test_ar_update_reproduces_batch_filter(level_series, order):
 def test_ar_streaming_joint_initialised_from_fit(fitted_level_ar):
     joint = fitted_level_ar._last_forward_joint_
     assert joint.shape == (2 ** (fitted_level_ar.order + 1),)
-    np.testing.assert_allclose(joint.reshape(2, -1).sum(axis=1), fitted_level_ar.filtered_probabilities_[-1],
-                               atol=1e-12)
+    np.testing.assert_allclose(joint.reshape(2, -1).sum(axis=1), fitted_level_ar.filtered_probabilities_[-1], atol=1e-12)
 
 
 def test_ar_regime_parameters_report_mean_and_intercept(fitted_level_ar):
@@ -115,6 +125,81 @@ def test_ar_update_rejects_exog_models(level_series):
     with pytest.raises(NotImplementedError, match="exog"):
         ms.update(0.0)
 
+
+
+def test_ar_stay_in_regime_rejects_unreachable_regime(fitted_level_ar):
+    import copy
+    ms = copy.deepcopy(fitted_level_ar)
+    ms.transition_matrix_ = np.array([[1.0, 0.0], [1.0, 0.0]])
+    with pytest.raises(ValueError, match="unreachable"):
+        ms.forecast(steps=3, regime=1)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_updates_reject_non_finite_bars_without_touching_state(fitted_level_ar, var_series, garch_returns, bad):
+    import copy
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ms_var = MarkovSwitchingVAR(n_regimes=2, order=1).fit(var_series[:300], num_restarts=1, maxiter=20)
+        ms_garch = MarkovSwitchingGARCH(n_regimes=2, order=1).fit(garch_returns[:300], num_restarts=1, maxiter=10)
+    cases = [(copy.deepcopy(fitted_level_ar), np.array([0.1, bad])),
+             (ms_garch, np.array([0.001, bad])),
+             (ms_var, np.array([[0.0, 0.0], [bad, 0.0]]))]
+    for model, batch in cases:
+        before = model.current_regime_proba()
+        with pytest.raises(ValueError, match="finite"):
+            model.update(batch)
+        np.testing.assert_array_equal(model.current_regime_proba(), before)
+        assert model._n_updates_ == 0
+
+
+def test_joint_step_ignores_impossible_best_path():
+    """The best-fitting path (s_t = 1) has zero prior mass. Shifting by the max log-lik over all paths would
+    underflow every possible path and return uniform; the log-space shift returns the true posterior."""
+    joint_prev = np.array([1.0, 0.0, 0.0, 0.0])            # certain on (s_t, s_{t-1}) = (0, 0)
+    out = _ms_ar_joint_forward_step(np.array([[0.5], [0.5]]), np.array([0.0, 100.0]), np.array([1.0, 1.0]),
+                                    STICKY_P, joint_prev, np.array([0.0]), 50.0)
+    np.testing.assert_allclose(out, [0.98, 0.0, 0.02, 0.0], atol=1e-12)
+
+
+def test_scaled_update_shifts_over_possible_states():
+    posterior, log_norm = _scaled_update(np.array([1.0, 0.0]), np.array([-1000.0, 0.0]))
+    np.testing.assert_allclose(posterior, [1.0, 0.0])
+    assert log_norm == pytest.approx(-1000.0)
+    posterior, log_norm = _scaled_update(np.array([0.5, 0.5]), np.array([np.nan, 0.0]))
+    assert np.isnan(posterior).all() and np.isnan(log_norm)
+
+
+def test_legacy_pickle_is_refused(fitted_level_ar, tmp_path):
+    import copy
+    import joblib
+    legacy = copy.deepcopy(fitted_level_ar)
+    del legacy.__dict__["_last_forward_joint_"]
+    path = tmp_path / "legacy.joblib"
+    joblib.dump(legacy, path)
+    with pytest.raises(ValueError, match="v2.1"):
+        MarkovSwitchingAR.load(str(path))
+
+
+def test_refit_window_rejects_non_finite_batch_before_touching_state(fitted_level_ar):
+    import copy
+    ms = copy.deepcopy(fitted_level_ar)
+    before = ms.current_regime_proba()
+    with pytest.raises(ValueError, match="finite"):
+        ms.refit_window(np.array([0.1, np.nan]), window=200)
+    assert not hasattr(ms, "_window_buffer_")
+    np.testing.assert_array_equal(ms.current_regime_proba(), before)
+
+
+def test_mean_only_forecast_matches_full(fitted_level_ar):
+    full = fitted_level_ar.forecast(steps=6, return_variance=True)
+    np.testing.assert_array_equal(fitted_level_ar.forecast(steps=6), full["mean"])
+
+
+def test_garch_vectorised_residuals_match_loop(garch_returns):
+    y, c, phi = garch_returns, 3e-4, np.array([0.1, -0.05])
+    loop = [y[t] - (c + phi[0] * y[t - 1] + phi[1] * y[t - 2]) for t in range(2, len(y))]
+    np.testing.assert_array_equal(MarkovSwitchingGARCH(order=2)._compute_ar_residuals(y, c, phi), loop)
 
 # ─── MS-AR exact forecasts (brute-force path enumeration) ───────────────────────
 
@@ -207,8 +292,7 @@ def test_ar_train_adopts_streaming_state(level_series):
 
 def test_ou_theta_is_the_regime_mean():
     """Old code reported θ = μ / (1 − φ): ≈ 5.0 instead of 1.0 for the slow regime here."""
-    y = simulate_mean_form(2000, np.array([0.0, 1.0]), np.array([[0.5], [0.8]]), np.array([0.3, 0.3]),
-                           STICKY_P, seed=0)
+    y = simulate_mean_form(2000, np.array([0.0, 1.0]), np.array([[0.5], [0.8]]), np.array([0.3, 0.3]), STICKY_P, seed=0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ou = MarkovSwitchingOU(n_regimes=2).fit(y)

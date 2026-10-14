@@ -66,19 +66,100 @@ def _garch_filter_kernel(residuals: np.ndarray, omega: float, alpha: float, beta
         Gaussian log p(ε_t | σ²_t) for each t.
     """
     T = len(residuals)
-    LOG_2PI = 1.8378770664093455
     sigma2 = np.empty(T)
     sigma2[0] = sigma2_init
     for t in range(1, T):
-        sigma2[t] = omega + alpha * residuals[t - 1] ** 2 + beta * sigma2[t - 1]
-        # Guard against numerical underflow
-        if sigma2[t] < 1e-300:
-            sigma2[t] = sigma2_init
+        sigma2[t] = _garch_variance_step(omega, alpha, beta, residuals[t - 1], sigma2[t - 1], sigma2_init)
 
     log_liks = np.empty(T)
     for t in range(T):
-        log_liks[t] = -0.5 * (LOG_2PI + np.log(sigma2[t]) + residuals[t] ** 2 / sigma2[t])
+        log_liks[t] = _gaussian_loglik(residuals[t], sigma2[t])
     return sigma2, log_liks
+
+
+@njit(cache=True)
+def _garch_variance_step(omega: float, alpha: float, beta: float, resid_prev: float, sigma2_prev: float,
+                         sigma2_reset: float) -> float:
+    """σ²_t = ω + α ε²_{t−1} + β σ²_{t−1}, reset to ``sigma2_reset`` on numerical underflow."""
+    sigma2 = omega + alpha * resid_prev ** 2 + beta * sigma2_prev
+    if sigma2 < 1e-300:
+        sigma2 = sigma2_reset
+    return sigma2
+
+
+@njit(cache=True)
+def _gaussian_loglik(resid: float, sigma2: float) -> float:
+    """log N(resid; 0, sigma2)."""
+    return -0.5 * (1.8378770664093455 + np.log(sigma2) + resid ** 2 / sigma2)
+
+
+# ─── Scaled forward filter (shared by E-steps and streaming update()) ────────────
+
+
+@njit(cache=True)
+def _predict_regime_probs(alpha_prev: np.ndarray, transition_matrix: np.ndarray) -> np.ndarray:
+    """One-step prior π_{t|t−1}[j] = Σ_i P[i, j] α_{t−1}[i] (P row-stochastic)."""
+    K = len(alpha_prev)
+    prior = np.zeros(K)
+    for j in range(K):
+        for i in range(K):
+            prior[j] += transition_matrix[i, j] * alpha_prev[i]
+    return prior
+
+
+@njit(cache=True)
+def _scaled_update(prior: np.ndarray, log_liks: np.ndarray) -> tuple[np.ndarray, float]:
+    """Bayes update α ∝ prior · exp(log_liks), normalised in log space.
+
+    The stabilising shift is the max of ``log(prior) + log_liks`` over states with prior mass. Shifting by the max
+    log-likelihood alone would let an impossible (zero-prior) state set the scale, underflow every possible state to 0
+    and fall back to uniform. NaN log-likelihoods propagate to NaN outputs.
+
+    Returns
+    -------
+    posterior : np.ndarray
+    log_norm : float
+        log Σ prior · exp(log_liks) — the step's predictive log-likelihood; −inf if no state is possible.
+    """
+    n = len(prior)
+    posterior = np.empty(n)
+    shift = -np.inf
+    for i in range(n):
+        if prior[i] > 0.0:
+            score = np.log(prior[i]) + log_liks[i]
+            posterior[i] = score
+            if score > shift:
+                shift = score
+        else:
+            posterior[i] = -np.inf
+    if shift == -np.inf:
+        for i in range(n):
+            posterior[i] = 1.0 / n
+        return posterior, -np.inf
+    total = 0.0
+    for i in range(n):
+        posterior[i] = np.exp(posterior[i] - shift)
+        total += posterior[i]
+    for i in range(n):
+        posterior[i] /= total
+    return posterior, shift + np.log(total)
+
+
+@njit(cache=True)
+def _scaled_forward_filter(initial_probs: np.ndarray, transition_matrix: np.ndarray,
+                           log_liks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Filtered P(s_t | y_{1:t}) for all t and the per-step log-normalisers (summing to the log-likelihood).
+
+    Row 0 updates ``initial_probs``; later rows update the one-step prior. Streaming ``update()`` calls the same
+    ``_predict_regime_probs`` + ``_scaled_update`` pair, so batch and streaming filters agree bit for bit.
+    """
+    T, K = log_liks.shape
+    alpha = np.empty((T, K))
+    log_norm = np.empty(T)
+    for t in range(T):
+        prior = initial_probs if t == 0 else _predict_regime_probs(alpha[t - 1], transition_matrix)
+        alpha[t], log_norm[t] = _scaled_update(prior, log_liks[t])
+    return alpha, log_norm
 
 
 # ─── Mean-form MS-AR(p) (Hamilton 1989) ──────────────────────────────────────────
@@ -89,9 +170,14 @@ def _garch_filter_kernel(residuals: np.ndarray, omega: float, alpha: float, beta
 # (s_t, s_{t−1}, …, s_{t−p}). A joint vector has K^(p+1) entries in C order with s_t as the most
 # significant digit — the same layout as statsmodels' ``filtered_joint_probabilities[..., t]``.
 
+# statsmodels' Hamilton filter floors transition probabilities at 1e-20 before taking logs; match it.
+_TRANSITION_FLOOR = 1e-20
+
 
 @njit(cache=True)
-def _ms_ar_joint_forward_step(ar_coeffs: np.ndarray, means: np.ndarray, sigma2s: np.ndarray, transition_matrix: np.ndarray, joint_prev: np.ndarray, history: np.ndarray, y_new: float) -> np.ndarray:
+def _ms_ar_joint_forward_step(ar_coeffs: np.ndarray, means: np.ndarray, sigma2s: np.ndarray,
+                              transition_matrix: np.ndarray, joint_prev: np.ndarray, history: np.ndarray,
+                              y_new: float) -> np.ndarray:
     """One causal Hamilton-filter step of a mean-form MS-AR(p) on the joint regime path.
 
     Parameters
@@ -120,7 +206,6 @@ def _ms_ar_joint_forward_step(ar_coeffs: np.ndarray, means: np.ndarray, sigma2s:
     p = len(history)
     n = len(joint_prev)
     k_pow_p = n // K
-    LOG_2PI = 1.8378770664093455
 
     # 1. Predict: drop the oldest regime s_{t−p}, prepend s_{t+1}
     pred = np.zeros(n)
@@ -131,11 +216,10 @@ def _ms_ar_joint_forward_step(ar_coeffs: np.ndarray, means: np.ndarray, sigma2s:
         s_cur = idx // k_pow_p
         tail = idx // K
         for s_new in range(K):
-            pred[s_new * k_pow_p + tail] += transition_matrix[s_cur, s_new] * w
+            pred[s_new * k_pow_p + tail] += max(transition_matrix[s_cur, s_new], _TRANSITION_FLOOR) * w
 
     # 2. Gaussian log-likelihood conditional on the (p+1)-regime path
     log_liks = np.empty(n)
-    max_ll = -np.inf
     for idx in range(n):
         s_new = idx // k_pow_p
         resid = y_new - means[s_new]
@@ -144,28 +228,15 @@ def _ms_ar_joint_forward_step(ar_coeffs: np.ndarray, means: np.ndarray, sigma2s:
             div //= K
             s_lag = (idx // div) % K
             resid -= ar_coeffs[s_new, lag - 1] * (history[p - lag] - means[s_lag])
-        ll = -0.5 * (LOG_2PI + np.log(sigma2s[s_new]) + resid * resid / sigma2s[s_new])
-        log_liks[idx] = ll
-        if ll > max_ll:
-            max_ll = ll
+        log_liks[idx] = _gaussian_loglik(resid, sigma2s[s_new])
 
-    # 3. Update and normalise (shift by max for stability)
-    joint_new = np.empty(n)
-    total = 0.0
-    for idx in range(n):
-        joint_new[idx] = pred[idx] * np.exp(log_liks[idx] - max_ll)
-        total += joint_new[idx]
-    if total > 1e-300:
-        for idx in range(n):
-            joint_new[idx] /= total
-    else:
-        for idx in range(n):
-            joint_new[idx] = 1.0 / n
-    return joint_new
+    # 3. Update over paths with predicted mass (log-space shift — see _scaled_update)
+    return _scaled_update(pred, log_liks)[0]
 
 
 @njit(cache=True)
-def _ms_ar_deviation_moments(means: np.ndarray, joint: np.ndarray, history: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _ms_ar_deviation_moments(means: np.ndarray, joint: np.ndarray,
+                             history: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Regime-split moments of the deviation state Z_T = (y_T − μ_{s_T}, …, y_{T−p+1} − μ_{s_{T−p+1}}).
 
     Parameters
@@ -223,7 +294,9 @@ def _companion(ar_row: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True)
-def _ms_ar_forecast_moments(ar_coeffs: np.ndarray, sigma2s: np.ndarray, transition_matrix: np.ndarray, weight0: np.ndarray, first0: np.ndarray, second0: np.ndarray, steps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _ms_ar_forecast_moments(ar_coeffs: np.ndarray, sigma2s: np.ndarray, transition_matrix: np.ndarray,
+                            weight0: np.ndarray, first0: np.ndarray, second0: np.ndarray, steps: int,
+                            with_second: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Exact h-step moments of the deviation state, split by the terminal regime s_{T+h}.
 
     With Z_{T+h} = F_{s_{T+h}} Z_{T+h−1} + ε e₁ and s_{T+h} ⊥ Z_{T+h−1} | s_{T+h−1}:
@@ -233,7 +306,8 @@ def _ms_ar_forecast_moments(ar_coeffs: np.ndarray, sigma2s: np.ndarray, transiti
         S_h(j) = F_j (Σ_i P[i,j] S_{h−1}(i)) F_j' + π_h(j) σ²_j e₁e₁'
 
     where m_h(j) = E[Z_{T+h} 1{s_{T+h}=j} | y_{1:T}] and S_h(j) the matching second moment. No
-    approximation: the recursion is exact for any K and p.
+    approximation: the recursion is exact for any K and p. ``with_second=False`` skips S (mean-only forecasts) and
+    returns zeros for ``second``.
 
     Returns
     -------
@@ -242,6 +316,9 @@ def _ms_ar_forecast_moments(ar_coeffs: np.ndarray, sigma2s: np.ndarray, transiti
     second : np.ndarray, shape (steps, K)    S_h(j)[0,0] = E[z²_{T+h} 1{s_{T+h}=j}]
     """
     K, p = ar_coeffs.shape
+    companions = np.empty((K, p, p))
+    for j in range(K):
+        companions[j] = _companion(ar_coeffs[j])
     w = weight0.copy()
     m = first0.copy()
     S = second0.copy()
@@ -259,14 +336,16 @@ def _ms_ar_forecast_moments(ar_coeffs: np.ndarray, sigma2s: np.ndarray, transiti
                 pij = transition_matrix[i, j]
                 w_new[j] += pij * w[i]
                 mix_m += pij * m[i]
-                mix_S += pij * S[i]
-            F = _companion(ar_coeffs[j])
+                if with_second:
+                    mix_S += pij * S[i]
+            F = companions[j]
             m_new[j] = F @ mix_m
-            S_new[j] = F @ mix_S @ F.T
-            S_new[j, 0, 0] += w_new[j] * sigma2s[j]
             probs[h, j] = w_new[j]
             first[h, j] = m_new[j, 0]
-            second[h, j] = S_new[j, 0, 0]
+            if with_second:
+                S_new[j] = F @ mix_S @ F.T
+                S_new[j, 0, 0] += w_new[j] * sigma2s[j]
+                second[h, j] = S_new[j, 0, 0]
         w = w_new
         m = m_new
         S = S_new
