@@ -73,3 +73,23 @@ def test_posterior_mean_run_length_drops_after_clean_mean_shift() -> None:
 
     assert expected_run_length[58] > 20.0
     assert np.min(expected_run_length[60:66]) < 10.0
+
+
+def test_runs_longer_than_r_max_do_not_trigger_false_resets() -> None:
+    """Regression: once a run outlives ``r_max`` its mass sits in the cap slot, so the cap's statistics must describe
+    the current run. When the cap accumulated the whole stream it pooled every past regime, scored the current run
+    against that mixture, and the MAP run length collapsed repeatedly inside settled segments (15 drops on this series,
+    against none now). Both real shifts must still be caught promptly.
+    """
+    rng = np.random.default_rng(seed=2)
+    xs = np.concatenate([rng.standard_normal(300), rng.standard_normal(300) + 3.0, rng.standard_normal(300)])
+    detector = BayesianOnlineChangepointDetector(NormalInverseGammaModel(), hazard_rate=0.01, r_max=50)
+
+    posterior = detector.batch(xs)
+    map_run = np.argmax(posterior[:, 1:], axis=1) + 1
+    drops = np.flatnonzero(np.diff(map_run) <= -10) + 1
+
+    settled = drops[((drops >= 360) & (drops < 600)) | (drops >= 660)]
+    assert settled.size == 0
+    for shift in (300, 600):
+        assert np.any((drops >= shift) & (drops <= shift + 10))

@@ -22,8 +22,10 @@ def _gaussian_log_pred_kernel(x: float, mu: np.ndarray, sigma_post: np.ndarray,
 
 @njit(cache=True)
 def _gaussian_update_kernel(x: float, mu: np.ndarray, sigma_post: np.ndarray, sigma_obs: float,
-                            prior_mu: float, prior_var: float, n_updates: int,
-                            next_mu: np.ndarray, next_var: np.ndarray) -> None:
+                            prior_mu: float, prior_var: float, next_mu: np.ndarray, next_var: np.ndarray) -> None:
+    # Slot j <- slot j - 1 advanced by x, for every j including the cap. The cap therefore holds the last r_max - 1
+    # observations (a sliding window). It must never accumulate the whole stream: that would pool every past regime
+    # into the slot that represents the current long run.
     r_max = len(mu)
     next_mu[0] = prior_mu
     next_var[0] = prior_var
@@ -32,11 +34,6 @@ def _gaussian_update_kernel(x: float, mu: np.ndarray, sigma_post: np.ndarray, si
         advanced_var = 1.0 / (1.0 / sigma_post[src] + 1.0 / sigma_obs)
         next_var[j] = advanced_var
         next_mu[j] = advanced_var * (mu[src] / sigma_post[src] + x / sigma_obs)
-    if n_updates >= r_max - 1:
-        src = r_max - 1
-        advanced_var = 1.0 / (1.0 / sigma_post[src] + 1.0 / sigma_obs)
-        next_var[src] = advanced_var
-        next_mu[src] = advanced_var * (mu[src] / sigma_post[src] + x / sigma_obs)
 
 
 @njit(cache=True)
@@ -57,9 +54,9 @@ def _nig_log_pred_kernel(x: float, mu: np.ndarray, kappa: np.ndarray,
 
 @njit(cache=True)
 def _nig_update_kernel(x: float, mu: np.ndarray, kappa: np.ndarray, alpha: np.ndarray, beta: np.ndarray,
-                       prior_mu: float, prior_kappa: float, prior_alpha: float, prior_beta: float, n_updates: int,
-                       next_mu: np.ndarray, next_kappa: np.ndarray,
-                       next_alpha: np.ndarray, next_beta: np.ndarray) -> None:
+                       prior_mu: float, prior_kappa: float, prior_alpha: float, prior_beta: float, next_mu: np.ndarray,
+                       next_kappa: np.ndarray, next_alpha: np.ndarray, next_beta: np.ndarray) -> None:
+    # Sliding-window cap, as in ``_gaussian_update_kernel``.
     r_max = len(mu)
     next_mu[0] = prior_mu
     next_kappa[0] = prior_kappa
@@ -73,14 +70,6 @@ def _nig_update_kernel(x: float, mu: np.ndarray, kappa: np.ndarray, alpha: np.nd
         next_kappa[j] = advanced_kappa
         next_alpha[j] = alpha[src] + 0.5
         next_beta[j] = beta[src] + kappa[src] * diff * diff / (2.0 * advanced_kappa)
-    if n_updates >= r_max - 1:
-        src = r_max - 1
-        advanced_kappa = kappa[src] + 1.0
-        diff = x - mu[src]
-        next_mu[src] = (kappa[src] * mu[src] + x) / advanced_kappa
-        next_kappa[src] = advanced_kappa
-        next_alpha[src] = alpha[src] + 0.5
-        next_beta[src] = beta[src] + kappa[src] * diff * diff / (2.0 * advanced_kappa)
 
 
 @njit(cache=True)
@@ -123,7 +112,7 @@ def _student_t_log_pred_precomputed(x: float, mu: float, kappa: float, alpha: fl
 def _nig_bocpd_batch_kernel(xs: np.ndarray, log_hazard: float, log_growth: float,
                             prior_mu: float, prior_kappa: float, prior_alpha: float, prior_beta: float,
                             posterior: np.ndarray, mu: np.ndarray, kappa: np.ndarray,
-                            alpha: np.ndarray, beta: np.ndarray, n_updates: int,
+                            alpha: np.ndarray, beta: np.ndarray,
                             next_mu: np.ndarray, next_kappa: np.ndarray,
                             next_alpha: np.ndarray, next_beta: np.ndarray,
                             log_joint: np.ndarray, next_log: np.ndarray,
@@ -186,13 +175,11 @@ def _nig_bocpd_batch_kernel(xs: np.ndarray, log_hazard: float, log_growth: float
             prior_kappa,
             prior_alpha,
             prior_beta,
-            n_updates,
             next_mu,
             next_kappa,
             next_alpha,
             next_beta,
         )
-        n_updates += 1
         for r in range(r_max):
             mu[r] = next_mu[r]
             kappa[r] = next_kappa[r]
@@ -207,9 +194,9 @@ def _gamma_exp_log_pred_kernel(x: float, alpha: np.ndarray, beta: np.ndarray, ou
 
 
 @njit(cache=True)
-def _gamma_exp_update_kernel(x: float, alpha: np.ndarray, beta: np.ndarray,
-                             prior_alpha: float, prior_beta: float, n_updates: int,
+def _gamma_exp_update_kernel(x: float, alpha: np.ndarray, beta: np.ndarray, prior_alpha: float, prior_beta: float,
                              next_alpha: np.ndarray, next_beta: np.ndarray) -> None:
+    # Sliding-window cap, as in ``_gaussian_update_kernel``.
     r_max = len(alpha)
     next_alpha[0] = prior_alpha
     next_beta[0] = prior_beta
@@ -217,10 +204,6 @@ def _gamma_exp_update_kernel(x: float, alpha: np.ndarray, beta: np.ndarray,
         src = j - 1
         next_alpha[j] = alpha[src] + 1.0
         next_beta[j] = beta[src] + x
-    if n_updates >= r_max - 1:
-        src = r_max - 1
-        next_alpha[src] = alpha[src] + 1.0
-        next_beta[src] = beta[src] + x
 
 
 def _validate_positive(value: float, name: str) -> float:
@@ -265,7 +248,6 @@ class GaussianKnownVarianceModel:
         self.sigma0_sq = _validate_positive(sigma0_sq, "sigma0_sq")
         self.sigma_obs_sq = _validate_positive(sigma_obs_sq, "sigma_obs_sq")
         self.r_max: int | None = None
-        self._n_updates = 0
         self.mu_: np.ndarray | None = None
         self.sigma_sq_: np.ndarray | None = None
         self._next_mu: np.ndarray | None = None
@@ -274,7 +256,6 @@ class GaussianKnownVarianceModel:
 
     def reset(self, r_max: int) -> None:
         self.r_max = _validate_r_max(r_max)
-        self._n_updates = 0
         self.mu_ = np.full(self.r_max, self.mu_0, dtype=np.float64)
         self.sigma_sq_ = np.full(self.r_max, self.sigma0_sq, dtype=np.float64)
         self._next_mu = np.empty(self.r_max, dtype=np.float64)
@@ -298,20 +279,10 @@ class GaussianKnownVarianceModel:
         value = _validate_scalar(x, "GaussianKnownVarianceModel.update")
         mu, sigma_post = self._require_state()
         assert self._next_mu is not None and self._next_sigma_sq is not None
-        _gaussian_update_kernel(
-            value,
-            mu,
-            sigma_post,
-            self.sigma_obs_sq,
-            self.mu_0,
-            self.sigma0_sq,
-            self._n_updates,
-            self._next_mu,
-            self._next_sigma_sq,
-        )
+        _gaussian_update_kernel(value, mu, sigma_post, self.sigma_obs_sq, self.mu_0, self.sigma0_sq,
+                                self._next_mu, self._next_sigma_sq)
         self.mu_, self._next_mu = self._next_mu, self.mu_
         self.sigma_sq_, self._next_sigma_sq = self._next_sigma_sq, self.sigma_sq_
-        self._n_updates += 1
 
     def _require_state(self) -> tuple[np.ndarray, np.ndarray]:
         if self.mu_ is None or self.sigma_sq_ is None:
@@ -328,7 +299,6 @@ class NormalInverseGammaModel:
         self.alpha_0 = _validate_positive(alpha_0, "alpha_0")
         self.beta_0 = _validate_positive(beta_0, "beta_0")
         self.r_max: int | None = None
-        self._n_updates = 0
         self.mu_: np.ndarray | None = None
         self.kappa_: np.ndarray | None = None
         self.alpha_: np.ndarray | None = None
@@ -340,10 +310,10 @@ class NormalInverseGammaModel:
         self._log_pred: np.ndarray | None = None
         self._log_joint: np.ndarray | None = None
         self._next_log: np.ndarray | None = None
+        self._const_by_count: np.ndarray | None = None
 
     def reset(self, r_max: int) -> None:
         self.r_max = _validate_r_max(r_max)
-        self._n_updates = 0
         self.mu_ = np.full(self.r_max, self.mu_0, dtype=np.float64)
         self.kappa_ = np.full(self.r_max, self.kappa_0, dtype=np.float64)
         self.alpha_ = np.full(self.r_max, self.alpha_0, dtype=np.float64)
@@ -355,6 +325,12 @@ class NormalInverseGammaModel:
         self._log_pred = np.empty(self.r_max, dtype=np.float64)
         self._log_joint = np.empty(self.r_max, dtype=np.float64)
         self._next_log = np.empty(self.r_max, dtype=np.float64)
+        # Student-t log-normaliser by observation count. A slot holds at most r_max - 1 observations (the cap is a
+        # sliding window), so counts 0..r_max - 1 cover every slot for the whole stream.
+        df_values = 2.0 * (self.alpha_0 + 0.5 * np.arange(self.r_max, dtype=np.float64))
+        self._const_by_count = (
+            gammaln((df_values + 1.0) / 2.0) - gammaln(df_values / 2.0) - 0.5 * np.log(df_values * np.pi)
+        ).astype(np.float64)
 
     def log_pred_probs(self, x: float) -> NDArray:
         """Return log predictive probabilities for ``x`` at each run-length slot.
@@ -374,27 +350,12 @@ class NormalInverseGammaModel:
         mu, kappa, alpha, beta = self._require_state()
         assert self._next_mu is not None and self._next_kappa is not None
         assert self._next_alpha is not None and self._next_beta is not None
-        _nig_update_kernel(
-            value,
-            mu,
-            kappa,
-            alpha,
-            beta,
-            self.mu_0,
-            self.kappa_0,
-            self.alpha_0,
-            self.beta_0,
-            self._n_updates,
-            self._next_mu,
-            self._next_kappa,
-            self._next_alpha,
-            self._next_beta,
-        )
+        _nig_update_kernel(value, mu, kappa, alpha, beta, self.mu_0, self.kappa_0, self.alpha_0, self.beta_0,
+                           self._next_mu, self._next_kappa, self._next_alpha, self._next_beta)
         self.mu_, self._next_mu = self._next_mu, self.mu_
         self.kappa_, self._next_kappa = self._next_kappa, self.kappa_
         self.alpha_, self._next_alpha = self._next_alpha, self.alpha_
         self.beta_, self._next_beta = self._next_beta, self.beta_
-        self._n_updates += 1
 
     def batch_update_posterior(self, xs: NDArray, posterior: NDArray, log_hazard: float, log_growth: float) -> NDArray:
         """Run the full Adams-MacKay recursion over ``xs`` using the fused NIG kernel.
@@ -413,21 +374,10 @@ class NormalInverseGammaModel:
         out = np.empty((len(values), len(posterior)), dtype=np.float64)
         if len(values) == 0:
             return out
-        # Max count any slot can reach after this batch: n_updates already absorbed
-        # plus one more per step in the batch. Over-provision by +1 only to let the
-        # lookup use count indices without boundary branching.
-        max_count = self._n_updates + len(values) + 1
-        counts = np.arange(max_count + 1, dtype=np.float64)
-        alpha_values = self.alpha_0 + 0.5 * counts
-        df_values = 2.0 * alpha_values
-        const_by_count = (
-            gammaln((df_values + 1.0) / 2.0)
-            - gammaln(df_values / 2.0)
-            - 0.5 * np.log(df_values * np.pi)
-        ).astype(np.float64)
         assert self._next_mu is not None and self._next_kappa is not None
         assert self._next_alpha is not None and self._next_beta is not None
         assert self._log_joint is not None and self._next_log is not None
+        assert self._const_by_count is not None
         _nig_bocpd_batch_kernel(
             values,
             float(log_hazard),
@@ -441,17 +391,15 @@ class NormalInverseGammaModel:
             kappa,
             alpha,
             beta,
-            self._n_updates,
             self._next_mu,
             self._next_kappa,
             self._next_alpha,
             self._next_beta,
             self._log_joint,
             self._next_log,
-            const_by_count,
+            self._const_by_count,
             out,
         )
-        self._n_updates += len(values)
         # Guard the asymmetry with single-step update(): the njit kernel cannot raise,
         # so pathological inputs (all-zero incoming posterior, numeric underflow) would
         # silently produce NaN. Catch here so callers see a clear failure.
@@ -475,7 +423,6 @@ class GammaExponentialModel:
         self.alpha_0 = _validate_positive(alpha_0, "alpha_0")
         self.beta_0 = _validate_positive(beta_0, "beta_0")
         self.r_max: int | None = None
-        self._n_updates = 0
         self.alpha_: np.ndarray | None = None
         self.beta_: np.ndarray | None = None
         self._next_alpha: np.ndarray | None = None
@@ -484,7 +431,6 @@ class GammaExponentialModel:
 
     def reset(self, r_max: int) -> None:
         self.r_max = _validate_r_max(r_max)
-        self._n_updates = 0
         self.alpha_ = np.full(self.r_max, self.alpha_0, dtype=np.float64)
         self.beta_ = np.full(self.r_max, self.beta_0, dtype=np.float64)
         self._next_alpha = np.empty(self.r_max, dtype=np.float64)
@@ -508,19 +454,9 @@ class GammaExponentialModel:
         value = self._validate_positive_observation(x, "GammaExponentialModel.update")
         alpha, beta = self._require_state()
         assert self._next_alpha is not None and self._next_beta is not None
-        _gamma_exp_update_kernel(
-            value,
-            alpha,
-            beta,
-            self.alpha_0,
-            self.beta_0,
-            self._n_updates,
-            self._next_alpha,
-            self._next_beta,
-        )
+        _gamma_exp_update_kernel(value, alpha, beta, self.alpha_0, self.beta_0, self._next_alpha, self._next_beta)
         self.alpha_, self._next_alpha = self._next_alpha, self.alpha_
         self.beta_, self._next_beta = self._next_beta, self.beta_
-        self._n_updates += 1
 
     def _require_state(self) -> tuple[np.ndarray, np.ndarray]:
         if self.alpha_ is None or self.beta_ is None:

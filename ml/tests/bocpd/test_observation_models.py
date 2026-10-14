@@ -74,17 +74,34 @@ def test_gamma_exponential_prior_predictive_and_update() -> None:
     assert model.beta_[1] == pytest.approx(7.0)
 
 
-def test_saturated_final_slot_advances_from_itself_after_first_population() -> None:
-    model = NormalInverseGammaModel(mu_0=0.0, kappa_0=1.0, alpha_0=1.0, beta_0=1.0)
-    model.reset(3)
+def test_final_slot_is_a_sliding_window_of_the_last_r_max_minus_one_observations() -> None:
+    """The cap slot holds the statistics of the last ``r_max - 1`` observations, never the whole stream.
 
-    for value in (1.0, 2.0, 3.0):
-        model.update(value)
+    Accumulating the whole stream pools every past regime into the slot that represents the current long run, so a
+    run that outlives ``r_max`` is scored against a mixture of history and the posterior falsely resets.
+    """
+    r_max = 4
+    xs = np.array([5.0, -3.0, 0.4, 0.9, 1.3, 0.7, 1.1], dtype=np.float64)
+    window = xs[-(r_max - 1):]
 
-    mu, kappa, alpha, beta = _nig_closed_form(np.array([1.0, 2.0, 3.0]), 0.0, 1.0, 1.0, 1.0)
-    actual = [model.mu_[2], model.kappa_[2], model.alpha_[2], model.beta_[2]]
-    np.testing.assert_allclose(actual, [mu, kappa, alpha, beta])
-    assert model.mu_[2] != pytest.approx(_nig_closed_form(np.array([2.0, 3.0]), 0.0, 1.0, 1.0, 1.0)[0])
+    nig = NormalInverseGammaModel(mu_0=0.0, kappa_0=1.0, alpha_0=1.0, beta_0=1.0)
+    gaussian = GaussianKnownVarianceModel(mu_0=0.0, sigma0_sq=4.0, sigma_obs_sq=9.0)
+    gamma_exp = GammaExponentialModel(alpha_0=2.0, beta_0=3.0)
+    for model in (nig, gaussian, gamma_exp):
+        model.reset(r_max)
+        for value in np.abs(xs) if model is gamma_exp else xs:
+            model.update(float(value))
+
+    mu, kappa, alpha, beta = _nig_closed_form(window, 0.0, 1.0, 1.0, 1.0)
+    np.testing.assert_allclose([nig.mu_[-1], nig.kappa_[-1], nig.alpha_[-1], nig.beta_[-1]], [mu, kappa, alpha, beta])
+
+    posterior_var = 1.0 / (1.0 / 4.0 + window.size / 9.0)
+    posterior_mu = posterior_var * (0.0 / 4.0 + window.sum() / 9.0)
+    assert gaussian.sigma_sq_[-1] == pytest.approx(posterior_var)
+    assert gaussian.mu_[-1] == pytest.approx(posterior_mu)
+
+    assert gamma_exp.alpha_[-1] == pytest.approx(2.0 + window.size)
+    assert gamma_exp.beta_[-1] == pytest.approx(3.0 + np.abs(window).sum())
 
 
 def test_observation_models_reject_invalid_hyperparameters_and_observations() -> None:

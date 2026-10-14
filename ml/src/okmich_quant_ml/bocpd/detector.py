@@ -15,7 +15,14 @@ def _validate_scalar_observation(x: float, context: str) -> float:
 
 
 class BayesianOnlineChangepointDetector:
-    """Adams-MacKay Bayesian online changepoint detection with constant hazard."""
+    """Adams-MacKay Bayesian online changepoint detection with constant hazard.
+
+    Row convention, after consuming ``x_t``: slot ``r >= 1`` is ``(1 - h) * P(the run containing x_t holds r
+    observations | x_1..x_t)``, and slot 0 is exactly the hazard ``h``, the prior chance that the *next* observation
+    opens a new run. Slot 0 therefore carries no evidence. The filtered run-length posterior is
+    ``posterior[1:] / (1 - posterior[0])``, and "x_t opened a new run" is its first entry. The last slot folds every run
+    of ``r_max - 1`` or more observations; its sufficient statistics are those of the last ``r_max - 1`` observations.
+    """
 
     def __init__(self, observation_model: ObservationModel, hazard_rate: float, r_max: int) -> None:
         self.observation_model = observation_model
@@ -99,10 +106,21 @@ class BayesianOnlineChangepointDetector:
 
     @property
     def changepoint_prob(self) -> float:
-        """Probability that the latest observation starts a new run."""
-        return float(self.run_length_posterior_[0])
+        """Probability that the latest observation opened a new run: ``posterior[1] / (1 - posterior[0])``.
+
+        Not ``posterior[0]``, which equals the hazard rate at every step (see the class docstring). Returns 1.0 before
+        the first observation, when a new run is certain to open with it.
+        """
+        posterior = self.run_length_posterior_
+        observed_mass = 1.0 - posterior[0]
+        if observed_mass <= 0.0:
+            return 1.0
+        return float(posterior[1] / observed_mass)
 
     @property
     def map_run_length(self) -> int:
-        """MAP run-length index for the latest posterior."""
-        return int(np.argmax(self.run_length_posterior_))
+        """MAP number of observations in the current run (argmax over slots ``>= 1``); 0 before any observation."""
+        posterior = self.run_length_posterior_
+        if not np.any(posterior[1:] > 0.0):
+            return 0
+        return int(np.argmax(posterior[1:])) + 1

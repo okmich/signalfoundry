@@ -50,7 +50,7 @@ def test_update_recursion_matches_manual_constant_hazard_calculation() -> None:
 
     np.testing.assert_allclose(first, np.array([0.25, 0.75, 0.0]), atol=1e-12)
     np.testing.assert_allclose(second, np.array([0.25, 0.30, 0.45]), atol=1e-12)
-    assert detector.changepoint_prob == pytest.approx(second[0])
+    assert detector.changepoint_prob == pytest.approx(second[1] / (1.0 - second[0]))
     assert detector.map_run_length == 2
     assert model.updates == [10.0, 11.0]
 
@@ -90,6 +90,26 @@ def test_reset_restores_detector_and_observation_model_prior_state() -> None:
     np.testing.assert_array_equal(detector.run_length_posterior_, np.array([1.0, 0.0, 0.0, 0.0, 0.0]))
     assert detector.changepoint_prob == 1.0
     assert detector.map_run_length == 0
+
+
+def test_slot_zero_is_the_hazard_so_changepoint_prob_reads_slot_one() -> None:
+    """Slot 0 equals the hazard after every update, so it carries no evidence; ``changepoint_prob`` must spike on the
+    first bar of a clean shift and stay low inside a settled run."""
+    rng = np.random.default_rng(seed=11)
+    xs = np.concatenate([rng.standard_normal(80), rng.standard_normal(40) + 5.0])
+    hazard = 1.0 / 50.0
+    detector = BayesianOnlineChangepointDetector(NormalInverseGammaModel(), hazard_rate=hazard, r_max=100)
+
+    cp = np.empty(xs.size, dtype=np.float64)
+    for i, x in enumerate(xs):
+        posterior = detector.update(float(x))
+        assert posterior[0] == pytest.approx(hazard)
+        cp[i] = detector.changepoint_prob
+
+    assert cp[0] == pytest.approx(1.0)  # the first observation always opens a run
+    assert int(np.argmax(cp[1:])) + 1 == 80
+    assert cp[80] > 10.0 * np.median(cp[10:80])
+    assert np.median(cp[10:80]) < 0.05
 
 
 def test_detector_rejects_invalid_configuration_and_inputs() -> None:
