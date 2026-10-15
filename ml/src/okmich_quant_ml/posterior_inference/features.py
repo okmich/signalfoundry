@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enum import StrEnum
+
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import rel_entr, xlogy
@@ -217,6 +219,128 @@ def dwell_length(probs: NDArray) -> NDArray:
     change = np.concatenate([[True], argmax[1:] != argmax[:-1]])
     last_change = np.maximum.accumulate(np.where(change, positions, -1))
     return (positions - last_change + 1).astype(np.int64)
+
+
+class DwellStatistic(StrEnum):
+    """Summary statistic for :func:`typical_dwell`."""
+
+    MEDIAN = "median"
+    MEAN = "mean"
+
+
+def _argmax_runs(p: NDArray) -> tuple[NDArray, NDArray]:
+    """Return ``(argmax, run_start)``: the argmax per row and the row at which its current run began."""
+    argmax = np.argmax(p, axis=1)
+    if argmax.size == 0:
+        return argmax, np.zeros(0, dtype=np.int64)
+    positions = np.arange(p.shape[0])
+    change = np.concatenate([[True], argmax[1:] != argmax[:-1]])
+    run_start = np.maximum.accumulate(np.where(change, positions, -1))
+    return argmax, run_start
+
+
+def switch_indicator(probs: NDArray) -> NDArray:
+    """Hard regime-switch indicator ``1[argmax_t != argmax_{t-1}]`` per row, shape ``(T,)`` with int dtype.
+
+    Row 0 is 0 (no prior row). Causal: row ``t`` reads rows ``t-1`` and ``t`` only.
+    """
+    p = _validate_posterior_matrix(probs, "switch_indicator")
+    T = p.shape[0]
+    out = np.zeros(T, dtype=np.int64)
+    if T > 1:
+        argmax = np.argmax(p, axis=1)
+        out[1:] = argmax[1:] != argmax[:-1]
+    return out
+
+
+def posterior_shift(probs: NDArray) -> NDArray:
+    """Soft switch magnitude: total-variation distance ``½ Σ_k |p_{t,k} − p_{t-1,k}|`` per row, shape ``(T,)``.
+
+    The posterior mass that moved between consecutive bars, in ``[0, 1]``. Row 0 is 0. Unlike the overlap form
+    ``1 − Σ_k p_{t-1,k} p_{t,k}``, it is 0 on a static posterior however uncertain (the overlap form reads 0.5 on a
+    static uniform K=2 posterior), so it measures movement, not doubt. Causal.
+    """
+    p = _validate_posterior_matrix(probs, "posterior_shift")
+    out = np.zeros(p.shape[0], dtype=float)
+    if p.shape[0] > 1:
+        out[1:] = 0.5 * np.abs(p[1:] - p[:-1]).sum(axis=1)
+    return out
+
+
+def last_transition(probs: NDArray) -> NDArray:
+    """``(from_state, to_state)`` of the most recent hard switch at or before each row, shape ``(T, 2)`` int.
+
+    Both columns are -1 until the first switch. Feeds transition-identity features (e.g. one-hot of the pair).
+    Causal: row ``t`` depends on rows ``<= t`` only.
+    """
+    p = _validate_posterior_matrix(probs, "last_transition")
+    T = p.shape[0]
+    out = np.full((T, 2), -1, dtype=np.int64)
+    if T < 2:
+        return out
+    argmax, run_start = _argmax_runs(p)
+    has_switch = run_start > 0
+    out[has_switch, 0] = argmax[run_start[has_switch] - 1]
+    out[has_switch, 1] = argmax[run_start[has_switch]]
+    return out
+
+
+def entry_confidence(probs: NDArray) -> NDArray:
+    """Top probability at the bar the current argmax run began, carried forward, shape ``(T,)``.
+
+    How confidently the current regime was entered: a run that opened at 0.51 is a tentative call even if
+    ``top_prob`` has since risen. Row 0 opens the first run. Causal.
+    """
+    p = _validate_posterior_matrix(probs, "entry_confidence")
+    if p.shape[0] == 0:
+        return np.zeros(0, dtype=float)
+    _, run_start = _argmax_runs(p)
+    return np.max(p, axis=1)[run_start]
+
+
+def typical_dwell(probs: NDArray, statistic: DwellStatistic = DwellStatistic.MEDIAN) -> NDArray:
+    """Per-state typical length of fully observed argmax runs, shape ``(K,)``; NaN for a state with none.
+
+    The first run (may have begun before the window) and the last run (still open) are censored and excluded.
+    This is a *training-window* statistic: fit it on train and pass it to :func:`dwell_ratio` on later data.
+    Computing it on the evaluation window leaks that window's future run lengths into every row.
+    """
+    p = _validate_posterior_matrix(probs, "typical_dwell")
+    statistic = DwellStatistic(statistic)
+    K = p.shape[1]
+    out = np.full(K, np.nan)
+    T = p.shape[0]
+    if T == 0:
+        return out
+    argmax = np.argmax(p, axis=1)
+    starts = np.flatnonzero(np.concatenate([[True], argmax[1:] != argmax[:-1]]))
+    lengths = np.diff(np.concatenate([starts, [T]]))
+    states = argmax[starts]
+    lengths, states = lengths[1:-1], states[1:-1]
+    reducer = np.median if statistic is DwellStatistic.MEDIAN else np.mean
+    for k in range(K):
+        runs = lengths[states == k]
+        if runs.size:
+            out[k] = float(reducer(runs))
+    return out
+
+
+def dwell_ratio(probs: NDArray, typical: NDArray) -> NDArray:
+    """Current run length over the current state's typical dwell, shape ``(T,)``.
+
+    ``dwell_length(probs) / typical[argmax_t]`` with ``typical`` from :func:`typical_dwell` on a training window.
+    Above 1: the regime has outlived its usual hold. NaN where the state's typical dwell is NaN. Causal given a
+    frozen ``typical``.
+    """
+    p = _validate_posterior_matrix(probs, "dwell_ratio")
+    typical = np.asarray(typical, dtype=float)
+    if typical.shape != (p.shape[1],):
+        raise ValueError(f"dwell_ratio: typical must have shape ({p.shape[1]},), got {typical.shape}")
+    finite = typical[np.isfinite(typical)]
+    if finite.size and finite.min() <= 0.0:
+        raise ValueError(f"dwell_ratio: typical dwell lengths must be > 0, got min={finite.min()}")
+    argmax, run_start = _argmax_runs(p)
+    return (np.arange(p.shape[0]) - run_start + 1) / typical[argmax]
 
 
 def _rolling_mean_1d(x: NDArray, window: int) -> NDArray:
