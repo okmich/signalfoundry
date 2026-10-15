@@ -48,6 +48,7 @@ import pandas as pd
 from scipy.linalg import solve_triangular
 
 from .base import BaseMarkovSwitching
+from .kernels import _scaled_forward_filter
 
 
 class MarkovSwitchingVAR(BaseMarkovSwitching):
@@ -141,12 +142,10 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
         for restart in range(num_restarts):
             params = self._initialize_params(Y_eff, X, seed=restart)
             try:
-                loglik, params, alpha_fwd, gamma = self._run_em(
-                    Y_eff, X, params, maxiter, tol
-                )
+                loglik, params = self._run_em(Y_eff, X, params, maxiter, tol)
                 if loglik > best_loglik:
                     best_loglik = loglik
-                    best_result = (params, alpha_fwd, gamma)
+                    best_result = params
             except Exception as e:
                 warnings.warn(f"EM restart {restart} failed: {e}")
 
@@ -155,8 +154,12 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
                 "All EM restarts failed. Try fewer regimes, lower order, or more data."
             )
 
-        params, alpha_fwd, gamma = best_result
+        # One E-step on the winning parameters, so the stored probabilities and log-likelihood describe the stored
+        # model (when EM stops on maxiter its last E-step ran on the parameters before the final M-step).
+        params = best_result
+        alpha_fwd, gamma, _, best_loglik = self._e_step(Y_eff, X, params)
         self._params_ = params
+        self._streaming_cache_ = None
         self.transition_matrix_ = params["P"]
         self.filtered_probabilities_ = alpha_fwd
         self.regime_probabilities_ = gamma
@@ -181,16 +184,16 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
     # EM internals
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _run_em(self, Y_eff, X, params, maxiter, tol):
+    def _run_em(self, Y_eff, X, params, maxiter, tol) -> tuple[float, dict]:
+        """Return (log-likelihood of the last E-step, final parameters)."""
         prev_loglik = -np.inf
-        alpha_fwd = gamma = None
         for _ in range(maxiter):
-            alpha_fwd, gamma, xi, loglik = self._e_step(Y_eff, X, params)
+            _, gamma, xi, loglik = self._e_step(Y_eff, X, params)
             if abs(loglik - prev_loglik) < tol:
                 break
             params = self._m_step(Y_eff, X, gamma, xi)
             prev_loglik = loglik
-        return loglik, params, alpha_fwd, gamma
+        return loglik, params
 
     # ── E-step ──────────────────────────────────────────────────────────────────
 
@@ -207,28 +210,8 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
         P = params["P"]
         pi0 = self._stationary_dist(P)
 
-        # Forward pass (scaled)
-        alpha = np.empty((n_eff, K))
-        log_scale = np.empty(n_eff)
-
-        ll_max = log_liks[0].max()
-        liks = np.exp(log_liks[0] - ll_max)
-        alpha[0] = pi0 * liks
-        c = alpha[0].sum()
-        alpha[0] /= max(c, 1e-300)
-        log_scale[0] = ll_max + np.log(max(c, 1e-300))
-
-        for t in range(1, n_eff):
-            ll_max = log_liks[t].max()
-            liks = np.exp(log_liks[t] - ll_max)
-            alpha[t] = (alpha[t - 1] @ P) * liks
-            c = alpha[t].sum()
-            if c > 1e-300:
-                alpha[t] /= c
-            else:
-                alpha[t] = 1.0 / K
-                c = 1.0 / K
-            log_scale[t] = ll_max + np.log(c)
+        # Forward pass (scaled; same kernels as update())
+        alpha, log_scale = _scaled_forward_filter(pi0, np.ascontiguousarray(P, dtype=np.float64), log_liks)
 
         loglik = float(log_scale.sum())
 
@@ -366,24 +349,27 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
         X: np.ndarray,
         B_k: np.ndarray,
         Sigma_k: np.ndarray,
+        factor: tuple[np.ndarray, float] | None = None,
     ) -> np.ndarray:
-        """log N(Y_t; X_t B_k, Σ_k) for each t, via Cholesky."""
+        """log N(Y_t; X_t B_k, Σ_k) for each t, via Cholesky. ``factor`` = precomputed ``_mvn_factor(Sigma_k)``."""
         n = Y_eff.shape[1]
         resid = Y_eff - X @ B_k                             # (T_eff, n)
-
-        # Cholesky of Σ_k (with safety for near-singular cases)
-        try:
-            L = np.linalg.cholesky(Sigma_k)
-        except np.linalg.LinAlgError:
-            L = np.linalg.cholesky(Sigma_k + 1e-6 * np.eye(n))
-
-        log_det = 2.0 * np.sum(np.log(np.diag(L)))
+        L, log_det = factor if factor is not None else self._mvn_factor(Sigma_k)
 
         # Solve L^{-1} resid for each t: inv_L_resid = L^{-1} resid'
         inv_L_resid = solve_triangular(L, resid.T, lower=True).T   # (T_eff, n)
         maha = np.sum(inv_L_resid ** 2, axis=1)                    # (T_eff,)
 
         return -0.5 * (n * np.log(2.0 * np.pi) + log_det + maha)
+
+    @staticmethod
+    def _mvn_factor(Sigma_k: np.ndarray) -> tuple[np.ndarray, float]:
+        """Lower Cholesky factor of Σ_k (jittered by 1e-6·I if not PD) and log|Σ_k|."""
+        try:
+            L = np.linalg.cholesky(Sigma_k)
+        except np.linalg.LinAlgError:
+            L = np.linalg.cholesky(Sigma_k + 1e-6 * np.eye(Sigma_k.shape[0]))
+        return L, 2.0 * np.sum(np.log(np.diag(L)))
 
     def _initialize_params(self, Y_eff, X, seed):
         rng = np.random.default_rng(seed + self.random_state)
@@ -446,19 +432,53 @@ class MarkovSwitchingVAR(BaseMarkovSwitching):
         return pi
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # Inference
+    # Online Learning L1: streaming filter
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def predict_regime(self, causal: bool = False) -> np.ndarray:
-        """Most likely regime at each time step (length T − order)."""
-        self._validate_fitted()
-        probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
-        return np.argmax(probs, axis=1)
+    def update(self, Y_new: np.ndarray) -> MarkovSwitchingVAR:
+        """
+        Filter one or more new observation rows causally without refitting.
 
-    def predict_regime_proba(self, causal: bool = False) -> np.ndarray:
-        """Regime probabilities, shape (T − order, n_regimes)."""
+        Uses the E-step's own per-regime Gaussian log-likelihood and forward arithmetic, so streaming rows one by one
+        reproduces the filter of a batch E-step over the extended series. Parameters stay at their fit-time values.
+
+        Parameters
+        ----------
+        Y_new : np.ndarray, shape (n_assets,) or (m, n_assets)
+            New observation row(s) in arrival order.
+
+        Returns
+        -------
+        self
+        """
         self._validate_fitted()
-        return self.filtered_probabilities_ if causal else self.regime_probabilities_
+        rows = np.atleast_2d(np.asarray(Y_new, dtype=np.float64))
+        if rows.shape[1] != self.n_assets_:
+            raise ValueError(f"Y_new must have {self.n_assets_} columns, got {rows.shape[1]}")
+        self._require_finite(rows, "update()")
+        P = np.asarray(self.transition_matrix_, dtype=np.float64)
+        B, factors = self._streaming_terms()
+
+        for row in rows:
+            # Design row matches _build_design_matrix: [1, Y_{t-1}', Y_{t-2}', …, Y_{t-p}']
+            x = np.concatenate(([1.0], self._history_buffer_[::-1].reshape(-1)))[None, :]
+            log_liks = np.array([self._mvn_loglik(row[None, :], x, B[k], self._params_["Sigma"][k], factors[k])[0]
+                                 for k in range(self.n_regimes)])
+            self._last_forward_alpha_ = self._forward_update(self._last_forward_alpha_, P, log_liks)
+            self._history_buffer_ = np.vstack((self._history_buffer_[1:], row))
+            self._n_updates_ += 1
+
+        return self
+
+    def _streaming_terms(self) -> tuple[list[np.ndarray], list[tuple[np.ndarray, float]]]:
+        """Per-regime packed coefficients and Σ factors for ``update()``; built once per fit, lazily."""
+        if getattr(self, "_streaming_cache_", None) is None:
+            prm = self._params_
+            self._streaming_cache_ = (
+                [self._pack_B(prm["intercepts"][k], prm["ar_coeffs"][k]) for k in range(self.n_regimes)],
+                [self._mvn_factor(prm["Sigma"][k]) for k in range(self.n_regimes)],
+            )
+        return self._streaming_cache_
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Forecasting

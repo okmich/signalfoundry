@@ -48,7 +48,7 @@ from matplotlib.figure import Figure
 from scipy.optimize import minimize
 
 from .base import BaseMarkovSwitching
-from .kernels import _garch_filter_kernel, _propagate_regime_probs
+from .kernels import _garch_filter_kernel, _garch_variance_step, _gaussian_loglik, _scaled_forward_filter
 
 
 class MarkovSwitchingGARCH(BaseMarkovSwitching):
@@ -124,12 +124,10 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
         for restart in range(num_restarts):
             params = self._initialize_params(y, seed=restart)
             try:
-                loglik, params, alpha_fwd, gamma, garch_s2 = self._run_em(
-                    y, params, maxiter, tol
-                )
+                loglik, params = self._run_em(y, params, maxiter, tol)
                 if loglik > best_loglik:
                     best_loglik = loglik
-                    best_result = (params, alpha_fwd, gamma, garch_s2)
+                    best_result = params
             except Exception as e:
                 warnings.warn(f"EM restart {restart} failed: {e}")
 
@@ -138,18 +136,21 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
                 "All EM restarts failed. Try fewer regimes, lower order, or more data."
             )
 
-        params, alpha_fwd, gamma, garch_s2 = best_result
+        # The EM loop's last E-step ran on the parameters *before* its final M-step. Re-run it on the final parameters
+        # so the filtered/smoothed probabilities, GARCH state and log-likelihood all describe the stored model.
+        params = best_result
+        alpha_fwd, gamma, _, best_loglik, garch_s2 = self._e_step(y, params)
         self._params_ = params
         self.transition_matrix_ = params["P"]
         self.filtered_probabilities_ = alpha_fwd          # (n_obs, K)
         self.regime_probabilities_ = gamma                 # (n_obs, K)  smoothed
 
-        # Store GARCH state at last observation for forecasting
-        self._last_garch_sigma2_ = garch_s2[-1]           # (K,)
-        self._last_ar_residuals_ = np.array([
-            self._compute_ar_residuals(y, params["intercepts"][k], params["ar_coeffs"][k])[-1]
-            for k in range(self.n_regimes)
-        ])
+        # Store GARCH state at last observation for forecasting and streaming
+        residuals = [self._compute_ar_residuals(y, params["intercepts"][k], params["ar_coeffs"][k])
+                     for k in range(self.n_regimes)]
+        self._last_garch_sigma2_ = garch_s2[-1].copy()    # (K,)
+        self._last_ar_residuals_ = np.array([r[-1] for r in residuals])
+        self._sigma2_reset_ = np.array([self._sigma2_init(params, k, residuals[k]) for k in range(self.n_regimes)])
         self._history_buffer_ = y[-self.order:].copy()
 
         n_obs = len(y) - self.order
@@ -164,15 +165,16 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
 
     # ─── EM internals ───────────────────────────────────────────────────────────
 
-    def _run_em(self, y: np.ndarray, params: dict, maxiter: int, tol: float) -> tuple:
+    def _run_em(self, y: np.ndarray, params: dict, maxiter: int, tol: float) -> tuple[float, dict]:
+        """Return (log-likelihood of the last E-step, parameters after the last M-step)."""
         prev_loglik = -np.inf
         for _ in range(maxiter):
-            alpha_fwd, gamma, xi, loglik, garch_s2 = self._e_step(y, params)
+            _, gamma, xi, loglik, _ = self._e_step(y, params)
             params = self._m_step(y, params, gamma, xi)
             if abs(loglik - prev_loglik) < tol:
                 break
             prev_loglik = loglik
-        return loglik, params, alpha_fwd, gamma, garch_s2
+        return loglik, params
 
     def _e_step(self, y: np.ndarray, params: dict) -> tuple:
         K = self.n_regimes
@@ -185,8 +187,7 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
             residuals = self._compute_ar_residuals(
                 y, params["intercepts"][k], params["ar_coeffs"][k]
             )
-            ab = params["alpha"][k] + params["beta"][k]
-            sigma2_init = (params["omega"][k] / (1.0 - ab)) if ab < 1.0 else np.var(residuals)
+            sigma2_init = self._sigma2_init(params, k, residuals)
             s2, ll = _garch_filter_kernel(
                 residuals, params["omega"][k], params["alpha"][k], params["beta"][k], sigma2_init
             )
@@ -196,31 +197,9 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
         P = params["P"]
         pi0 = self._stationary_dist(P)
 
-        # ── Forward pass (scaled) ────────────────────────────────────────────────
-        alpha = np.zeros((n, K))
-        log_scale = np.zeros(n)
-
-        ll_shifted = log_liks[0] - log_liks[0].max()
-        liks = np.exp(ll_shifted)
-        alpha[0] = pi0 * liks
-        c = alpha[0].sum()
-        alpha[0] /= max(c, 1e-300)
-        log_scale[0] = log_liks[0].max() + np.log(max(c, 1e-300))
-
-        for t in range(1, n):
-            ll_shifted = log_liks[t] - log_liks[t].max()
-            liks = np.exp(ll_shifted)
-            alpha_pred = alpha[t - 1] @ P
-            alpha[t] = alpha_pred * liks
-            c = alpha[t].sum()
-            if c > 1e-300:
-                alpha[t] /= c
-            else:
-                alpha[t] = 1.0 / K
-                c = 1.0 / K
-            log_scale[t] = log_liks[t].max() + np.log(c)
-
-        loglik = float(log_scale.sum())
+        # ── Forward pass (scaled; same kernels as update()) ─────────────────────────
+        alpha, log_norm = _scaled_forward_filter(pi0, np.ascontiguousarray(P, dtype=np.float64), log_liks)
+        loglik = float(log_norm.sum())
 
         # ── Backward pass (scaled) ───────────────────────────────────────────────
         beta_bw = np.ones((n, K))
@@ -343,15 +322,19 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
     # ─── Helpers ────────────────────────────────────────────────────────────────
 
     def _compute_ar_residuals(self, y: np.ndarray, intercept: float, ar_coeffs: np.ndarray) -> np.ndarray:
+        """ε_t = y_t − (c + Σ_j φ_j y_{t−1−j}) for t = p … T−1 (vectorised; same summation order per element)."""
         p = self.order
         T = len(y)
-        residuals = np.empty(T - p)
-        for t in range(p, T):
-            ar_mean = intercept
-            for j in range(p):
-                ar_mean += ar_coeffs[j] * y[t - 1 - j]
-            residuals[t - p] = y[t] - ar_mean
-        return residuals
+        ar_mean = np.full(T - p, float(intercept))
+        for j in range(p):
+            ar_mean += ar_coeffs[j] * y[p - 1 - j: T - 1 - j]
+        return y[p:] - ar_mean
+
+    @staticmethod
+    def _sigma2_init(params: dict, k: int, residuals: np.ndarray) -> float:
+        """GARCH start / underflow-reset variance of regime k: unconditional ω/(1−α−β), or the residual variance."""
+        ab = params["alpha"][k] + params["beta"][k]
+        return float(params["omega"][k] / (1.0 - ab)) if ab < 1.0 else float(np.var(residuals))
 
     def _initialize_params(self, y: np.ndarray, seed: int) -> dict:
         rng = np.random.default_rng(seed + self.random_state)
@@ -390,18 +373,64 @@ class MarkovSwitchingGARCH(BaseMarkovSwitching):
             pi = np.ones(K) / K
         return pi
 
-    # ─── Inference ──────────────────────────────────────────────────────────────
+    # ─── Online Learning L1: streaming filter ───────────────────────────────────
 
-    def predict_regime(self, causal: bool = False) -> np.ndarray:
-        """Most likely regime at each time step (length T − order)."""
-        self._validate_fitted()
-        probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
-        return np.argmax(probs, axis=1)
+    def update(self, y_new: float | np.ndarray) -> MarkovSwitchingGARCH:
+        """
+        Filter one or more new observations causally without refitting.
 
-    def predict_regime_proba(self, causal: bool = False) -> np.ndarray:
-        """Regime probabilities, shape (T − order, n_regimes)."""
+        Each regime's GARCH recursion and AR residual are advanced by one bar with the same functions the E-step uses
+        (``_compute_ar_residuals``, ``_garch_variance_step``, ``_gaussian_loglik``, then the shared forward step), so
+        streaming a series bar by bar reproduces the batch E-step filter over the extended series. Parameters stay at
+        their fit-time values.
+
+        Parameters
+        ----------
+        y_new : float or array-like
+            New observation(s) in arrival order.
+
+        Returns
+        -------
+        self
+        """
         self._validate_fitted()
-        return self.filtered_probabilities_ if causal else self.regime_probabilities_
+        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        self._require_finite(observations, "update()")
+        prm = self._params_
+        P = np.asarray(self.transition_matrix_, dtype=np.float64)
+        K = self.n_regimes
+        resets = self._sigma2_resets()
+
+        for y in observations:
+            window = np.append(self._history_buffer_, y)
+            log_liks = np.empty(K)
+            sigma2_new = np.empty(K)
+            resid_new = np.empty(K)
+            for k in range(K):
+                sigma2_new[k] = _garch_variance_step(prm["omega"][k], prm["alpha"][k], prm["beta"][k],
+                                                     self._last_ar_residuals_[k], self._last_garch_sigma2_[k],
+                                                     resets[k])
+                resid_new[k] = self._compute_ar_residuals(window, prm["intercepts"][k], prm["ar_coeffs"][k])[0]
+                log_liks[k] = _gaussian_loglik(resid_new[k], sigma2_new[k])
+
+            self._last_forward_alpha_ = self._forward_update(self._last_forward_alpha_, P, log_liks)
+            self._last_garch_sigma2_ = sigma2_new
+            self._last_ar_residuals_ = resid_new
+            self._history_buffer_ = window[1:]
+            self._n_updates_ += 1
+
+        return self
+
+    def _sigma2_resets(self) -> np.ndarray:
+        """Per-regime underflow-reset variances (the E-step's start variances); rebuilt for pre-v2.1 pickles."""
+        if getattr(self, "_sigma2_reset_", None) is None:
+            self._sigma2_reset_ = np.array([
+                self._sigma2_init(self._params_, k,
+                                  self._compute_ar_residuals(self.data_, self._params_["intercepts"][k],
+                                                             self._params_["ar_coeffs"][k]))
+                for k in range(self.n_regimes)
+            ])
+        return self._sigma2_reset_
 
     # ─── Forecasting ────────────────────────────────────────────────────────────
 

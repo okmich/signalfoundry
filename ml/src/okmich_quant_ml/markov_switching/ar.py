@@ -7,6 +7,18 @@ This module provides a wrapper around statsmodels' MarkovAutoregression that off
 - Regime-weighted predictions
 - Different AR models per regime
 
+Model (Hamilton 1989 mean form, as statsmodels fits it)
+-------------------------------------------------------
+    y_t − μ_{s_t} = Σ_{l=1}^{p} φ_{s_t,l} (y_{t−l} − μ_{s_{t−l}}) + ε_t,   ε_t ~ N(0, σ²_{s_t})
+
+``const[k]`` in statsmodels is the regime MEAN μ_k, not an intercept. Each lag is centred on the regime that was
+active at that lag, so the conditional mean depends on the last p+1 regimes and the exact filter, streaming
+``update()`` and forecasts all run on the joint path (s_t, …, s_{t−p}).
+
+statsmodels 0.14.5 (the pinned version) keys the switching innovation variance on s_{t−p+1} instead of s_t whenever
+order ≥ 2 (a broadcasting slip in ``_conditional_loglikelihoods``). ``_HamiltonMarkovAutoregression`` corrects it, so
+σ² always follows the current regime.
+
 Causality notes
 ---------------
 The EM algorithm uses ALL data to fit parameters. After fitting, two regime probability sequences are available:
@@ -19,6 +31,7 @@ The EM algorithm uses ALL data to fit parameters. After fitting, two regime prob
   Uses the full data series including future observations. Equivalent to HMM SMOOTHING mode. Useful for diagnostics and
   visualization, but introduces look-ahead bias if used as training labels.
 
+``predict_regime()`` / ``predict_regime_proba()`` default to the causal (filtered) sequence.
 The ``forecast()`` method is always causal: it projects forward from the last observed bar using only past data and the transition matrix.
 """
 
@@ -30,9 +43,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+from statsmodels.tsa.regime_switching.markov_autoregression import MarkovAutoregression
 
 from .base import BaseMarkovSwitching
-from .kernels import _ar_forecast_kernel, _ar_variance_kernel, _forward_step
+from .kernels import _ar_variance_kernel, _companion, _ms_ar_deviation_moments, _ms_ar_forecast_moments, \
+    _ms_ar_joint_forward_step
+
+
+class _HamiltonMarkovAutoregression(MarkovAutoregression):
+    """statsmodels ``MarkovAutoregression`` with the switching innovation variance keyed on the current regime.
+
+    Upstream reshapes the variance to ``(k_regimes, 1, 1)``, which broadcasts against the trailing three axes of the
+    ``(k_regimes,) * (order + 1) + (nobs,)`` residual array: correct for order 1, but for order ≥ 2 σ² follows
+    s_{t−order+1}. Upstream's EM variance step already weights by P(s_t), so after this fix EM (which only supplies
+    start values for the MLE) and the likelihood key σ² on the same regime.
+    """
+
+    def _conditional_loglikelihoods(self, params):
+        resid = self._resid(params)
+        variance = params[self.parameters["variance"]].squeeze()
+        if self.switching_variance:
+            variance = np.reshape(variance, (self.k_regimes,) + (1,) * (self.order + 1))
+        return -0.5 * resid ** 2 / variance - 0.5 * np.log(2 * np.pi * variance)
 
 
 class MarkovSwitchingAR(BaseMarkovSwitching):
@@ -48,11 +80,12 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
     Mathematical Foundation
     -----------------------
     Regime: s_t ~ Markov chain with transition matrix P
-    Returns: y_t | s_t ~ AR(p) with regime-dependent coefficients
+    Observations: mean-form AR(p) with regime-dependent mean, coefficients and variance
 
-    Regime s:
-        y_t = φ₀^{(s)} + φ₁^{(s)} y_{t-1} + ... + φ_p^{(s)} y_{t-p} + ε_t
-        ε_t ~ N(0, σ²^{(s)})
+        y_t − μ^{(s_t)} = φ₁^{(s_t)} (y_{t-1} − μ^{(s_{t-1})}) + ... + φ_p^{(s_t)} (y_{t-p} − μ^{(s_{t-p})}) + ε_t
+        ε_t ~ N(0, σ²^{(s_t)})
+
+    μ^{(s)} is the regime mean. Within a persistent regime the equivalent intercept is μ^{(s)} (1 − Σ φ^{(s)}).
 
     Parameters
     ----------
@@ -122,19 +155,19 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         exog : np.ndarray, shape (n_samples, n_exog), optional
             Exogenous variables
         num_restarts : int, default=3
-            Number of random restarts (picks best AIC/BIC)
+            Number of random start-parameter searches (statsmodels ``search_reps``). The search draws from the global
+            NumPy RNG, which is seeded with ``random_state`` for the fit and restored afterwards, so fits are
+            reproducible. Not thread-safe: concurrent fits in threads of one process share that global RNG.
 
         Returns
         -------
         self
-        """
-        try:
-            from statsmodels.tsa.regime_switching import markov_autoregression
-        except ImportError:
-            raise ImportError(
-                "statsmodels is required. Install with: pip install statsmodels>=0.13.0"
-            )
 
+        Notes
+        -----
+        If the statsmodels fit raises, the model keeps its previous fitted state untouched (``refit_window`` relies on
+        this to fall back to ``update()``).
+        """
         y = np.asarray(y).flatten()
         if len(y) < self.order + 10:
             raise ValueError(
@@ -142,18 +175,21 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
                 f"got {len(y)}"
             )
 
-        self.data_ = y
-        self._exog_used = exog is not None
-
+        # statsmodels draws its start-parameter search from the global RNG — seed it locally, then restore.
+        global_rng_state = np.random.get_state()
+        np.random.seed(self.random_state)
         try:
-            sm_model = markov_autoregression.MarkovAutoregression(endog=y, k_regimes=self.n_regimes, order=self.order,
-                                                                  switching_ar=True,
-                                                                  switching_variance=self.switching_variance, exog=exog)
-            best_model = sm_model.fit(search_reps=max(1, num_restarts),
-                                      search_iter=20, maxiter=500, disp=False)
+            sm_model = _HamiltonMarkovAutoregression(endog=y, k_regimes=self.n_regimes, order=self.order,
+                                                     switching_ar=True, switching_variance=self.switching_variance,
+                                                     exog=exog)
+            best_model = sm_model.fit(search_reps=max(1, num_restarts), search_iter=20, maxiter=500, disp=False)
         except Exception as e:
             raise RuntimeError(f"Fitting failed: {e}. Try reducing n_regimes or order.") from e
+        finally:
+            np.random.set_state(global_rng_state)
 
+        self.data_ = y
+        self._exog_used = exog is not None
         self.fitted_model_ = best_model
         self.regime_probabilities_ = best_model.smoothed_marginal_probabilities
         self.filtered_probabilities_ = best_model.filtered_marginal_probabilities
@@ -166,11 +202,11 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         self.bic = best_model.bic
         self._is_fitted = True
 
-        # Streaming state (Online Learning L1)
-        self._last_forward_alpha_ = np.asarray(self.filtered_probabilities_[-1], dtype=np.float64)
+        # Streaming state (Online Learning L1): joint P(s_T, …, s_{T−p} | y_{1:T}), flattened (s_T most significant)
+        self._set_joint_state(best_model.filtered_joint_probabilities[..., -1].reshape(-1))
         self._history_buffer_ = np.asarray(self.data_[-self.order:], dtype=np.float64)
         self._n_updates_ = 0
-        self._cached_ar_coeffs_, self._cached_intercepts_, self._cached_sigma2s_ = (
+        self._cached_ar_coeffs_, self._cached_means_, self._cached_sigma2s_ = (
             self._extract_all_regime_params_arrays()
         )
 
@@ -191,43 +227,6 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
                     "Consider reducing n_regimes."
                 )
 
-    # ─── Inference ──────────────────────────────────────────────────────────────
-
-    def predict_regime(self, causal: bool = False) -> np.ndarray:
-        """
-        Return most likely regime at each time step.
-
-        Parameters
-        ----------
-        causal : bool, default=False
-            True  → filtered P(s_t | y_{1:t}), no look-ahead — use for ML labels / live trading.
-            False → smoothed P(s_t | y_{1:T}), look-ahead  — use for diagnostics only.
-
-        Returns
-        -------
-        regimes : np.ndarray, shape (n_samples,)
-        """
-        self._validate_fitted()
-        probs = self.filtered_probabilities_ if causal else self.regime_probabilities_
-        return np.argmax(probs, axis=1)
-
-    def predict_regime_proba(self, causal: bool = False) -> np.ndarray:
-        """
-        Return regime probabilities for the training series.
-
-        Parameters
-        ----------
-        causal : bool, default=False
-            True  → filtered probabilities (causal).
-            False → smoothed probabilities (look-ahead).
-
-        Returns
-        -------
-        probabilities : np.ndarray, shape (n_samples, n_regimes)
-        """
-        self._validate_fitted()
-        return self.filtered_probabilities_ if causal else self.regime_probabilities_
-
     # ─── Forecasting ────────────────────────────────────────────────────────────
 
     def forecast(self, steps: int = 1, regime: int | None = None, return_variance: bool = False,
@@ -240,11 +239,12 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         steps : int, default=1
             Forecast horizon
         regime : int, optional
-            Condition on a specific regime. If None, uses regime-weighted forecast.
+            Condition on the path staying in ``regime`` for all steps. If None, the exact regime-mixed forecast.
         return_variance : bool, default=False
             If True, return a dict with mean, variance, and regime details.
         causal : bool, default=True
-            If True, propagate from filtered (causal) probabilities at T.
+            Kept for API symmetry. The forecast origin is always the latest filtered joint regime state, which at the
+            last observed bar equals the smoothed one, so this flag does not change the result.
 
         Returns
         -------
@@ -252,61 +252,99 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         dict with keys:
             'mean'               : np.ndarray, shape (steps,)
             'variance'           : np.ndarray, shape (steps,)
-            'regime_forecasts'   : dict[int, np.ndarray]
+            'regime_forecasts'   : dict[int, np.ndarray]  — E[y_{T+h} | s_{T+h} = r, y_{1:T}]
             'regime_probabilities': np.ndarray, shape (steps, n_regimes)
+
+        Notes
+        -----
+        Mean and variance are the exact predictive moments of the mean-form MS-AR(p) (see
+        ``_ms_ar_forecast_moments``), not a mixture of stay-in-regime forecasts. ``regime_forecasts`` are conditional
+        on the regime at the forecast horizon, so ``mean == Σ_r regime_probabilities[:, r] · regime_forecasts[r]``.
         """
         self._validate_fitted()
-
-        if self._exog_used:
-            raise NotImplementedError(
-                "forecast() does not support exogenous variables. "
-                "The model was fitted with exog, but forecasting with exog is not yet implemented."
-            )
+        self._require_no_exog("forecast()")
 
         if regime is not None:
             return self._forecast_single_regime(regime, steps, return_variance)
 
-        regime_probs = self.forecast_regime_probabilities(steps, causal=causal)
+        ar_coeffs, means, sigma2s = self._cached_ar_coeffs_, self._cached_means_, self._cached_sigma2s_
+        weight0, first0, second0 = _ms_ar_deviation_moments(means, self._last_forward_joint_, self._history_buffer_)
+        P = np.ascontiguousarray(self.transition_matrix_, dtype=np.float64)
+        probs, first, second = _ms_ar_forecast_moments(ar_coeffs, sigma2s, P, weight0, first0, second0, steps,
+                                                       return_variance)
 
-        regime_means: dict[int, np.ndarray] = {}
-        regime_vars: dict[int, np.ndarray] = {}
-        for r in range(self.n_regimes):
-            out = self._forecast_single_regime(r, steps, return_variance=True)
-            regime_means[r] = out["mean"]
-            regime_vars[r] = out["variance"]
-
-        # Law of Total Expectation / Total Variance
-        # E[y_{T+h}]   = Σ_r π_r μ_r
-        # Var[y_{T+h}] = Σ_r π_r σ_r²  +  Σ_r π_r (μ_r − ȳ)²
-        p = regime_probs                                                                   # (steps, K)
-        mu = np.stack([regime_means[r] for r in range(self.n_regimes)], axis=1)           # (steps, K)
-        sigma2 = np.stack([regime_vars[r] for r in range(self.n_regimes)], axis=1)        # (steps, K)
-
-        mean = np.sum(p * mu, axis=1)
-        variance = np.sum(p * sigma2, axis=1) + np.sum(p * (mu - mean[:, None]) ** 2, axis=1)
+        # Moments conditional on the terminal regime s_{T+h} = r, then law of total expectation / variance
+        safe = np.where(probs > 0.0, probs, 1.0)
+        cond_dev = first / safe                                            # E[z | s = r]
+        cond_mean = means[None, :] + cond_dev                              # E[y | s = r]
+        mean = np.sum(probs * cond_mean, axis=1)
         if not return_variance:
             return mean
 
+        cond_var = np.maximum(second / safe - cond_dev ** 2, 0.0)          # Var[y | s = r]
+        variance = np.sum(probs * cond_var, axis=1) + np.sum(probs * (cond_mean - mean[:, None]) ** 2, axis=1)
         return {
             "mean": mean,
             "variance": variance,
-            "regime_probabilities": regime_probs,
-            "regime_forecasts": dict(regime_means),
+            "regime_probabilities": probs,
+            "regime_forecasts": {r: cond_mean[:, r] for r in range(self.n_regimes)},
         }
 
     def _forecast_single_regime(self, regime: int, steps: int,
                                 return_variance: bool = False) -> np.ndarray | dict[str, np.ndarray]:
-        """Forecast assuming the process stays in `regime` for all steps.
+        """Forecast conditional on s_{T+1} = … = s_{T+h} = ``regime``.
 
-        Variance uses the exact MA(∞) representation:
-            Var[y_{T+h}] = σ² Σ_{j=0}^{h-1} ψ_j²
+        The uncertain past path is re-weighted by P(s_T → regime). With Z_T the deviation state and F the regime's
+        companion matrix:
+            E[y_{T+h}]   = μ + [F^h E(Z_T)]₀
+            Var[y_{T+h}] = [F^h Cov(Z_T) F^h']₀₀ + σ² Σ_{j=0}^{h-1} ψ_j²
         """
-        ar_coeffs, intercept, sigma2 = self._get_regime_params(regime)
-        history = self._history_buffer_
-        mean = _ar_forecast_kernel(ar_coeffs, intercept, history, steps)
+        if not 0 <= regime < self.n_regimes:
+            raise ValueError(f"regime must be in [0, {self.n_regimes}), got {regime}")
+        ar_coeffs, means, sigma2s = self._cached_ar_coeffs_, self._cached_means_, self._cached_sigma2s_
+        joint = self._last_forward_joint_
+        s_now = np.arange(len(joint)) // (self.n_regimes ** self.order)
+        conditioned = joint * np.asarray(self.transition_matrix_)[s_now, regime]
+        total = conditioned.sum()
+        if not total > 0.0:
+            raise ValueError(f"regime {regime} is unreachable from the current regime belief (P(s_T → {regime}) = 0)")
+        conditioned = conditioned / total
+        _, first, second = _ms_ar_deviation_moments(means, conditioned, self._history_buffer_)
+        ez = first.sum(axis=0)
+        cov_z = second.sum(axis=0) - np.outer(ez, ez)
+
+        F = _companion(ar_coeffs[regime])
+        Fh = np.eye(self.order)
+        mean = np.empty(steps)
+        path_var = np.empty(steps)
+        for h in range(steps):
+            Fh = F @ Fh
+            mean[h] = means[regime] + (Fh @ ez)[0]
+            path_var[h] = max((Fh @ cov_z @ Fh.T)[0, 0], 0.0)
         if not return_variance:
             return mean
-        return {"mean": mean, "variance": _ar_variance_kernel(ar_coeffs, sigma2, steps)}
+        return {"mean": mean, "variance": _ar_variance_kernel(ar_coeffs[regime], sigma2s[regime], steps) + path_var}
+
+    def _require_no_exog(self, caller: str) -> None:
+        if self._exog_used:
+            raise NotImplementedError(
+                f"{caller} does not support exogenous variables: the model was fitted with exog, and the "
+                "mean-form conditional mean needs the exog values of every new bar."
+            )
+
+    def _set_joint_state(self, joint: np.ndarray) -> None:
+        """Set the streaming joint path belief and its regime marginal together (they must never disagree)."""
+        self._last_forward_joint_ = np.ascontiguousarray(joint, dtype=np.float64)
+        self._last_forward_alpha_ = self._last_forward_joint_.reshape(self.n_regimes, -1).sum(axis=1)
+
+    def __setstate__(self, state: dict) -> None:
+        """Refuse fitted models pickled before v2.1: their filter state, OU θ and order ≥ 2 likelihood are wrong."""
+        if state.get("_is_fitted") and "_last_forward_joint_" not in state:
+            raise ValueError(
+                f"{type(self).__name__} was saved before markov_switching v2.1 (intercept-form filter, MS-OU "
+                "θ = const/(1−φ), variance keyed on a lagged regime for order ≥ 2). Refit it with the current version."
+            )
+        self.__dict__.update(state)
 
     # ─── Online Learning L1: streaming filter ───────────────────────────────────
 
@@ -314,11 +352,12 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         """
         Process one or more new observations without refitting parameters.
 
-        Runs the causal HMM forward pass for each new bar, updating the
-        filtered regime belief state.  Parameters (AR coefficients, variances,
-        transition matrix) remain fixed at their fit-time values.
+        Runs the causal Hamilton filter for each new bar on the joint regime path (s_t, …, s_{t−p}), exactly as
+        statsmodels filters the training sample, so streaming a series bar by bar reproduces the batch filtered
+        probabilities. Parameters (means, AR coefficients, variances, transition matrix) remain fixed at their
+        fit-time values.
 
-        This is O(K²) per observation — suitable for tick/bar-level streaming.
+        This is O(K^(p+2)) per observation — suitable for tick/bar-level streaming.
 
         Parameters
         ----------
@@ -339,49 +378,21 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
           project forward from the updated belief state automatically.
         """
         self._validate_fitted()
+        self._require_no_exog("update()")
         observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        self._require_finite(observations, "update()")
+        P = np.ascontiguousarray(self.transition_matrix_, dtype=np.float64)
 
         for y in observations:
-            self._last_forward_alpha_ = _forward_step(
-                self._cached_ar_coeffs_,
-                self._cached_intercepts_,
-                self._cached_sigma2s_,
-                np.asarray(self.transition_matrix_, dtype=np.float64),
-                self._last_forward_alpha_,
-                self._history_buffer_,
-                float(y),
-            )
+            self._set_joint_state(_ms_ar_joint_forward_step(self._cached_ar_coeffs_, self._cached_means_,
+                                                            self._cached_sigma2s_, P, self._last_forward_joint_,
+                                                            self._history_buffer_, float(y)))
             # Roll history buffer: drop oldest, append new observation
             self._history_buffer_ = np.roll(self._history_buffer_, -1)
             self._history_buffer_[-1] = y
             self._n_updates_ += 1
 
         return self
-
-    def current_regime_proba(self) -> np.ndarray:
-        """
-        Return filtered regime probabilities at the most recent bar.
-
-        Returns the training-time filtered probability if no ``update()``
-        calls have been made, or the streaming belief state otherwise.
-
-        Returns
-        -------
-        proba : np.ndarray, shape (n_regimes,)
-        """
-        self._validate_fitted()
-        return self._last_forward_alpha_.copy()
-
-    def current_regime(self) -> int:
-        """
-        Return the most likely regime at the most recent bar.
-
-        Returns
-        -------
-        regime : int
-        """
-        self._validate_fitted()
-        return int(np.argmax(self._last_forward_alpha_))
 
     # ─── Online Learning L2: sliding-window refit ───────────────────────────────
 
@@ -422,6 +433,8 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         ``refit_window()`` call.
         """
         self._validate_fitted()
+        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
+        self._require_finite(observations, "refit_window()")
 
         from collections import deque
 
@@ -431,8 +444,6 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
             self._window_buffer_ = deque(seed, maxlen=window)
             self._bars_since_refit_ = 0
             self._n_refits_ = 0
-
-        observations = np.atleast_1d(np.asarray(y_new, dtype=np.float64)).flatten()
 
         for y in observations:
             self._window_buffer_.append(float(y))
@@ -456,16 +467,16 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         return self
 
     def _extract_all_regime_params_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Cache regime params as contiguous arrays for the Numba forward kernel."""
+        """Cache regime params as contiguous arrays for the Numba filter and forecast kernels."""
         ar_coeffs = np.zeros((self.n_regimes, self.order), dtype=np.float64)
-        intercepts = np.zeros(self.n_regimes, dtype=np.float64)
+        means = np.zeros(self.n_regimes, dtype=np.float64)
         sigma2s = np.zeros(self.n_regimes, dtype=np.float64)
         for r in range(self.n_regimes):
-            c, ic, s2 = self._get_regime_params(r)
+            c, mu, s2 = self._get_regime_params(r)
             ar_coeffs[r] = c
-            intercepts[r] = ic
+            means[r] = mu
             sigma2s[r] = s2
-        return ar_coeffs, intercepts, sigma2s
+        return ar_coeffs, means, sigma2s
 
     # ─── Parameter extraction ───────────────────────────────────────────────────
 
@@ -473,14 +484,17 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         return dict(zip(self.fitted_model_.data.param_names, self.fitted_model_.params))
 
     def _get_regime_params(self, regime: int) -> tuple[np.ndarray, float, float]:
-        """Return (ar_coeffs, intercept, sigma2) for `regime` in a single pass."""
+        """Return (ar_coeffs, mean, sigma2) for `regime` in a single pass.
+
+        statsmodels' ``const[k]`` is the regime MEAN μ_k of the mean-form model, not an intercept.
+        """
         params = self._get_param_dict()
 
         ar_coeffs = np.array([params.get(f"ar.L{lag}[{regime}]", 0.0) for lag in range(1, self.order + 1)])
-        intercept = 0.0
+        mean = 0.0
         for name in (f"const[{regime}]", f"intercept[{regime}]", f"mu[{regime}]"):
             if name in params:
-                intercept = params[name]
+                mean = params[name]
                 break
 
         if self.switching_variance:
@@ -488,7 +502,7 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         else:
             sigma2 = params.get("sigma2", 1.0)
 
-        return ar_coeffs, float(intercept), float(sigma2)
+        return ar_coeffs, float(mean), float(sigma2)
 
     # ─── Diagnostics ────────────────────────────────────────────────────────────
 
@@ -503,15 +517,18 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
 
         Returns
         -------
-        pd.DataFrame with columns: regime, intercept, ar_L1, …, ar_Lp,
+        pd.DataFrame with columns: regime, mean, intercept, ar_L1, …, ar_Lp,
             variance, persistence, half_life
+
+            ``mean`` is the fitted regime mean μ; ``intercept`` is the equivalent AR intercept μ (1 − Σφ) that applies
+            while the process stays in the regime.
         """
         self._validate_fitted()
 
         regimes = [regime] if regime is not None else range(self.n_regimes)
         rows = []
         for r in regimes:
-            ar_coeffs, intercept, variance = self._get_regime_params(r)
+            ar_coeffs, mean, variance = self._get_regime_params(r)
             persistence = float(np.sum(ar_coeffs))
             if 0 < persistence < 1:
                 half_life = np.log(0.5) / np.log(persistence)
@@ -522,7 +539,8 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
 
             rows.append({
                 "regime": r,
-                "intercept": intercept,
+                "mean": mean,
+                "intercept": mean * (1.0 - persistence),
                 **{f"ar_L{i + 1}": ar_coeffs[i] for i in range(self.order)},
                 "variance": variance,
                 "persistence": persistence,
@@ -604,16 +622,10 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         if best_model is None:
             raise RuntimeError("All model configurations failed")
 
-        self.n_regimes = best_model.n_regimes
+        # Adopt the winner's full fitted state, including the streaming filter state and cached params that
+        # update() and forecast() read. ``order`` goes through its setter (MarkovSwitchingOU validates it).
+        self.__dict__.update({k: v for k, v in vars(best_model).items() if k != "order"})
         self.order = best_model.order
-        self.fitted_model_ = best_model.fitted_model_
-        self.regime_probabilities_ = best_model.regime_probabilities_
-        self.filtered_probabilities_ = best_model.filtered_probabilities_
-        self.transition_matrix_ = best_model.transition_matrix_
-        self.data_ = best_model.data_
-        self.aic = best_model.aic
-        self.bic = best_model.bic
-        self._is_fitted = True
         return self
 
     # ─── Plotting ───────────────────────────────────────────────────────────────
@@ -703,7 +715,7 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         return fig
 
     def plot_regime_parameters(self, figsize: tuple[int, int] = (12, 8)) -> Figure:
-        """Bar-chart visualization of AR coefficients, intercept, variance, and persistence."""
+        """Bar-chart visualization of AR coefficients, regime mean, variance, and persistence."""
         self._validate_fitted()
 
         params = self.get_regime_parameters()
@@ -729,14 +741,14 @@ class MarkovSwitchingAR(BaseMarkovSwitching):
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3, axis="y")
 
-        # Intercept
+        # Regime mean
         ax = axes[0, 1]
-        ax.bar(x, params["intercept"], color=colors, alpha=0.8)
+        ax.bar(x, params["mean"], color=colors, alpha=0.8)
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, fontsize=8)
         ax.axhline(y=0, color="black", linewidth=0.5)
-        ax.set_ylabel("Intercept", fontsize=10)
-        ax.set_title("Intercept by Regime", fontsize=11, fontweight="bold")
+        ax.set_ylabel("Mean (μ)", fontsize=10)
+        ax.set_title("Mean by Regime", fontsize=11, fontweight="bold")
         ax.grid(True, alpha=0.3, axis="y")
 
         # Variance

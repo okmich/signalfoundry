@@ -63,7 +63,7 @@ def test_history_buffer_matches_data_tail(fitted):
 
 def test_cached_params_shape(fitted):
     assert fitted._cached_ar_coeffs_.shape == (fitted.n_regimes, fitted.order)
-    assert fitted._cached_intercepts_.shape == (fitted.n_regimes,)
+    assert fitted._cached_means_.shape == (fitted.n_regimes,)
     assert fitted._cached_sigma2s_.shape == (fitted.n_regimes,)
 
 

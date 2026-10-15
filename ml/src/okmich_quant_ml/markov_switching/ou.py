@@ -7,19 +7,22 @@ Continuous-time OU process per regime s:
 
     dX_t = κ^(s) (θ^(s) − X_t) dt + σ^(s) dW_t
 
-Exact discretisation with time step Δt:
+Exact discretisation with time step Δt (within a regime):
 
     X_{t+Δt} = θ^(s) + φ^(s) (X_t − θ^(s)) + η_t
     η_t ~ N(0, σ²_disc^(s))
 
 where:
     φ^(s)        = e^{−κ^(s) Δt}                            (AR(1) coefficient)
-    c^(s)        = θ^(s) (1 − φ^(s))                        (AR(1) intercept)
+    c^(s)        = θ^(s) (1 − φ^(s))                        (equivalent AR(1) intercept)
     σ²_disc^(s)  = σ²^(s) / (2κ^(s)) · (1 − φ^(s)²)
+
+The underlying MS-AR(1) is fitted in Hamilton's mean form, X_t − θ^(s_t) = φ^(s_t) (X_{t−1} − θ^(s_{t−1})) + η_t,
+so statsmodels' ``const[s]`` IS θ^(s). Across a switch, the deviation is measured from the regime active at each bar.
 
 Inverse reparametrisation (discrete → continuous):
     κ^(s)        = −ln(φ^(s)) / Δt
-    θ^(s)        = c^(s) / (1 − φ^(s))
+    θ^(s)        = μ^(s)                                     (the fitted regime mean)
     σ²^(s)       = σ²_disc^(s) · 2κ^(s) / (1 − φ^(s)²)
 
 Mean-reversion requires  0 < φ^(s) < 1  (i.e. κ > 0).
@@ -138,21 +141,21 @@ class MarkovSwitchingOU(MarkovSwitchingAR):
         dict with keys: phi, kappa, theta, sigma2_disc, sigma2_cont, half_life,
             is_mean_reverting
         """
-        ar_coeffs, intercept, sigma2_disc = self._get_regime_params(regime)
+        ar_coeffs, mean, sigma2_disc = self._get_regime_params(regime)
         phi = float(ar_coeffs[0])
 
         mr = 0.0 < phi < 1.0
+        # Mean form: the fitted regime mean is θ directly (it is NOT an intercept to divide by 1 − φ).
+        theta = mean
 
         if mr:
             kappa = -np.log(phi) / self.dt
-            theta = intercept / (1.0 - phi)
             # σ²_disc = σ²_cont / (2κ) · (1 − φ²)  →  σ²_cont = σ²_disc · 2κ / (1 − φ²)
             sigma2_cont = sigma2_disc * 2.0 * kappa / (1.0 - phi ** 2)
             half_life = np.log(2.0) / kappa
         else:
             # Non-mean-reverting regime: return NaN for OU-specific params
             kappa = np.nan
-            theta = intercept / (1.0 - phi) if phi != 1.0 else np.nan
             sigma2_cont = np.nan
             half_life = np.nan
 
@@ -206,8 +209,9 @@ class MarkovSwitchingOU(MarkovSwitchingAR):
 
         Notes
         -----
-        ``kappa``, ``theta``, ``sigma``, and ``half_life`` are NaN for regimes
-        where φ ∉ (0, 1) (i.e. non-mean-reverting regimes).
+        ``kappa``, ``sigma``, and ``half_life`` are NaN for regimes where φ ∉ (0, 1)
+        (i.e. non-mean-reverting regimes). ``theta`` is always the fitted regime mean;
+        it is a long-run level only when the regime mean-reverts.
         """
         self._validate_fitted()
         return self.ou_parameters_.copy()
