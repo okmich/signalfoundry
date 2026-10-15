@@ -11,7 +11,6 @@ dependencies = [
     "numba==0.63.1",
     "pandas==2.3.0",
     "plotly>=6.5.2",
-    "ruptures==1.1.10",
     "scikit-learn==1.7.2",
     "tqdm==4.67.3",
     "tstrends==0.3.0",
