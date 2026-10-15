@@ -3,7 +3,6 @@ from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 from scipy import stats
-from scipy.stats import linregress
 
 from .label_util import map_label_to_trend_direction
 
@@ -18,28 +17,40 @@ REGIME_EVALUATION_METRICS = {
     # CORE DISCRIMINABILITY METRICS
     # =========================================================================
     'regime_discriminability': {
-        'description': 'Composite score measuring how well-separated regimes are',
-        'calculation': 'Weighted combination of volatility, efficiency, persistence differences',
+        'description': 'How distinguishable the episodes of a regime are from those of its closest other regime',
+        'calculation': 'Per metric (volatility, return_consistency, mean_duration, autocorrelation_lag1) and per '
+                       'other regime: |2*AUC - 1| over the per-episode values of the two regimes. A pair is scored by '
+                       'its best metric; the regime takes its lowest pair score (nearest neighbour). Absolute 0-1 scale.',
         'interpretation': {
-            'excellent': '> 0.8 - Regimes are clearly distinct',
-            'good': '0.6 - 0.8 - Moderate separation',
-            'poor': '< 0.5 - Regimes are too similar',
-            'warning': 'Identical scores across algorithms indicate arbitrary splitting'
+            'distinct': '> 0.8 (AUC > 0.9) - Episodes almost always separable',
+            'moderate': '0.4 - 0.8 (AUC 0.7 - 0.9) - Partial overlap',
+            'poor': '< 0.4 (AUC < 0.7) - Episodes largely indistinguishable',
         },
-        'ideal_pattern': 'Consistent high scores across all regimes in a model'
+        'companion': 'discriminability_metric names the separating metric; for a single-axis label it should be '
+                     'that axis (e.g. volatility for a vol label), not mean_duration alone',
+        'warning': 'Descriptive only: separable episodes say nothing about forward returns'
     },
 
     'efficiency_ratio': {
-        'description': 'Quality of price movement within regime',
-        'calculation': 'abs(total_return) / sum(abs_returns)',
+        'description': 'Quality of price movement within the episodes of the regime',
+        'calculation': 'sum over episodes of abs(net episode return) / sum over episodes of sum(abs_returns)',
         'interpretation': {
-            'trending': '> 0.3 - Clean directional moves',
-            'grinding': '0.1 - 0.3 - Noisy but directional',
-            'choppy': '< 0.1 - Mean-reverting, whipsaw action',
-            'perfect_trend': '1.0 - Straight line moves',
-            'pure_noise': '0.0 - Complete randomness'
+            'perfect_trend': '1.0 - Every episode is a straight line',
+            'pure_noise': 'about 1/sqrt(episode length) - e.g. 0.31 at 10 bars, 0.10 at 100 bars',
         },
-        'ideal_pattern': 'Clear separation between high/low efficiency regimes'
+        'warning': 'Depends on episode length, so it does not compare regimes; use efficiency_ratio_rw for that'
+    },
+
+    'efficiency_ratio_rw': {
+        'description': 'Efficiency relative to a random walk with the same bar sizes',
+        'calculation': 'sum of abs(net episode return) / its mean over 64 seeded draws that keep the absolute '
+                       'return of every bar and randomise its sign',
+        'interpretation': {
+            'trending': '> 1 - Drift or positive autocorrelation within episodes',
+            'random_walk': 'about 1.0 at any episode length, fat tails and volatility clustering included',
+            'mean_reverting': '< 1 - Moves within an episode tend to undo each other'
+        },
+        'ideal_pattern': 'Clear separation between trending and mean-reverting regimes'
     },
 
     # =========================================================================
@@ -67,7 +78,7 @@ REGIME_EVALUATION_METRICS = {
     },
 
     'max_drawdown': {
-        'description': 'Maximum peak-to-trough decline within regime',
+        'description': 'Maximum peak-to-trough decline within one episode (each episode starts a fresh curve at 1.0)',
         'interpretation': 'Lower values indicate more stable regimes',
         'warning': 'Extreme values (>10) may indicate regime miscalssification'
     },
@@ -99,6 +110,7 @@ REGIME_EVALUATION_METRICS = {
     # =========================================================================
     'autocorrelation_lag1': {
         'description': 'Serial correlation of returns (momentum vs mean-reversion)',
+        'calculation': 'Lag-1 pairs inside episodes only, both sides centred on the regime mean',
         'interpretation': {
             'momentum': '> 0.1 - Positive persistence',
             'mean_reversion': '< -0.1 - Negative persistence',
@@ -108,12 +120,15 @@ REGIME_EVALUATION_METRICS = {
     },
 
     'trend_persistence': {
-        'description': 'R-squared of cumulative returns trend',
+        'description': 'Linearity of the compounded path within episodes',
+        'calculation': 'Bar-weighted mean, over episodes of 10+ bars, of |r| of a straight-line fit to the path',
         'interpretation': {
             'strong_trend': '> 0.3 - Consistent directional movement',
             'weak_trend': '0.1 - 0.3 - Some directionality',
             'no_trend': '< 0.1 - Directionless movement'
-        }
+        },
+        'warning': 'A pure random walk scores about 0.67 at any episode length, so these thresholds do not '
+                   'separate trend from noise; prefer efficiency_ratio_rw'
     },
 
     'return_consistency': {
@@ -156,7 +171,7 @@ ALGORITHM_EVALUATION_CRITERIA = {
 
     'efficiency_separation': {
         'weight': 0.25,
-        'calculation': 'max(efficiency_ratio) - min(efficiency_ratio)',
+        'calculation': 'max(efficiency_ratio_rw) - min(efficiency_ratio_rw)',
         'description': 'Ability to distinguish trending vs choppy markets'
     },
 
@@ -183,14 +198,14 @@ ALGORITHM_EVALUATION_CRITERIA = {
 # INTERPRETATION GUIDELINES
 # =============================================================================
 SUCCESS PATTERNS:
-✅ Clear trending regime: High efficiency (>0.3), good discriminability (>0.8)
-✅ Clear choppy regime: Low efficiency (<0.1), high volatility, good discriminability  
+✅ Clear trending regime: efficiency_ratio_rw well above 1, good discriminability (>0.8)
+✅ Clear choppy regime: efficiency_ratio_rw well below 1, high volatility, good discriminability
 ✅ Volatility regimes: Clear high/medium/low volatility separation
 ✅ Realistic durations: 5-20 periods average, good stability (>1.0)
 
 FAILURE PATTERNS:
 ❌ All regimes similar: Near-identical metrics across regimes
-❌ Poor discriminability: Scores <0.5 indicate arbitrary splitting
+❌ Poor discriminability: Scores <0.4 mean the episodes of neighbouring regimes are largely indistinguishable
 ❌ Unrealistic durations: Avg duration <2 (too jumpy) or >50 (too sticky)
 ❌ Extreme frequencies: One regime dominates (>60%) or is too rare (<5%)
 
@@ -344,6 +359,13 @@ def label_path_structure_statistics(df: pd.DataFrame, state_col: str, returns_co
     -------
     stats_df : pd.DataFrame
         DataFrame with regime states as rows and evaluation metrics as columns
+
+    Notes
+    -----
+    An episode is a contiguous run of one label in the row order of ``df``; a NaN label ends a run. Point statistics
+    (mean, std, skew, ...) pool all bars of a regime. Path statistics (autocorrelation, efficiency, trend persistence,
+    volatility stability, drawdown) are measured inside each episode and then aggregated, so no statistic ever spans
+    the gap between two separate episodes of the same regime.
     """
     required_cols = [state_col, returns_col, price_col]
     missing_cols = [col for col in required_cols if col not in df.columns]
@@ -353,12 +375,17 @@ def label_path_structure_statistics(df: pd.DataFrame, state_col: str, returns_co
     if df[state_col].isna().all():
         raise ValueError(f"Regime column '{state_col}' contains only NaN values")
 
-    # Filter out NaN regimes
-    valid_data = df.dropna(subset=[state_col]).copy()
+    # Episodes are numbered before NaN labels are dropped, so the runs on either side of a NaN stay separate
+    labels = df[state_col]
+    episode_ids = (labels != labels.shift()).cumsum()
+    valid_mask = labels.notna()
+    valid_data = df.loc[valid_mask].copy()
+    valid_data["_episode_id"] = episode_ids[valid_mask]
     if len(valid_data) == 0:
         raise ValueError("No valid regime labels found after removing NaN values")
 
     regime_stats = {}
+    episode_tables = {}
     unique_regimes = valid_data[state_col].unique()
 
     for regime in unique_regimes:
@@ -369,7 +396,7 @@ def label_path_structure_statistics(df: pd.DataFrame, state_col: str, returns_co
             continue
 
         returns = regime_data[returns_col]
-        prices = regime_data[price_col]
+        episodes = regime_data["_episode_id"]
 
         # Basic regime properties
         stats_dict = {
@@ -382,22 +409,25 @@ def label_path_structure_statistics(df: pd.DataFrame, state_col: str, returns_co
         stats_dict.update(_calculate_return_stats(returns))
 
         # Volatility and risk metrics
-        stats_dict.update(_calculate_volatility_stats(returns, prices))
+        stats_dict.update(_calculate_volatility_stats(returns, episodes))
 
         # Regime persistence and transitions
-        stats_dict.update(_calculate_persistence_stats(valid_data, state_col, regime))
+        stats_dict.update(_calculate_persistence_stats(episodes))
 
         # Path structure validation metrics
-        stats_dict.update(_calculate_path_validation_stats(returns, prices))
+        stats_dict.update(_calculate_path_validation_stats(returns, episodes))
 
         regime_stats[regime] = stats_dict
+        episode_tables[regime] = _episode_metrics(returns, episodes)
 
     if not regime_stats:
         raise ValueError("No regimes met the minimum sample requirement")
 
     # Create results DataFrame
     stats_df = pd.DataFrame.from_dict(regime_stats, orient="index")
-    stats_df["regime_discriminability"] = _calculate_discriminability_score(stats_df)
+    discriminability = _calculate_discriminability_score(episode_tables)
+    stats_df["regime_discriminability"] = stats_df["regime"].map(discriminability["regime_discriminability"])
+    stats_df["discriminability_metric"] = stats_df["regime"].map(discriminability["discriminability_metric"])
 
     # Sort by frequency for better readability
     stats_df = stats_df.sort_values(sort_by_col, ascending=False)
@@ -454,49 +484,49 @@ def _calculate_return_stats(returns: pd.Series) -> Dict[str, float]:
     }
 
 
-def _calculate_volatility_stats(returns: pd.Series, prices: pd.Series) -> Dict[str, float]:
-    """Calculate volatility and risk metrics"""
+# Episode-level evaluation settings
+_MIN_BARS_SCALE = 5  # shortest episode whose volatility / return consistency enters the discriminability score
+_MIN_BARS_ACF = 10  # shortest episode whose lag-1 autocorrelation enters the discriminability score
+_MIN_BARS_TREND = 10  # shortest episode whose trend persistence is measured
+_MIN_EPISODES = 5  # fewest qualifying episodes per regime before a metric is compared across regimes
+_STABILITY_WINDOW = 5
+_SIGN_FLIP_DRAWS = 64
+_SIGN_FLIP_SEED = 0
+_DISCRIMINABILITY_METRICS = ("volatility", "return_consistency", "mean_duration", "autocorrelation_lag1")
+
+
+def _calculate_volatility_stats(returns: pd.Series, episodes: pd.Series) -> Dict[str, float]:
+    """Calculate volatility and risk metrics; drawdowns and volatility stability are measured within episodes"""
     if len(returns) < 2:
         return {}
 
     vol = returns.std()
     abs_returns = returns.abs()
+    ep = episodes.to_numpy()
 
-    # Drawdown analysis (using prices)
-    if len(prices) > 1:
-        cumulative_returns = (1 + returns).cumprod()
-        running_max = cumulative_returns.expanding().max()
-        drawdown = (cumulative_returns - running_max) / running_max
-        max_drawdown = drawdown.min()
-        avg_drawdown = drawdown.mean()
-    else:
-        max_drawdown = np.nan
-        avg_drawdown = np.nan
+    # Each episode starts a fresh equity curve at 1.0, and that starting level is its first peak
+    equity = (1 + returns.fillna(0)).groupby(ep).cumprod()
+    peak = equity.groupby(ep).cummax().clip(lower=1.0)
+    drawdown = equity / peak - 1
+
+    # A rolling window may not straddle two episodes: keep windows that end at least (window - 1) bars into one
+    rolling_vol = returns.rolling(_STABILITY_WINDOW).std()
+    rolling_vol = rolling_vol[(episodes.groupby(ep).cumcount() >= _STABILITY_WINDOW - 1).to_numpy()]
 
     return {
         "volatility": vol,
-        "volatility_stability": (
-            returns.rolling(min(5, len(returns))).std().std() / vol
-            if vol != 0
-            else np.nan
-        ),
-        "volatility_to_mean_ratio": (
-            vol / abs_returns.mean() if abs_returns.mean() != 0 else np.nan
-        ),
-        "max_drawdown": max_drawdown,
-        "avg_drawdown": avg_drawdown,
+        "volatility_stability": rolling_vol.std() / vol if vol != 0 else np.nan,
+        "volatility_to_mean_ratio": vol / abs_returns.mean() if abs_returns.mean() != 0 else np.nan,
+        "max_drawdown": drawdown.min(),
+        "avg_drawdown": drawdown.mean(),
     }
 
 
-def _calculate_persistence_stats(df: pd.DataFrame, regime_col: str, regime: Any) -> Dict[str, float]:
-    """Calculate regime persistence and transition statistics"""
-    regime_series = df[regime_col]
-    regime_changes = (regime_series == regime).astype(int)
+def _calculate_persistence_stats(episodes: pd.Series) -> Dict[str, float]:
+    """Calculate regime persistence statistics from the lengths of the regime's episodes"""
+    durations = episodes.value_counts(sort=False).to_numpy()
 
-    # Find regime periods
-    regime_periods = _find_contiguous_regimes(regime_series, regime)
-
-    if not regime_periods:
+    if len(durations) == 0:
         return {
             "min_duration": 0,
             "q5_duration": 0,
@@ -509,8 +539,6 @@ def _calculate_persistence_stats(df: pd.DataFrame, regime_col: str, regime: Any)
             "duration_std": 0,
             "regime_stability": 0,
         }
-
-    durations = [period["length"] for period in regime_periods]
 
     return {
         "min_duration": np.min(durations),
@@ -530,102 +558,132 @@ def _calculate_persistence_stats(df: pd.DataFrame, regime_col: str, regime: Any)
     }
 
 
-def _find_contiguous_regimes(regime_series: pd.Series, regime: Any) -> list:
-    """Find contiguous blocks of a specific regime"""
-    regimes = regime_series.values
-    is_regime = regimes == regime
-
-    periods = []
-    i = 0
-    while i < len(is_regime):
-        if is_regime[i]:
-            start = i
-            while i < len(is_regime) and is_regime[i]:
-                i += 1
-            end = i - 1
-            periods.append({"start": start, "end": end, "length": end - start + 1})
-        else:
-            i += 1
-
-    return periods
-
-
-def _calculate_path_validation_stats(returns: pd.Series, prices: pd.Series) -> Dict[str, float]:
-    """Calculate path-specific validation metrics"""
-    if len(returns) < 5:
+def _calculate_path_validation_stats(returns: pd.Series, episodes: pd.Series) -> Dict[str, float]:
+    """Calculate path-structure metrics; each one is measured inside episodes, never across two of them"""
+    if returns.notna().sum() < 5:
         return {}
 
-    # Serial correlation (should vary by regime)
-    acf1 = returns.autocorr(lag=1)
+    ep = episodes.to_numpy()
 
-    # Hurst-like metrics (simplified)
-    if len(returns) >= 10:
-        # Simple trend persistence metric
-        cumulative = (1 + returns).cumprod()
-        if len(cumulative) > 1:
-            trend_strength = abs(
-                linregress(np.arange(len(cumulative)), cumulative).rvalue
-            )
-        else:
-            trend_strength = np.nan
-    else:
-        trend_strength = np.nan
+    # Lag-1 autocorrelation from within-episode pairs only, both sides centred on the regime mean
+    deviation = returns - returns.mean()
+    lag_products = deviation * deviation.groupby(ep).shift(1)
+    variance = (deviation ** 2).mean()
+    acf1 = lag_products.mean() / variance if lag_products.notna().any() and variance > 0 else np.nan
+
+    has_return = returns.notna().to_numpy()
+    clean, clean_ep = returns[has_return], ep[has_return]
+    net_move = clean.groupby(clean_ep).sum().abs()
+    path_length = clean.abs().groupby(clean_ep).sum()
 
     return {
         "autocorrelation_lag1": acf1 if not np.isnan(acf1) else 0,
-        "trend_persistence": trend_strength,
-        "noise_to_signal_ratio": (
-            returns.std() / returns.abs().mean()
-            if returns.abs().mean() != 0
-            else np.nan
-        ),
-        "efficiency_ratio": (
-            abs(returns.sum()) / returns.abs().sum() if returns.abs().sum() != 0 else 0
-        ),
+        "trend_persistence": _episode_trend_persistence(clean, clean_ep),
+        "noise_to_signal_ratio": returns.std() / returns.abs().mean() if returns.abs().mean() != 0 else np.nan,
+        "efficiency_ratio": net_move.sum() / path_length.sum() if path_length.sum() != 0 else 0,
+        "efficiency_ratio_rw": _sign_flip_efficiency_ratio(clean, clean_ep),
     }
 
 
-def _calculate_discriminability_score(stats_df: pd.DataFrame) -> pd.Series:
-    """Calculate how discriminable each regime is from others"""
-    discriminability_scores = []
+def _episode_trend_persistence(returns: pd.Series, episodes: np.ndarray) -> float:
+    """Bar-weighted mean |r| of a straight-line fit to each episode's compounded path, over episodes of 10+ bars"""
+    frame = pd.DataFrame({"episode": episodes, "growth": 1 + returns.to_numpy()})
+    frame["growth"] = frame.groupby("episode")["growth"].cumprod() - 1
+    frame["t"] = frame.groupby("episode").cumcount().astype(float)
+    frame = frame[frame.groupby("episode")["t"].transform("size") >= _MIN_BARS_TREND]
+    if frame.empty:
+        return np.nan
 
-    for idx, regime_row in stats_df.iterrows():
-        score = 0
+    # Pearson r of (t, growth) per episode from grouped sums
+    frame["tt"], frame["gg"], frame["tg"] = frame["t"] ** 2, frame["growth"] ** 2, frame["t"] * frame["growth"]
+    sums = frame.groupby("episode")[["t", "growth", "tt", "gg", "tg"]].sum()
+    n = frame.groupby("episode").size()
+    cov = sums["tg"] - sums["t"] * sums["growth"] / n
+    var_t = sums["tt"] - sums["t"] ** 2 / n
+    var_g = sums["gg"] - sums["growth"] ** 2 / n
+    r_value = (cov / np.sqrt(var_t * var_g)).abs()
 
-        # Volatility discriminability
-        vol_diff = (
-                abs(regime_row["volatility"] - stats_df["volatility"].mean())
-                / stats_df["volatility"].std()
-        )
+    valid = np.isfinite(r_value)  # a flat episode has no defined fit
+    return float(np.average(r_value[valid], weights=n[valid])) if valid.any() else np.nan
 
-        # Return pattern discriminability
-        return_consistency_diff = (
-                abs(
-                    regime_row["return_consistency"] - stats_df["return_consistency"].mean()
-                )
-                / stats_df["return_consistency"].std()
-        )
 
-        # Persistence discriminability
-        duration_diff = (
-                abs(regime_row["mean_duration"] - stats_df["mean_duration"].mean())
-                / stats_df["mean_duration"].std()
-        )
+def _sign_flip_efficiency_ratio(returns: pd.Series, episodes: np.ndarray) -> float:
+    """
+    Observed total |net episode move| over its expected value when every bar keeps its size but takes a random sign.
 
-        # Path structure discriminability
-        autocorr_diff = (
-                abs(
-                    regime_row["autocorrelation_lag1"]
-                    - stats_df["autocorrelation_lag1"].mean()
-                )
-                / stats_df["autocorrelation_lag1"].std()
-        )
+    Keeping each bar's absolute return preserves fat tails and volatility clustering, so a random walk scores ~1.0 at
+    any episode length. Drift or positive autocorrelation lifts it above 1; mean reversion pushes it below 1.
+    """
+    sizes = returns.abs().to_numpy()
+    if sizes.sum() == 0:
+        return np.nan
 
-        # Composite score (equal weighting)
-        score = (vol_diff + return_consistency_diff + duration_diff + autocorr_diff) / 4
-        discriminability_scores.append(score)
+    codes = pd.factorize(episodes)[0]
+    observed = np.abs(np.bincount(codes, weights=returns.to_numpy())).sum()
+    rng = np.random.default_rng(_SIGN_FLIP_SEED)
+    null_moves = [np.abs(np.bincount(codes, weights=sizes * (rng.integers(0, 2, len(sizes)) * 2.0 - 1.0))).sum()
+                  for _ in range(_SIGN_FLIP_DRAWS)]
+    return observed / np.mean(null_moves)
 
-    return pd.Series(discriminability_scores, index=stats_df.index)
+
+def _episode_metrics(returns: pd.Series, episodes: pd.Series) -> pd.DataFrame:
+    """
+    Per-episode values of the discriminability metrics: one row per episode, each column named after the regime-level
+    statistic it mirrors. A metric is NaN on episodes too short to estimate it.
+    """
+    ep = episodes.to_numpy()
+    grouped = returns.groupby(ep)
+    abs_grouped = returns.abs().groupby(ep)
+    abs_mean = abs_grouped.mean()
+    n_bars = grouped.count()
+
+    deviation = returns - returns.mean()
+    lag_products = (deviation * deviation.groupby(ep).shift(1)).groupby(ep).mean()
+    variance = (deviation ** 2).groupby(ep).mean()
+
+    return pd.DataFrame({
+        "volatility": grouped.std().where(n_bars >= _MIN_BARS_SCALE),
+        "return_consistency": (abs_grouped.std() / abs_mean[abs_mean > 0]).where(n_bars >= _MIN_BARS_SCALE),
+        "mean_duration": grouped.size(),
+        "autocorrelation_lag1": (lag_products / variance[variance > 0]).where(n_bars >= _MIN_BARS_ACF),
+    })
+
+
+def _auc_separation(a: pd.Series, b: pd.Series) -> float:
+    """|2·AUC - 1| of two samples: 0 = indistinguishable, 1 = every value of one exceeds every value of the other"""
+    a, b = a.dropna().to_numpy(), b.dropna().to_numpy()
+    if len(a) < _MIN_EPISODES or len(b) < _MIN_EPISODES:
+        return np.nan
+
+    ranks = stats.rankdata(np.concatenate([a, b]))
+    auc = (ranks[:len(a)].sum() - len(a) * (len(a) + 1) / 2) / (len(a) * len(b))
+    return abs(2 * auc - 1)
+
+
+def _calculate_discriminability_score(episode_tables: Dict[Any, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Score how distinguishable each regime's episodes are from those of its closest other regime.
+
+    Against every other regime, each metric's separation is |2·AUC - 1| over the two regimes' per-episode values, and
+    the pair is scored by its best-separating metric. A regime's score is its lowest pair score (its nearest
+    neighbour) on an absolute 0-1 scale: 0 = episodes indistinguishable on every metric, 1 = fully separable on at
+    least one. ``discriminability_metric`` names the metric that separates the regime from that neighbour.
+    """
+    scores = {}
+    for regime, table in episode_tables.items():
+        pair_scores = []
+        for other, other_table in episode_tables.items():
+            if other == regime:
+                continue
+            separations = {m: _auc_separation(table[m], other_table[m]) for m in _DISCRIMINABILITY_METRICS}
+            separations = {m: s for m, s in separations.items() if not np.isnan(s)}
+            if separations:
+                best = max(separations, key=separations.get)
+                pair_scores.append((separations[best], best))
+        scores[regime] = min(pair_scores) if pair_scores else (np.nan, None)
+
+    columns = ["regime_discriminability", "discriminability_metric"]
+    return pd.DataFrame.from_dict(scores, orient="index", columns=columns)
 
 
 def evaluate_regime_returns_potentials(df, label_col="label", progressive_skip: int = 1, whipsaw_cost: float = 0.0,
