@@ -201,7 +201,8 @@ class TestStage2:
             X[["feat_0", "feat_2"]], regime, task="regime",
             window=50, min_icir=0.0, verbose=False
         )
-        assert icir["feat_0"] > icir["feat_2"]
+        # The regime IC-IR is signed (the class the feature is scored on may sit LOW on it): compare strength
+        assert abs(icir["feat_0"]) > abs(icir["feat_2"])
 
     def test_removes_low_icir(self, synthetic_regime_data):
         X, regime = synthetic_regime_data
@@ -209,8 +210,8 @@ class TestStage2:
         _, _, icir_all = stage2_temporal_stability(
             X_in, regime, task="regime", window=50, min_icir=0.0, verbose=False
         )
-        # Set threshold just above feat_2's IC-IR to force its removal
-        threshold = icir_all["feat_2"] + 0.1
+        # Set threshold just above feat_2's |IC-IR| to force its removal
+        threshold = abs(icir_all["feat_2"]) + 0.1
         X_out, report, _ = stage2_temporal_stability(
             X_in, regime, task="regime", window=50, min_icir=threshold, verbose=False
         )
@@ -289,6 +290,74 @@ class TestStage2:
                                                 use_block_ic=True, verbose=False)
         assert {"good", "anti"} <= set(X_out.columns)
         assert "flip" not in X_out.columns
+
+
+def _persistent_labels(n: int, n_states: int, mean_dwell: float, rng: np.random.Generator) -> pd.Series:
+    """Markov labels: stay with probability 1 - 1/mean_dwell, else jump to a uniformly chosen other state."""
+    labels = np.empty(n, dtype=int)
+    labels[0] = 0
+    stay = rng.random(n) < 1.0 - 1.0 / mean_dwell
+    jump = rng.integers(1, n_states, n)
+    for t in range(1, n):
+        labels[t] = labels[t - 1] if stay[t] else (labels[t - 1] + jump[t]) % n_states
+    return pd.Series(labels)
+
+
+class TestStage2RegimeSignedIC:
+    """The regime IC is the SIGNED per-class point-biserial, so noise centres on 0 and the IC-IR gate binds.
+
+    The old IC (mean |point-biserial| over classes) is >= 0 by construction: 40 noise features scored IC-IR ~0.7
+    against persistent 3-state labels and every one cleared the 0.20 gate.
+    """
+
+    @pytest.fixture(scope="class")
+    def persistent_regime_data(self):
+        rng = np.random.default_rng(100)
+        y = _persistent_labels(30_000, n_states=3, mean_dwell=200, rng=rng)
+        X = pd.DataFrame({f"noise_{i}": rng.standard_normal(len(y)) for i in range(40)})
+        X["signal"] = (y == 1).astype(float) * 0.3 + rng.standard_normal(len(y))
+        return X, y
+
+    def test_noise_rarely_clears_the_icir_gate(self, persistent_regime_data):
+        X, y = persistent_regime_data
+        noise = [c for c in X.columns if c.startswith("noise_")]
+        # walk_forward_pct=0 isolates the IC-IR check from the hit-rate check
+        X_out, _, icir = stage2_temporal_stability(X[noise], y, task="regime", window=252, min_icir=0.20,
+                                                   walk_forward_pct=0.0, use_block_ic=True, verbose=False)
+        assert X_out.shape[1] <= 4                                   # <= 10%; measured 1 of 40
+        assert abs(np.mean(list(icir.values()))) < 0.05             # signed: centred on 0, not ~0.7
+
+    def test_class_shifted_feature_passes_with_defaults(self, persistent_regime_data):
+        X, y = persistent_regime_data
+        X_out, report, icir = stage2_temporal_stability(X, y, task="regime", window=252, use_block_ic=True,
+                                                        verbose=False)
+        assert "signal" in X_out.columns
+        assert report.detail["regime_class"]["signal"] == 1          # scored on the class it shifts with
+        assert icir["signal"] > 0.20
+
+    def test_closed_form_point_biserial_matches_scipy(self):
+        from scipy.stats import pointbiserialr
+        from okmich_quant_research.features.screener._stage2 import _class_pointbiserial
+        rng = np.random.default_rng(3)
+        x = pd.Series(rng.standard_normal(300))
+        y = pd.Series(rng.integers(0, 3, 300))
+        expected = [pointbiserialr((y == c).astype(float), x)[0] for c in (0, 1, 2)]
+        assert np.allclose(_class_pointbiserial(x, y, [0, 1, 2]), expected, atol=1e-12)
+
+    def test_class_missing_from_a_window_is_nan_not_zero(self):
+        from okmich_quant_research.features.screener._stage2 import _class_pointbiserial
+        x = pd.Series(np.arange(10, dtype=float))
+        y = pd.Series([0] * 9 + [1])                                 # class 1 has a single member
+        assert np.isnan(_class_pointbiserial(x, y, [0, 1])).all()
+
+    def test_two_class_choice_is_deterministic(self):
+        rng = np.random.default_rng(5)
+        y = _persistent_labels(5_000, n_states=2, mean_dwell=50, rng=rng)
+        X = pd.DataFrame({"f": (y == 1).astype(float) * 0.5 + rng.standard_normal(len(y))})
+        runs = [stage2_temporal_stability(X, y, task="regime", window=100, use_block_ic=True, verbose=False)
+                for _ in range(2)]
+        assert runs[0][1].detail["regime_class"] == runs[1][1].detail["regime_class"]
+        assert runs[0][2] == runs[1][2]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -446,6 +515,60 @@ class TestStage5:
         )
         assert set(shap_rank.index) == set(X_in.columns)
 
+    def test_multiclass_shap_runs_without_fallback(self, synthetic_regime_data):
+        """K=3: shap >= 0.45 returns (n, f, K); it used to hit a broadcast error swallowed into gain importance."""
+        import warnings as _warnings
+        X, regime = synthetic_regime_data
+        X_in = X[["feat_0", "feat_1", "feat_2"]]
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            shap_rank, _, detail = stage5_model_ranking(X_in, regime, task="regime", n_splits=3, verbose=False,
+                                                        return_detail=True)
+        assert detail["shap_method"] == "tree_shap"
+        assert detail["shap_fallback_folds"] == 0
+        assert not [w for w in caught if "SHAP failed" in str(w.message)]
+        assert shap_rank["feat_0"] > shap_rank["feat_2"]
+
+    def test_regime_task_uses_purged_kfold(self, synthetic_regime_data):
+        X, regime = synthetic_regime_data
+        _, _, detail = stage5_model_ranking(X[["feat_0", "feat_2"]], regime, task="regime", n_splits=3, horizon=7,
+                                            verbose=False, return_detail=True)
+        assert detail["cv"] == "PurgedKFold"
+        assert detail["horizon"] == 7
+        assert detail["embargo_bars"] >= 7
+
+    def test_training_fold_without_a_class_is_skipped(self):
+        """Contiguous folds on persistent labels: a training side that misses a class is skipped, with a warning."""
+        rng = np.random.default_rng(11)
+        n = 600
+        regime = pd.Series(np.where(np.arange(n) < 200, 2, rng.integers(0, 2, n)))   # class 2 only in fold 0
+        X = pd.DataFrame({"a": regime + rng.standard_normal(n) * 0.5, "b": rng.standard_normal(n)})
+        with pytest.warns(UserWarning, match="lacks a regime class"):
+            _, _, detail = stage5_model_ranking(X, regime, task="regime", n_splits=3, verbose=False,
+                                                return_detail=True)
+        assert detail["skipped_folds"] == 1
+        assert detail["n_folds_used"] == 2
+
+
+class TestPurgedKFold:
+    @pytest.mark.parametrize("horizon,embargo_pct", [(30, 0.001), (5, 0.05), (0, 0.0)])
+    def test_purge_before_and_embargo_after_every_test_fold(self, horizon, embargo_pct):
+        from okmich_quant_research.features.screener._stage5 import _PurgedKFold
+        n = 1000
+        cv = _PurgedKFold(n_splits=5, horizon=horizon, embargo_pct=embargo_pct)
+        embargo = cv.embargo_bars(n)
+        assert embargo >= max(horizon, 1)
+        for train, test in cv.split(np.zeros(n)):
+            start, end = test.min(), test.max() + 1
+            assert not np.isin(train, np.arange(max(0, start - horizon), start)).any()   # purge
+            assert not np.isin(train, np.arange(end, min(n, end + embargo))).any()       # embargo
+            assert not np.isin(train, test).any()
+
+    def test_embargo_is_at_least_the_horizon(self):
+        from okmich_quant_research.features.screener._stage5 import _PurgedKFold
+        # 1% of 1000 bars is 10, shorter than a 30-bar label: the embargo must stretch to 30
+        assert _PurgedKFold(n_splits=5, horizon=30, embargo_pct=0.01).embargo_bars(1000) == 30
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ScreenerResult
@@ -573,6 +696,33 @@ class TestEndToEnd:
         )
         # feat_4 is near-constant — should be removed
         assert "feat_4" not in result.confirmed
+
+    def test_regime_result_reports_stage5_detail(self, regime_result):
+        assert regime_result.stage5_detail["cv"] == "PurgedKFold"
+        assert regime_result.stage5_detail["horizon"] == 0
+
+    def test_boruta_accepting_nothing_is_not_relabelled_confirmed(self, synthetic_regime_data, monkeypatch):
+        """Boruta rejects everything: survivors are ranked as TENTATIVE and flagged, never reported as confirmed."""
+        from okmich_quant_research.features.screener import screener as screener_module
+
+        def reject_all(X, y, task, max_iter, perc, verbose):
+            cols = list(X.columns)
+            return X.iloc[:, :0], StageReport("Stage4_Boruta", len(cols), 0, cols), \
+                {"confirmed": [], "tentative": [], "rejected": cols}
+
+        monkeypatch.setattr(screener_module, "stage4_boruta", reject_all)
+        X, regime = synthetic_regime_data
+        result = FeatureScreener(ic_window=50, n_cv_splits=2, verbose=False).screen_for_regimes(X, regime)
+
+        removed_before_boruta = {f for r in result.stage_reports if r.stage != "Stage4_Boruta" for f in r.removed}
+        survivors = [c for c in X.columns if c not in removed_before_boruta]
+        assert survivors, "fixture should leave Stage-3 survivors"
+        assert result.boruta_fallback is True
+        assert result.confirmed == []
+        assert sorted(result.tentative) == sorted(survivors)
+        assert set(result.shap_rank.index) == set(survivors)
+        assert not set(result.tentative) & set(result.rejected)
+        assert sorted(result.boruta_groups["rejected"]) == sorted(result.tentative)   # Boruta's own verdict kept
 
     def test_return_pipeline_runs(self, synthetic_return_data):
         X, y = synthetic_return_data

@@ -2,15 +2,47 @@
 
 from __future__ import annotations
 
+import enum
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
 
-from ._enums import ConditionPass, FeatureBucket, FeatureStatus
+from ._enums import ConditionPass, FeatureBucket, FeatureStatus, NullMethod
+
+
+class _LabelKind(enum.StrEnum):
+    """Python type of the condition labels, recorded on save so load() can restore them from strings."""
+
+    INT = "int"
+    FLOAT = "float"
+    STR = "str"
+
+
+def _label_kind(labels) -> _LabelKind:
+    values = list(labels)
+    if values and all(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) for v in values):
+        return _LabelKind.INT
+    if values and all(isinstance(v, (float, np.floating)) for v in values):
+        return _LabelKind.FLOAT
+    return _LabelKind.STR
+
+
+def _restore_label(value: str, kind: _LabelKind | None) -> Any:
+    if kind == _LabelKind.INT:
+        return int(value)
+    if kind == _LabelKind.FLOAT:
+        return float(value)
+    return value
+
+
+def _restore_columns(df: pd.DataFrame, kind: _LabelKind | None) -> pd.DataFrame:
+    if kind in (_LabelKind.INT, _LabelKind.FLOAT):
+        df.columns = pd.Index([_restore_label(c, kind) for c in df.columns])
+    return df
 
 
 def assign_status(ic_matrix: pd.DataFrame, pvalue_matrix: pd.DataFrame, obs_matrix: pd.DataFrame, ic_threshold: float, max_pvalue: float = 0.05, min_observations: int = 1000) -> pd.DataFrame:
@@ -84,7 +116,7 @@ class FeatureConditionMap:
     global_ic: pd.Series
     stability_scores: pd.Series
 
-    # -- Three-way partition --
+    # -- Four-bucket partition (three signal buckets + unclassified) --
     global_stable: List[str]
     condition_specific: Dict[str, List[str]]
     conditional_ensemble: List[str]
@@ -108,6 +140,10 @@ class FeatureConditionMap:
     # -- Diagnostics --
     condition_sample_counts: pd.Series
     skipped_conditions: List[str] = field(default_factory=list)
+
+    # -- Null provenance (None when ic_threshold was a fixed override) --
+    null_method: NullMethod | None = None
+    null_min_shift: int | None = None
 
     def active_features_for(self, condition: str) -> List[str]:
         """Return features with Active status in the given condition."""
@@ -243,20 +279,28 @@ class FeatureConditionMap:
             |- subperiod_ic_std.parquet
             |- series.parquet           # global_ic, stability_scores as columns
             |- condition_counts.parquet # condition_sample_counts
-            |- metadata.json           # partition, thresholds, config, skipped_conditions
+            |- metadata.json           # partition, thresholds, config, skipped_conditions,
+                                       # condition_label_kind, null_method
         """
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
 
+        # Parquet needs string column names and JSON string keys: write condition labels as str and record their
+        # type so load() can restore integer labels (e.g. HMM states 0/1/2).
+        label_kind = _label_kind(self.ic_matrix.columns)
+
+        def str_cols(df: pd.DataFrame) -> pd.DataFrame:
+            return df.rename(columns=str)
+
         # DataFrames
-        self.ic_matrix.to_parquet(out / "ic_matrix.parquet")
-        self.pvalue_matrix.to_parquet(out / "pvalue_matrix.parquet")
+        str_cols(self.ic_matrix).to_parquet(out / "ic_matrix.parquet")
+        str_cols(self.pvalue_matrix).to_parquet(out / "pvalue_matrix.parquet")
 
         # Status matrix: convert enum values to strings for parquet
         status_str = self.status_matrix.map(lambda x: x.value if isinstance(x, FeatureStatus) else str(x))
-        status_str.to_parquet(out / "status_matrix.parquet")
+        str_cols(status_str).to_parquet(out / "status_matrix.parquet")
 
-        self.subperiod_ic_std.to_parquet(out / "subperiod_ic_std.parquet")
+        str_cols(self.subperiod_ic_std).to_parquet(out / "subperiod_ic_std.parquet")
 
         # Series bundled into one DataFrame
         series_df = pd.DataFrame({
@@ -265,13 +309,14 @@ class FeatureConditionMap:
         })
         # Add condition_sample_counts as a separate row-indexed series
         counts_df = self.condition_sample_counts.to_frame(name="condition_sample_counts")
+        counts_df.index = counts_df.index.map(str)
         series_df.to_parquet(out / "series.parquet")
         counts_df.to_parquet(out / "condition_counts.parquet")
 
         # Metadata as JSON
         metadata = {
             "global_stable": self.global_stable,
-            "condition_specific": self.condition_specific,
+            "condition_specific": {str(k): v for k, v in self.condition_specific.items()},
             "conditional_ensemble": self.conditional_ensemble,
             "unclassified": self.unclassified,
             "ic_threshold": self.ic_threshold,
@@ -282,7 +327,10 @@ class FeatureConditionMap:
             "max_pvalue": self.max_pvalue,
             "dominance_ratio": self.dominance_ratio,
             "subperiod_instability_ratio": self.subperiod_instability_ratio,
-            "skipped_conditions": self.skipped_conditions,
+            "skipped_conditions": [str(c) for c in self.skipped_conditions],
+            "condition_label_kind": label_kind.value,
+            "null_method": self.null_method.value if self.null_method is not None else None,
+            "null_min_shift": self.null_min_shift,
         }
         with open(out / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
@@ -300,13 +348,18 @@ class FeatureConditionMap:
         if not out.exists():
             raise FileNotFoundError(f"Directory not found: {output_dir}")
 
-        ic_matrix = pd.read_parquet(out / "ic_matrix.parquet")
-        pvalue_matrix = pd.read_parquet(out / "pvalue_matrix.parquet")
+        with open(out / "metadata.json") as f:
+            metadata = json.load(f)
+        # Absent in maps saved before the field existed: labels are left exactly as stored.
+        kind = _LabelKind(metadata["condition_label_kind"]) if metadata.get("condition_label_kind") else None
+
+        ic_matrix = _restore_columns(pd.read_parquet(out / "ic_matrix.parquet"), kind)
+        pvalue_matrix = _restore_columns(pd.read_parquet(out / "pvalue_matrix.parquet"), kind)
 
         status_str = pd.read_parquet(out / "status_matrix.parquet")
-        status_matrix = status_str.map(lambda x: FeatureStatus(x))
+        status_matrix = _restore_columns(status_str.map(lambda x: FeatureStatus(x)), kind)
 
-        subperiod_ic_std = pd.read_parquet(out / "subperiod_ic_std.parquet")
+        subperiod_ic_std = _restore_columns(pd.read_parquet(out / "subperiod_ic_std.parquet"), kind)
 
         series_df = pd.read_parquet(out / "series.parquet")
         global_ic = series_df["global_ic"]
@@ -316,9 +369,9 @@ class FeatureConditionMap:
 
         counts_df = pd.read_parquet(out / "condition_counts.parquet")
         condition_sample_counts = counts_df["condition_sample_counts"]
-
-        with open(out / "metadata.json") as f:
-            metadata = json.load(f)
+        if kind in (_LabelKind.INT, _LabelKind.FLOAT):
+            condition_sample_counts.index = pd.Index([_restore_label(c, kind) for c in condition_sample_counts.index])
+        null_method = metadata.get("null_method")
 
         return cls(
             ic_matrix=ic_matrix,
@@ -327,7 +380,7 @@ class FeatureConditionMap:
             global_ic=global_ic,
             stability_scores=stability_scores,
             global_stable=metadata["global_stable"],
-            condition_specific=metadata["condition_specific"],
+            condition_specific={_restore_label(k, kind): v for k, v in metadata["condition_specific"].items()},
             conditional_ensemble=metadata["conditional_ensemble"],
             unclassified=metadata["unclassified"],
             ic_threshold=metadata["ic_threshold"],
@@ -340,7 +393,9 @@ class FeatureConditionMap:
             subperiod_instability_ratio=metadata["subperiod_instability_ratio"],
             subperiod_ic_std=subperiod_ic_std,
             condition_sample_counts=condition_sample_counts,
-            skipped_conditions=metadata.get("skipped_conditions", []),
+            skipped_conditions=[_restore_label(c, kind) for c in metadata.get("skipped_conditions", [])],
+            null_method=NullMethod(null_method) if null_method else None,
+            null_min_shift=metadata.get("null_min_shift"),
         )
 
     def __repr__(self) -> str:

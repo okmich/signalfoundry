@@ -52,7 +52,8 @@ class ConditionedFeatureVisualizer:
     """Static matplotlib/seaborn plots for FeatureConditionMap diagnostics."""
 
     @staticmethod
-    def plot_ic_heatmap(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (16, 10), save_path: Optional[str] = None) -> "Figure":
+    def plot_ic_heatmap(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (16, 10), save_path: Optional[str] = None,
+                        show: bool = False) -> "Figure":
         """
         Annotated heatmap of the IC matrix (features x conditions).
         Colour scale: diverging RdBu_r centred at 0.
@@ -80,11 +81,12 @@ class ConditionedFeatureVisualizer:
         ax.set_xlabel("Condition", fontsize=11)
         ax.set_ylabel("Feature", fontsize=11)
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_status_grid(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (14, 10), save_path: Optional[str] = None) -> "Figure":
+    def plot_status_grid(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (14, 10), save_path: Optional[str] = None,
+                         show: bool = False) -> "Figure":
         """
         Categorical heatmap of the status matrix.
         Features grouped by bucket.
@@ -124,11 +126,12 @@ class ConditionedFeatureVisualizer:
         ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
         ax.set_title(f"Status Grid — {fcm.condition_pass.value} pass", fontsize=14, fontweight="bold")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_partition_summary(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (10, 6), save_path: Optional[str] = None) -> "Figure":
+    def plot_partition_summary(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (10, 6),
+                               save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Horizontal stacked bar showing feature counts per bucket.
         Annotates adaptive thresholds and detection flag.
@@ -164,11 +167,12 @@ class ConditionedFeatureVisualizer:
 
         ax.grid(True, alpha=0.3, axis="x")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_stability_distribution(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (12, 6), save_path: Optional[str] = None) -> "Figure":
+    def plot_stability_distribution(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (12, 6),
+                                    save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Histogram of stability_scores, coloured by bucket assignment.
         Vertical line at stability_threshold.
@@ -199,11 +203,12 @@ class ConditionedFeatureVisualizer:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_feature_profile(fcm: FeatureConditionMap, feature: str, figsize: Tuple[int, int] = (14, 5), save_path: Optional[str] = None) -> "Figure":
+    def plot_feature_profile(fcm: FeatureConditionMap, feature: str, figsize: Tuple[int, int] = (14, 5),
+                             save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Bar chart of IC across conditions for a single feature.
         Bars coloured by status. Error bars from subperiod_ic_std.
@@ -240,11 +245,12 @@ class ConditionedFeatureVisualizer:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_condition_profile(fcm: FeatureConditionMap, condition: str, figsize: Tuple[int, int] = (14, 8), save_path: Optional[str] = None) -> "Figure":
+    def plot_condition_profile(fcm: FeatureConditionMap, condition: str, figsize: Tuple[int, int] = (14, 8),
+                               save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Horizontal bar chart of IC for all features within a single condition.
         Sorted by |IC| descending. Bars coloured by status.
@@ -273,11 +279,12 @@ class ConditionedFeatureVisualizer:
         ax.set_title(f"Condition: {condition} (n={n_obs}) — {fcm.condition_pass.value} pass", fontsize=14, fontweight="bold")
         ax.grid(True, alpha=0.3, axis="x")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_global_vs_conditional(fcm: FeatureConditionMap, condition: str, figsize: Tuple[int, int] = (10, 10), save_path: Optional[str] = None) -> "Figure":
+    def plot_global_vs_conditional(fcm: FeatureConditionMap, condition: str, figsize: Tuple[int, int] = (10, 10),
+                                   save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Scatter: x = global IC, y = conditional IC for a given condition.
         Diagonal line (y = x). Points coloured by bucket.
@@ -316,11 +323,12 @@ class ConditionedFeatureVisualizer:
         ax.legend(handles=legend_elements, fontsize=9)
 
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_subperiod_stability(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (16, 10), save_path: Optional[str] = None) -> "Figure":
+    def plot_subperiod_stability(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (16, 10),
+                                 save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Heatmap of subperiod_ic_std (features x conditions).
         Sequential colour scale (low std = good, high std = bad).
@@ -339,11 +347,12 @@ class ConditionedFeatureVisualizer:
         ax.set_xlabel("Condition", fontsize=11)
         ax.set_ylabel("Feature", fontsize=11)
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_condition_counts(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (12, 5), save_path: Optional[str] = None) -> "Figure":
+    def plot_condition_counts(fcm: FeatureConditionMap, figsize: Tuple[int, int] = (12, 5),
+                              save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Bar chart of n_observations per condition.
         Horizontal line at min_observations threshold.
@@ -366,11 +375,12 @@ class ConditionedFeatureVisualizer:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod
-    def plot_pass_comparison(maps: Dict[ConditionPass, FeatureConditionMap], figsize: Tuple[int, int] = (14, 8), save_path: Optional[str] = None) -> "Figure":
+    def plot_pass_comparison(maps: Dict[ConditionPass, FeatureConditionMap], figsize: Tuple[int, int] = (14, 8),
+                             save_path: Optional[str] = None, show: bool = False) -> "Figure":
         """
         Side-by-side comparison of partition summaries across passes.
         Grouped bars showing bucket proportions.
@@ -410,7 +420,7 @@ class ConditionedFeatureVisualizer:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis="y")
         plt.tight_layout()
-        _save_or_show(fig, save_path)
+        _save_or_show(fig, save_path, show)
         return fig
 
     @staticmethod

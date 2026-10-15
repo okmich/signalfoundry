@@ -269,6 +269,12 @@ class TestFilters:
         assert all(e.causal for e in result)
         assert len(result) == sum(1 for e in reg if e.causal)
 
+    def test_only_the_dc_training_targets_are_non_causal(self, reg):
+        """The two directional-change labelers read the NEXT trend (foresight); every other entry is causal."""
+        non_causal = {e.qualified_name for e in reg if not e.causal}
+        assert non_causal == {"directional_change.label_alpha_beta_dc", "directional_change.label_bbtheta"}
+        assert all("TRAINING TARGET" in reg.get(q).notes for q in non_causal)
+
     def test_needs_only_price(self, reg):
         result = reg.needs_only_price()
         assert len(result) >= 50

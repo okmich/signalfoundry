@@ -19,8 +19,12 @@ signed IC-IR is still returned, so the direction is reported. ``sign_agnostic=Fa
 A feature must pass BOTH checks to survive Stage 2.
 
 For return prediction, IC is the rolling Spearman correlation between the feature
-and forward returns. For regime classification, IC is the rolling point-biserial
-or Cramer's V between the feature and regime labels.
+and forward returns. For regime classification, IC is the SIGNED one-vs-rest point-biserial correlation between
+the feature and each class indicator 1{y == c}. Each class gets its own IC series and IC-IR; the feature is scored
+on the class c* whose |IC-IR| is largest, and its hit rate is taken on that class's oriented series. The signed
+per-class IC has mean 0 when the feature is unrelated to the labels, so the IC-IR gate means the same thing on both
+tasks. (The regime IC used to be the mean of |point-biserial| over classes. That is >= 0 by construction, so pure
+noise scored IC-IR ~0.7 against persistent labels and the regime IC-IR gate never removed anything.)
 
 This stage is unique to this framework — most standard feature selection pipelines
 skip it, but for financial time series it is critical.
@@ -29,7 +33,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr, pointbiserialr
+from scipy.stats import spearmanr
 
 from ._result import StageReport
 
@@ -57,17 +61,44 @@ def _rolling_spearman(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
     return pd.Series(ic_vals, index=idx)
 
 
-def _rolling_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
+def _class_pointbiserial(xi: pd.Series, yi: pd.Series, classes: list) -> list[float]:
+    """Signed one-vs-rest point-biserial r of ``xi`` against 1{yi == c}, per class.
+
+    NaN for a class with fewer than 2 members on either side of the split in this window (or a constant ``xi``).
+    Closed form r = (mean(x | c) - mean(x | not c)) * sqrt(p (1 - p)) / std(x), identical to
+    ``scipy.stats.pointbiserialr`` and far cheaper per call.
     """
-    Rolling point-biserial correlation for regime tasks.
-    Works with binary labels; for multi-class uses one-vs-rest average.
+    x = np.asarray(xi, dtype=float)
+    labels = np.asarray(yi)
+    n = x.size
+    sx = x.std()
+    corrs = []
+    for cls in classes:
+        member = labels == cls
+        k = int(member.sum())
+        if k < 2 or n - k < 2 or sx == 0:
+            corrs.append(np.nan)
+            continue
+        p = k / n
+        corrs.append(float((x[member].mean() - x[~member].mean()) * np.sqrt(p * (1 - p)) / sx))
+    return corrs
+
+
+def _regime_classes(y: pd.Series) -> list:
+    return sorted(y.dropna().unique())
+
+
+def _rolling_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.DataFrame:
+    """
+    Rolling signed point-biserial correlation for regime tasks: one column per class (one-vs-rest), NaN where a
+    class is missing from the window.
     """
     common = x.index.intersection(y.index)
     x = x.loc[common]
     y = y.loc[common]
-    classes = sorted(y.unique())
+    classes = _regime_classes(y)
 
-    ic_vals = []
+    ic_rows = []
     idx = []
 
     for i in range(window, len(x) + 1):
@@ -76,23 +107,10 @@ def _rolling_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.Series
         xi = xi.loc[yi.index]
         if len(xi) < window // 2:
             continue
-
-        # One-vs-rest average
-        corrs = []
-        for cls in classes:
-            binary = (yi == cls).astype(float)
-            if binary.sum() < 2 or (len(binary) - binary.sum()) < 2:
-                continue
-            r, _ = pointbiserialr(binary.values, xi.values)
-            if not np.isnan(r):
-                corrs.append(abs(r))
-
-        ic_vals.append(np.mean(corrs) if corrs else 0.0)
+        ic_rows.append(_class_pointbiserial(xi, yi, classes))
         idx.append(x.index[i - 1])
 
-    if not ic_vals:
-        return pd.Series(dtype=float)
-    return pd.Series(ic_vals, index=idx)
+    return pd.DataFrame(ic_rows, index=idx, columns=classes, dtype=float)
 
 
 def _block_spearman(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
@@ -130,9 +148,10 @@ def _block_spearman(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
     return pd.Series(ic_vals, dtype=float)
 
 
-def _block_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
+def _block_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.DataFrame:
     """
-    Non-overlapping block point-biserial IC for regime tasks.
+    Non-overlapping block signed point-biserial IC for regime tasks: one row per block, one column per class
+    (one-vs-rest), NaN where a class is missing from the block.
     Same block strategy as ``_block_spearman`` — O(n) instead of O(n × window).
     """
     common = x.index.intersection(y.index)
@@ -142,32 +161,49 @@ def _block_pointbiserial(x: pd.Series, y: pd.Series, window: int) -> pd.Series:
     mask = x.notna() & y.notna()
     x = x[mask]
     y = y[mask]
-    classes = sorted(y.unique())
+    classes = _regime_classes(y)
 
     n = len(x)
     n_blocks = n // window
     if n_blocks == 0:
-        return pd.Series(dtype=float)
+        return pd.DataFrame(columns=classes, dtype=float)
 
-    ic_vals = []
+    ic_rows = []
     for i in range(n_blocks):
         xi = x.iloc[i * window:(i + 1) * window]
         yi = y.iloc[i * window:(i + 1) * window]
         if len(xi) < window // 2:
             continue
+        ic_rows.append(_class_pointbiserial(xi, yi, classes))
 
-        corrs = []
-        for cls in classes:
-            binary = (yi == cls).astype(float)
-            if binary.sum() < 2 or (len(binary) - binary.sum()) < 2:
-                continue
-            r, _ = pointbiserialr(binary.values, xi.values)
-            if not np.isnan(r):
-                corrs.append(abs(r))
+    return pd.DataFrame(ic_rows, columns=classes, dtype=float)
 
-        ic_vals.append(np.mean(corrs) if corrs else 0.0)
 
-    return pd.Series(ic_vals, dtype=float)
+def _best_class_ic(ic_by_class: pd.DataFrame, sign_agnostic: bool) -> tuple[pd.Series, float, object]:
+    """Pick the class whose IC series scores best; return (its valid IC series, its signed IC-IR, the class).
+
+    A class has an IC only in the windows where it has >= 2 members on each side. With persistent labels that is a
+    minority of the windows, and the null spread of an IC-IR is 1/sqrt(n_valid), so a raw per-class IC-IR would
+    let noise through a fixed gate far more often than on the return task. Each class's IC-IR is therefore put on
+    the full-window scale: IC-IR_c * sqrt(n_valid_c / n_windows) = t_c / sqrt(n_windows), exactly what the return
+    task's IC-IR is (every window valid). Measured with block windows of 252 bars on 20k-40k bars: 40 iid-noise
+    features pass the 0.20 gate 14/40 unscaled (3 states, mean dwell 200) and 1-5/40 scaled (2-3 states, mean
+    dwell 50-400). On ~120 windows 0.20 is a ~2-sigma gate per class: real, but not tight.
+
+    Sign-agnostic: largest |IC-IR|. Signed rule: largest signed IC-IR. Ties go to the first class in sorted order,
+    so the choice is deterministic (with two classes the indicators are complements and the IC-IRs mirror).
+    """
+    n_windows = len(ic_by_class)
+    best_cls, best_icir, best_key = None, 0.0, -np.inf
+    for cls in ic_by_class.columns:
+        valid = ic_by_class[cls].dropna()
+        icir = _icir(valid) * np.sqrt(len(valid) / n_windows) if n_windows else 0.0
+        key = abs(icir) if sign_agnostic else icir
+        if key > best_key:
+            best_cls, best_icir, best_key = cls, icir, key
+    if best_cls is None:
+        return pd.Series(dtype=float), 0.0, None
+    return ic_by_class[best_cls].dropna(), best_icir, best_cls
 
 
 def _icir(ic_series: pd.Series) -> float:
@@ -212,22 +248,22 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
         threshold instead of ``min_icir``. E.g. 0.30 keeps features above the 30th
         percentile of IC-IR scores.
     wf_threshold : float or None
-        IC value a block must exceed to count as a "positive" window in the hit-rate
-        check. When None, defaults to 0.0 for return (signed Spearman) and 0.05 for
-        regime (abs point-biserial). Set explicitly to 0.0 for binary direction labels
-        screened via screen_for_regimes().
+        IC value a block must exceed (after orientation) to count as a hit in the hit-rate check. When None,
+        defaults to 0.0 for both tasks: the return IC (Spearman) and the regime IC (signed per-class
+        point-biserial) are both centred on 0 under no relationship.
     use_block_ic : bool
         If True, use non-overlapping block IC (O(n), fast).
-        If False, use bar-by-bar sliding-window IC (O(n × window), original). Default False.
+        If False, use bar-by-bar sliding-window IC (O(n × window), original). Default False here;
+        FeatureScreener passes True.
     sign_agnostic : bool
         If True (default), both checks are applied to the feature's IC oriented by the sign of its mean IC, so a
         stable negative-IC feature passes like a stable positive-IC one. The returned IC-IR keeps its sign.
-        If False, the original signed rule: IC-IR >= min_icir and IC > threshold. Irrelevant for ``task="regime"``,
-        whose IC (abs point-biserial) is never negative.
+        If False, the original signed rule: IC-IR >= min_icir and IC > threshold. On ``task="regime"`` the class
+        c* is then the one with the largest SIGNED IC-IR (the feature must be reliably HIGH in some class) instead
+        of the largest |IC-IR|.
     walk_forward_pct : float
-        Minimum fraction of rolling windows where IC must exceed the per-task threshold.
-        For ``task="return"`` (signed Spearman): IC must be > 0 (pointing right direction).
-        For ``task="regime"`` (abs point-biserial, always >= 0): IC must be > 0.05.
+        Minimum fraction of IC windows (blocks) where the oriented IC must exceed ``wf_threshold``.
+        On ``task="regime"`` the windows are those where class c* has at least 2 members on each side.
         Default 0.60 — feature must be consistently predictive in at least 60% of windows.
         Set to 0.0 to disable and fall back to full-sample IC-IR only.
     verbose : bool
@@ -236,25 +272,29 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
     -------
     X_filtered : pd.DataFrame
     report : StageReport
+        ``detail["regime_class"]`` (regime task) maps each feature to the class c* it was scored on.
     icir_scores : dict[str, float]
-        IC-IR value for every feature that entered this stage.
+        IC-IR value for every feature that entered this stage (regime task: the signed IC-IR of class c*).
     """
     if min_icir is None:
         min_icir = 0.30 if task == "return" else 0.20
 
-    # Resolve wf_threshold: explicit override > task default
-    _wf_threshold = wf_threshold if wf_threshold is not None else (0.0 if task == "return" else 0.05)
+    # Resolve wf_threshold: explicit override > task default (0.0 for both tasks; every IC here is signed)
+    _wf_threshold = wf_threshold if wf_threshold is not None else 0.0
 
     n_before = X.shape[1]
     icir_scores: dict[str, float] = {}
     ic_series_map: dict[str, pd.Series] = {}
+    regime_class: dict[str, object] = {}
 
     for col in X.columns:
         if task == "return":
             ic = _block_spearman(X[col], y, window) if use_block_ic else _rolling_spearman(X[col], y, window)
+            icir_scores[col] = _icir(ic)
         else:
-            ic = _block_pointbiserial(X[col], y, window) if use_block_ic else _rolling_pointbiserial(X[col], y, window)
-        icir_scores[col] = _icir(ic)
+            ic_by_class = (_block_pointbiserial(X[col], y, window) if use_block_ic
+                           else _rolling_pointbiserial(X[col], y, window))
+            ic, icir_scores[col], regime_class[col] = _best_class_ic(ic_by_class, sign_agnostic)
         ic_series_map[col] = ic
 
     # Orientation: +1 for every feature under the signed rule, else the sign of its IC-IR (0 IC-IR counts as +1).
@@ -290,7 +330,9 @@ def stage2_temporal_stability(X: pd.DataFrame, y: pd.Series, task: str = "return
             top = sorted(icir_scores.items(), key=lambda kv: oriented_icir[kv[0]], reverse=True)[:5]
             print(f"    Top IC-IR (signed): {[(k, round(v, 3)) for k, v in top]}")
 
+    detail = {"sign_agnostic": sign_agnostic, "negative_ic_kept": [c for c in kept if orientation[c] < 0]}
+    if task == "regime":
+        detail["regime_class"] = regime_class
     report = StageReport(stage="Stage2_TemporalStability", n_before=n_before, n_after=len(kept), removed=removed,
-                         detail={"sign_agnostic": sign_agnostic,
-                                 "negative_ic_kept": [c for c in kept if orientation[c] < 0]})
+                         detail=detail)
     return X[kept], report, icir_scores

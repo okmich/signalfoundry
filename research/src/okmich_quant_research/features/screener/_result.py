@@ -48,7 +48,18 @@ class ScreenerResult:
     stage_reports : list[StageReport]
         Per-stage reduction record.
     icir_scores : dict[str, float]
-        IC-IR computed at Stage 2 for each surviving feature.
+        Signed IC-IR computed at Stage 2 for every feature that entered it (regime task: the IC-IR of the class
+        the feature was scored on; see Stage 2's ``detail["regime_class"]``).
+    stage1_scores : dict
+        Stage 1 score Series, ``{"mi", "ks"}`` (regime) or ``{"mi", "dcor"}`` (return).
+    boruta_groups : dict
+        Boruta's own verdicts: ``{"confirmed", "tentative", "rejected"}``.
+    boruta_fallback : bool
+        True when Boruta confirmed and tentatively accepted nothing. ``confirmed`` is then empty and every Stage-3
+        survivor is listed in ``tentative`` and still ranked by Stage 5 — none of them beat Boruta's shadows.
+    stage5_detail : dict
+        What Stage 5 ran: ``cv``, ``n_splits``, ``horizon``, ``embargo_bars``, ``n_folds_used``, ``skipped_folds``,
+        ``shap_method`` and ``shap_fallback_folds``. Empty when Stage 5 did not run.
     """
     confirmed: List[str]
     tentative: List[str]
@@ -59,6 +70,8 @@ class ScreenerResult:
     icir_scores: dict = field(default_factory=dict)
     stage1_scores: dict = field(default_factory=dict)
     boruta_groups: dict = field(default_factory=dict)
+    boruta_fallback: bool = False
+    stage5_detail: dict = field(default_factory=dict)
 
     def summary(self) -> pd.DataFrame:
         """Return a DataFrame summarising the stage-by-stage reduction."""

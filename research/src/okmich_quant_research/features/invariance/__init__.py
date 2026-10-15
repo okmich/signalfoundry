@@ -60,8 +60,8 @@ negative going backward and zero when neither. That is ``momentum.di_spread``, w
 WHAT THIS PACKAGE IS
 --------------------
 The machine that runs those two experiments over a whole pool of indicators and writes down the
-verdicts. The verdicts it has already produced live in ``registry/_invariance.csv`` — 97 indicators
-graded. The screener reads that file to decide which indicators are admissible on which axis, instead
+verdicts. The verdicts it has already produced live in ``registry/_invariance.csv`` — 235 of the 314 catalogue
+entries graded as of 2026-10. The screener reads that file to decide which indicators are admissible on which axis, instead
 of trusting their names (``registry.is_eligible``).
 
 WHEN YOU ACTUALLY NEED TO RUN IT
@@ -70,12 +70,12 @@ Most of the time you do not: the verdicts ship with the code. It earns its keep 
 
   1. A NEW INDICATOR is added. You cannot know what it measures by reading it — that is the whole
      lesson. Probe it and stamp it, or it is admitted on its namespace alone.
-  2. A POOL THE PROBE NEVER COVERED is screened. Only 97 of the 313 catalogue entries are graded, so
-     most axes still carry unmeasured candidates; the screener names them once per run.
+  2. A POOL THE PROBE NEVER COVERED is screened. About a quarter of the catalogue (79 of 314 entries
+     as of 2026-10) is still ungraded, so axes can carry unmeasured candidates; the screener names them once per run.
   3. AN EXISTING INDICATOR'S CODE CHANGES. A stamp is a claim about behaviour, so editing the
      behaviour can leave the stamp quietly stale.
   4. A DIFFERENT INSTRUMENT CLASS is taken on and the classification should be verified rather than
-     assumed (the shipped stamps are 4 FX majors plus one index).
+     assumed (the shipped stamps come from FXPIG M5 FX majors, US500, XAUUSD and BTCUSDT).
 
 Think of it as the calibration rig for a set of instruments: not used daily, but the thing you reach
 for the day someone asks whether a gauge really measures what its label says.

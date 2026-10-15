@@ -1,4 +1,4 @@
-"""Three-way feature partition logic with strict precedence."""
+"""Four-bucket feature partition (three signal buckets + unclassified) with strict precedence."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ def partition_features(ic_matrix: pd.DataFrame, status_matrix: pd.DataFrame, sta
     All significance decisions are driven by the status_matrix (which already
     encodes both ic_threshold and max_pvalue checks from assign_status).
 
+    unclassified holds features with no significant condition OR no robust
+    bucket: e.g. significant in exactly one condition without dominating the
+    other computed conditions.
+
     Parameters
     ----------
     ic_matrix : pd.DataFrame
@@ -44,7 +48,10 @@ def partition_features(ic_matrix: pd.DataFrame, status_matrix: pd.DataFrame, sta
     stability_threshold : float
         Adaptive boundary between stable and variable.
     dominance_ratio : float
-        For condition_specific: dominant |IC| must be >= this * next-best.
+        For condition_specific: the dominant condition (chosen among the
+        significant ones) must have |IC| >= this * max |IC| of every other
+        computed condition. A feature significant elsewhere with the opposite
+        sign is never condition_specific (it inverts, see conditional_ensemble).
     subperiod_instability_ratio : float
         Max subperiod_ic_std / |IC| for global_stable eligibility.
     detection_ratio : float
@@ -150,38 +157,26 @@ def partition_features(ic_matrix: pd.DataFrame, status_matrix: pd.DataFrame, sta
         if len(significant) == 0:
             continue
 
-        # Dominance check: best |IC| >= dominance_ratio * next-best |IC|
-        # Compare against ALL computed conditions (including below-threshold)
         computed = _computed_conditions(status_row)
         computed_ics = ic_row[computed].dropna()
-
-        abs_ics = computed_ics.abs().sort_values(ascending=False)
-        if len(abs_ics) < 2:
-            # Only one condition computed — trivially passes dominance
-            dominant_cond = abs_ics.index[0]
-            if dominant_cond not in condition_specific:
-                condition_specific[dominant_cond] = []
-            condition_specific[dominant_cond].append(feat)
-            claimed.add(feat)
+        significant_ics = computed_ics.reindex(significant).dropna()
+        if significant_ics.empty:
             continue
 
-        best_ic = abs_ics.iloc[0]
-        next_best_ic = abs_ics.iloc[1]
+        # The dominant condition must itself be significant: the largest |IC| may sit in a condition that failed
+        # the p-value test, and filing the feature there would point a gate at a condition where it is INACTIVE.
+        dominant_cond = significant_ics.abs().idxmax()
+        dominant_ic = computed_ics[dominant_cond]
 
-        if next_best_ic == 0:
-            # All others are zero — trivially passes
-            dominant_cond = abs_ics.index[0]
-            if dominant_cond not in condition_specific:
-                condition_specific[dominant_cond] = []
-            condition_specific[dominant_cond].append(feat)
-            claimed.add(feat)
+        # Sign flip: significant elsewhere with the opposite sign -> the feature inverts, it does not specialise
+        other_significant = significant_ics.drop(dominant_cond)
+        if (np.sign(other_significant) == -np.sign(dominant_ic)).any():
             continue
 
-        if best_ic >= dominance_ratio * next_best_ic:
-            dominant_cond = abs_ics.index[0]
-            if dominant_cond not in condition_specific:
-                condition_specific[dominant_cond] = []
-            condition_specific[dominant_cond].append(feat)
+        # Dominance check against ALL other computed conditions (including below-threshold ones)
+        others = computed_ics.drop(dominant_cond).abs()
+        if others.empty or others.max() == 0 or abs(dominant_ic) >= dominance_ratio * others.max():
+            condition_specific.setdefault(dominant_cond, []).append(feat)
             claimed.add(feat)
 
     # --- Step 4: conditional_ensemble ---
@@ -196,7 +191,7 @@ def partition_features(ic_matrix: pd.DataFrame, status_matrix: pd.DataFrame, sta
             conditional_ensemble.append(feat)
             claimed.add(feat)
 
-    # --- Remaining edge cases -> unclassified ---
+    # --- No robust bucket -> unclassified (significant in exactly one condition without dominating) ---
     for feat in features:
         if feat not in claimed:
             unclassified.append(feat)

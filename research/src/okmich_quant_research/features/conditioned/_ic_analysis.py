@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from ._enums import NullMethod
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,14 +105,26 @@ def compute_global_ic(features_df: pd.DataFrame, target: pd.Series) -> pd.Series
     return pd.Series(results, name="global_ic")
 
 
-def compute_ic_threshold(features_df: pd.DataFrame, target: pd.Series, condition_labels: pd.Series, n_permutations: int = 100, ic_percentile: float = 95.0, min_observations: int = 1000, feature_subsample_ratio: float = 0.3) -> float:
+def compute_ic_threshold(features_df: pd.DataFrame, target: pd.Series, condition_labels: pd.Series,
+                         n_permutations: int = 100, ic_percentile: float = 95.0, min_observations: int = 1000,
+                         feature_subsample_ratio: float = 0.3, null_method: NullMethod = NullMethod.CIRCULAR_SHIFT,
+                         min_shift: int = 500) -> float:
     """
     Permutation-based adaptive IC threshold.
 
-    Shuffles the target n_permutations times (preserving condition label
-    alignment), computes |IC| for a random subsample of features across
-    all conditions per shuffle, and returns the ic_percentile-th percentile
-    of the pooled |null IC| distribution.
+    Breaks the feature-target link n_permutations times (features and
+    condition labels stay in place), computes |IC| for a random subsample of
+    features across all conditions per permutation, and returns the
+    ic_percentile-th percentile of the pooled |null IC| distribution.
+
+    With ``NullMethod.CIRCULAR_SHIFT`` (default) each permutation rolls the
+    target by a random offset in [min_shift, n - min_shift), so the target
+    keeps its autocorrelation. Two independent persistent series correlate by
+    chance far more often than an iid shuffle suggests (independent AR(1)
+    with phi = 0.99, 20k bars: 95th-percentile null |IC| ~ 0.19 against ~ 0.02 from
+    the shuffle), so the shift null is the one to trust on overlapping
+    forward returns and slow features. ``NullMethod.IID_SHUFFLE`` reproduces
+    the original bar-by-bar shuffle.
 
     Parameters
     ----------
@@ -128,12 +142,22 @@ def compute_ic_threshold(features_df: pd.DataFrame, target: pd.Series, condition
         Minimum rows per (feature, condition).
     feature_subsample_ratio : float
         Fraction of features to subsample per permutation.
+    null_method : NullMethod
+        CIRCULAR_SHIFT (default) or IID_SHUFFLE.
+    min_shift : int
+        Smallest circular offset in bars; clamped to n // 4 (at least 1) on
+        short series. Set it above the target's and features' memory (e.g.
+        the forward-return horizon and the slowest feature lookback).
 
     Returns
     -------
     float
         The adaptive IC threshold (noise floor).
     """
+    null_method = NullMethod(null_method)
+    if min_shift < 1:
+        raise ValueError(f"min_shift must be >= 1, got {min_shift}")
+
     rng = np.random.default_rng(42)
     all_features = features_df.columns.tolist()
     n_subsample = max(1, int(len(all_features) * feature_subsample_ratio))
@@ -141,9 +165,17 @@ def compute_ic_threshold(features_df: pd.DataFrame, target: pd.Series, condition
     conditions = sorted(condition_labels.dropna().unique())
     null_ics: list[float] = []
 
+    n = len(target)
+    shift_lo = max(1, min(min_shift, n // 4))
+    shift_hi = n - shift_lo
+
     for _ in range(n_permutations):
-        # Shuffle target, preserving index alignment with condition labels
-        shuffled_target = target.sample(frac=1.0, random_state=rng.integers(0, 2**31)).values
+        # Permute target, preserving index alignment with features and condition labels
+        if null_method == NullMethod.CIRCULAR_SHIFT:
+            offset = int(rng.integers(shift_lo, shift_hi)) if shift_hi > shift_lo else shift_lo % max(n, 1)
+            shuffled_target = np.roll(target.values, offset)
+        else:
+            shuffled_target = target.sample(frac=1.0, random_state=rng.integers(0, 2**31)).values
         shuffled_target = pd.Series(shuffled_target, index=target.index, name=target.name)
 
         # Subsample features

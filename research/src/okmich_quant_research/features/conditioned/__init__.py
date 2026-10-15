@@ -5,7 +5,7 @@ Computes regime-stratified and time-stratified Spearman IC to build a feature-co
 predictive under which conditions.
 """
 
-from ._enums import ConditionPass, FeatureBucket, FeatureStatus
+from ._enums import ConditionPass, FeatureBucket, FeatureStatus, NullMethod
 from ._result import FeatureConditionMap
 from .analyzer import ConditionalFeatureAnalyzer
 from .plots import ConditionedFeatureVisualizer
@@ -17,4 +17,5 @@ __all__ = [
     "FeatureBucket",
     "FeatureConditionMap",
     "FeatureStatus",
+    "NullMethod",
 ]

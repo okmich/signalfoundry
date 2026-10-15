@@ -18,7 +18,7 @@ from ._result import StageReport
 
 
 def stage3_redundancy(X: pd.DataFrame, icir_scores: dict[str, float], corr_threshold: float = 0.75,
-                      verbose: bool = True) -> tuple[pd.DataFrame, StageReport, dict]:
+                      verbose: bool = True) -> tuple[pd.DataFrame, StageReport]:
     """
     Hierarchical clustering redundancy filter.
 

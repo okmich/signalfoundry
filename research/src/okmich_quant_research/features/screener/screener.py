@@ -72,8 +72,8 @@ class FeatureScreener:
     n_cv_splits : int
         Stage 5: number of CV folds for SHAP/MDA ranking. Default 5.
     walk_forward_pct : float
-        Stage 2: minimum fraction of rolling IC windows where IC must be positive
-        (return task) or > 0.05 (regime task). Default 0.55.
+        Stage 2: minimum fraction of IC windows where the oriented IC must exceed ``stage2_wf_threshold``
+        (default 0.0 on both tasks). Default 0.55.
         Lower this for high-frequency / intraday data where per-window IC is noisy.
     stage1_min_passes : int
         Stage 1 (return): number of tests (MI, dcor) a feature must pass to survive.
@@ -88,8 +88,8 @@ class FeatureScreener:
         Ordered list of feature prefixes; leftmost = most preferred.
         Default ``("tm_", "feat_")``.
     use_block_ic : bool
-        Stage 2: if True, use non-overlapping block IC — O(n) and much faster than
-        the default sliding-window O(n × window). Default False (original behaviour).
+        Stage 2: if True (default), use non-overlapping block IC — O(n) and much faster than
+        the sliding-window O(n × window). False restores the sliding window.
     stage2_sign_agnostic : bool
         Stage 2: judge |IC-IR| and a hit rate oriented by the sign of the mean IC, so a reliably negative-IC
         (reversal) feature survives like a positive one. Default True. False restores the signed rule, which
@@ -205,7 +205,8 @@ class FeatureScreener:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def screen_for_regimes(self, features_df: pd.DataFrame, labels: pd.Series,
-                           starting_features: Optional[List[str]] = None) -> ScreenerResult:
+                           starting_features: Optional[List[str]] = None, horizon: int = 0,
+                           embargo_pct: float = 0.01) -> ScreenerResult:
         """
         Run the full 5-stage funnel for regime classification.
 
@@ -218,13 +219,19 @@ class FeatureScreener:
         starting_features : list[str] or None
             If provided, subsets features_df to these columns before Stage 0.
             Use the FeatureRegistry to generate this list.
+        horizon : int
+            Stage 5 purge width: how many bars ahead the labeler looks. 0 (default) for a causal label; set it
+            to the labeler's forward window for a hindsight label (e.g. an amplitude or trend-scan target).
+        embargo_pct : float
+            Stage 5 embargo fraction after each test fold (at least ``horizon`` bars).
 
         Returns
         -------
         ScreenerResult
         """
         self._log("\n== FeatureScreener: screen_for_regimes ==")
-        return self._run(features_df=features_df, y=labels, task="regime", starting_features=starting_features)
+        return self._run(features_df=features_df, y=labels, task="regime", starting_features=starting_features,
+                         horizon=horizon, embargo_pct=embargo_pct)
 
     def screen_for_returns(self, features_df: pd.DataFrame, forward_returns: pd.Series, horizon: int = 5,
                            embargo_pct: float = 0.01, starting_features: Optional[List[str]] = None) -> ScreenerResult:
@@ -341,26 +348,32 @@ class FeatureScreener:
         tentative = boruta_groups["tentative"]
         rejected_total = r0.removed + r1.removed + r2.removed + r3.removed + boruta_groups["rejected"]
 
-        # If Boruta confirmed nothing, fall back to all Stage-3 survivors
-        if len(confirmed) + len(tentative) == 0:
-            self._log("  Boruta confirmed nothing — keeping all Stage-3 survivors for ranking")
+        # If Boruta accepted nothing, rank every Stage-3 survivor but do NOT call any of them confirmed: none beat
+        # Boruta's shadow features. They are reported as tentative and flagged.
+        boruta_fallback = len(confirmed) + len(tentative) == 0
+        if boruta_fallback:
+            self._log("  Boruta accepted nothing — ranking all Stage-3 survivors as TENTATIVE (boruta_fallback=True)")
             X_sub_for_ranking = X_sub
-            confirmed = list(X.columns)
-            tentative = []
+            confirmed = []
+            tentative = list(X.columns)
+            rejected_total = r0.removed + r1.removed + r2.removed + r3.removed
         else:
             X_sub_for_ranking = X_boruta_sub
 
         # ── Stage 5 ──────────────────────────────────────────────────────────
         self._log("\n[Stage 5] Model ranking (SHAP + MDA)")
-        shap_rank, mda_rank = stage5_model_ranking(X_sub_for_ranking, y_sub, task=task, n_splits=self.n_cv_splits,
-                                                   horizon=horizon, embargo_pct=embargo_pct, verbose=self.verbose)
+        shap_rank, mda_rank, stage5_detail = stage5_model_ranking(X_sub_for_ranking, y_sub, task=task,
+                                                                  n_splits=self.n_cv_splits, horizon=horizon,
+                                                                  embargo_pct=embargo_pct, verbose=self.verbose,
+                                                                  return_detail=True)
 
         self._log(f"\n== Done. Confirmed: {len(confirmed)}, Tentative: {len(tentative)} ==")
 
         return ScreenerResult(confirmed=confirmed, tentative=tentative, rejected=rejected_total,
                               shap_rank=shap_rank, mda_rank=mda_rank, stage_reports=stage_reports,
                               icir_scores=icir_scores, stage1_scores=s1_scores,
-                              boruta_groups=boruta_groups)
+                              boruta_groups=boruta_groups, boruta_fallback=boruta_fallback,
+                              stage5_detail=stage5_detail)
 
     @staticmethod
     def _empty_result(stage_reports: list[StageReport], *, s1_scores: dict | None = None,

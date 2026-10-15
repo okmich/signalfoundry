@@ -2,7 +2,7 @@
 
 Directional regime labels
 -------------------------
-  continuous_trend_labeling      Price-action state machine; +1 / -1 / 0
+  continuous_trend_labeling      Price-action state machine; +1 / -1 (NaN during the pre-trigger warmup)
   trend_persistence_labeling     Vol-normalised drift; +1 / -1 / 0
 
 CTL causal feature bundle (from the price-action state machine)

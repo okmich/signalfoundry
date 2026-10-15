@@ -8,7 +8,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from ._enums import ConditionPass
+from ._enums import ConditionPass, NullMethod
 from ._ic_analysis import check_ic_threshold_diagnostic, compute_conditional_ic, compute_global_ic, compute_ic_threshold
 from ._partition import partition_features
 from ._result import FeatureConditionMap, assign_status
@@ -31,7 +31,7 @@ class ConditionalFeatureAnalyzer:
     max_pvalue : float
         Maximum Spearman p-value for significance. Default 0.05.
     n_permutations : int
-        Number of target shuffles for the null IC distribution. Default 100.
+        Number of target permutations for the null IC distribution. Default 100.
     ic_percentile : float
         Percentile of null |IC| for the noise floor. Default 95.0.
     ic_threshold_override : float or None
@@ -47,10 +47,20 @@ class ConditionalFeatureAnalyzer:
     n_subperiods : int
         Non-overlapping time chunks for sub-period stability. Default 3.
     verbose : bool
-        Print progress and adaptive threshold values. Default True.
+        Log progress and adaptive threshold values (logger.info). Default True.
+    null_method : NullMethod
+        How the permutation null breaks the feature-target link. CIRCULAR_SHIFT (default) rolls the target in time
+        and keeps its autocorrelation; IID_SHUFFLE is the original bar-by-bar shuffle, too narrow on persistent
+        features and overlapping forward returns. Ignored when ic_threshold_override is set.
+    min_shift : int
+        Smallest circular offset in bars for CIRCULAR_SHIFT. Default 500.
     """
 
-    def __init__(self, min_observations: int = 1000, max_pvalue: float = 0.05, n_permutations: int = 100, ic_percentile: float = 95.0, ic_threshold_override: float | None = None, stability_threshold_override: float | None = None, dominance_ratio: float = 2.0, subperiod_instability_ratio: float = 0.5, detection_ratio: float = 0.3, n_subperiods: int = 3, verbose: bool = True):
+    def __init__(self, min_observations: int = 1000, max_pvalue: float = 0.05, n_permutations: int = 100,
+                 ic_percentile: float = 95.0, ic_threshold_override: float | None = None,
+                 stability_threshold_override: float | None = None, dominance_ratio: float = 2.0,
+                 subperiod_instability_ratio: float = 0.5, detection_ratio: float = 0.3, n_subperiods: int = 3,
+                 verbose: bool = True, null_method: NullMethod = NullMethod.CIRCULAR_SHIFT, min_shift: int = 500):
         self.min_observations = min_observations
         self.max_pvalue = max_pvalue
         self.n_permutations = n_permutations
@@ -62,6 +72,8 @@ class ConditionalFeatureAnalyzer:
         self.detection_ratio = detection_ratio
         self.n_subperiods = n_subperiods
         self.verbose = verbose
+        self.null_method = NullMethod(null_method)
+        self.min_shift = min_shift
 
     def analyze_by_regime(self, features_df: pd.DataFrame, target: pd.Series, regime_labels: pd.Series) -> FeatureConditionMap:
         """Pass 1: condition = regime label."""
@@ -154,14 +166,18 @@ class ConditionalFeatureAnalyzer:
         # 3. Determine IC threshold
         if self.ic_threshold_override is not None:
             ic_threshold = self.ic_threshold_override
+            null_method = None
             if self.verbose:
                 logger.info("  Using fixed ic_threshold=%.4f (override)", ic_threshold)
         else:
             if self.verbose:
                 logger.info("  Computing adaptive IC threshold via permutation null...")
-            ic_threshold = compute_ic_threshold(features_df, target, condition_labels, self.n_permutations, self.ic_percentile, self.min_observations)
+            null_method = self.null_method
+            ic_threshold = compute_ic_threshold(features_df, target, condition_labels, self.n_permutations,
+                                                self.ic_percentile, self.min_observations, null_method=null_method,
+                                                min_shift=self.min_shift)
             if self.verbose:
-                logger.info("  Adaptive ic_threshold=%.4f", ic_threshold)
+                logger.info("  Adaptive ic_threshold=%.4f (null=%s)", ic_threshold, null_method)
             # Diagnostic: warn if threshold exceeds median real |IC|
             check_ic_threshold_diagnostic(ic_threshold, ic_matrix)
 
@@ -222,4 +238,6 @@ class ConditionalFeatureAnalyzer:
             subperiod_ic_std=subperiod_ic_std,
             condition_sample_counts=condition_sample_counts,
             skipped_conditions=skipped_conditions,
+            null_method=null_method,
+            null_min_shift=self.min_shift if null_method == NullMethod.CIRCULAR_SHIFT else None,
         )

@@ -623,9 +623,10 @@ _TREND = [
     _fe("core_trend_features", "trend", "composite",
         "Core trend feature bundle: Bollinger bands, CTL trend features, persistence, and continuous z-score features",
         rr=H, ret=H, dr=H, hor=ME, wbi=[TR, RA], dir_=True, ot="dataframe"),
-    # Causal labeling functions (produce 1/-1/0 signals)
+    # Causal labeling functions (CTL: +1/-1 with a NaN warmup; trend_persistence: +1/-1/0)
     _fe("continuous_trend_labeling", "trend", "trend",
-        "State-machine trend label: +1 up, -1 down, 0 neutral", rr=H, ret=M, dr=H, hor=S, dir_=True),
+        "State-machine trend label: +1 up, -1 down; NaN during the pre-trigger warmup (never emits 0)",
+        rr=H, ret=M, dr=H, hor=S, dir_=True),
     _fe("zscore_trend_features", "trend", "trend",
         "Continuous z-score trend exhaustion features: z-score, derivative, and absolute magnitude",
         rr=H, ret=H, dr=M, hor=S, wbi=[RA, VO], ot="dataframe"),
@@ -973,7 +974,9 @@ _DIRECTIONAL_CHANGE = [
         rr=H, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe"),
     _fe("label_alpha_beta_dc", "directional_change", "trend",
         "Alpha/beta directional-change class labels",
-        rr=H, ret=M, dr=H, hor=ME, dir_=True, ot="dataframe"),
+        rr=H, ret=M, dr=H, hor=ME, dir_=True, causal=False, ot="dataframe",
+        notes="TRAINING TARGET, not a feature: has_os for row i is measured from the NEXT trend "
+              "(os_length = ext_end_pos[i+1] - dcc_pos[i]), so it needs foresight. Never use as a model input."),
     _fe("extract_dc_classification_features", "directional_change", "price_structure",
         "Directional-change classification feature bundle",
         rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),
@@ -982,7 +985,9 @@ _DIRECTIONAL_CHANGE = [
         rr=H, ret=M, dr=M, hor=ME, dir_=True, ot="dataframe"),
     _fe("label_bbtheta", "directional_change", "trend",
         "Dual-threshold directional-change labels",
-        rr=H, ret=M, dr=H, hor=ME, dir_=True, ot="dataframe"),
+        rr=H, ret=M, dr=H, hor=ME, dir_=True, causal=False, ot="dataframe",
+        notes="TRAINING TARGET, not a feature: its own docstring says the labels require perfect foresight. "
+              "Call on training data only; never use as a model input."),
     _fe("extract_tsfdc_features", "directional_change", "price_structure",
         "Two-scale directional-change feature bundle",
         rr=H, ret=H, dr=H, hor=ME, dir_=True, ot="dataframe"),

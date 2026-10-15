@@ -217,14 +217,14 @@ class FeatureRegistry(_FeatureView):
     """
     Central registry of all feature-computing functions in okmich_quant_features.
 
-    Provides a queryable, chainable interface over 270+ feature entries.
+    Provides a queryable, chainable interface over every catalogue entry (314 as of 2026-10).
 
     Quick-start
     -----------
     >>> from okmich_quant_research.features.registry import FeatureRegistry
     >>> reg = FeatureRegistry()
     >>> len(reg)
-    216
+    314
 
     >>> regime_candidates = reg.candidates_for("regime", min_relevance="HIGH")
     >>> price_only = reg.candidates_for("return").needs_only_price()
