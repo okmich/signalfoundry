@@ -144,21 +144,23 @@ def create_taan(matrix_shapes: Mapping[str, Tuple[int, int]], num_classes: Optio
         # (B, H1, F) -> (B, 1, H1 * F): one row per indicator in the level-2 matrix
         selected.append(layers.Reshape((1, level1_heads * n_cols), name=f"{TaanLayer.LEVEL1_FLAT_PREFIX}{name}")(out))
 
-    level2_input = layers.Concatenate(axis=1, name=TaanLayer.LEVEL2_STACK)(selected)  # (B, M, H1 * F); M = 1 is fine
+    # Layer names must be plain str, not StrEnum members: Keras keeps the member as layer.name and writes it as an
+    # HDF5 attribute on .keras save, where h5py only maps type(x) is str to a string dtype and rejects the rest.
+    level2_input = layers.Concatenate(axis=1, name=str(TaanLayer.LEVEL2_STACK))(selected)  # (B, M, H1 * F); M = 1 ok
     level2_out, _ = HierarchicalCellAttention(num_heads=level2_heads, temperature=temperature,
-                                              name=TaanLayer.LEVEL2)(level2_input)
+                                              name=str(TaanLayer.LEVEL2))(level2_input)
 
-    x = layers.Flatten(name=TaanLayer.LEVEL2_FLAT)(level2_out)  # (B, H2 * H1 * F)
+    x = layers.Flatten(name=str(TaanLayer.LEVEL2_FLAT))(level2_out)  # (B, H2 * H1 * F)
     regularizer = l2(l2_reg) if l2_reg else None
-    x = layers.Dense(dense_units_1, activation="relu", kernel_regularizer=regularizer, name=TaanLayer.DENSE_1)(x)
+    x = layers.Dense(dense_units_1, activation="relu", kernel_regularizer=regularizer, name=str(TaanLayer.DENSE_1))(x)
     if dense_dropout:
-        x = layers.Dropout(dense_dropout, name=TaanLayer.DROPOUT_1)(x)
-    x = layers.Dense(dense_units_2, activation="relu", kernel_regularizer=regularizer, name=TaanLayer.DENSE_2)(x)
+        x = layers.Dropout(dense_dropout, name=str(TaanLayer.DROPOUT_1))(x)
+    x = layers.Dense(dense_units_2, activation="relu", kernel_regularizer=regularizer, name=str(TaanLayer.DENSE_2))(x)
     if dense_dropout:
-        x = layers.Dropout(dense_dropout, name=TaanLayer.DROPOUT_2)(x)
+        x = layers.Dropout(dense_dropout, name=str(TaanLayer.DROPOUT_2))(x)
 
     outputs, loss, output_metrics = create_output_layer_and_loss(x, task_type, num_classes,
-                                                                 output_name=TaanLayer.OUTPUT)
+                                                                 output_name=str(TaanLayer.OUTPUT))
     if task_type == TaskType.CLASSIFICATION and num_classes > 2:
         # The shared helper attaches regime-transition metrics to multi-class heads; they are meaningless for sparse
         # per-bar event labels, so use the imbalance-aware set instead. The binary and regression sets are kept.
