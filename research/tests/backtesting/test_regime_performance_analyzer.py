@@ -128,8 +128,8 @@ class TestRegimeReturnStats:
 
     def test_n_bars_coverage(self, analyzer: RegimePerformanceAnalyzer):
         df = analyzer.regime_return_stats()
-        # All bars must be accounted for
-        assert df["n_bars"].sum() == N_BARS
+        # Every bar but the first is accounted for: bar t's return goes to the label known at close t-1
+        assert df["n_bars"].sum() == N_BARS - 1
 
     def test_index_uses_regime_names(
         self, sample_portfolio: vbt.Portfolio, sample_regime_labels: pd.Series
@@ -142,6 +142,34 @@ class TestRegimeReturnStats:
         assert "trending" in df.index
         assert "ranging" in df.index
         assert "volatile" in df.index
+
+
+class TestCausalReturnAttribution:
+    """Bar t's return is attributed to the label known at close t-1, so a same-bar label cannot separate returns."""
+
+    def test_same_bar_label_does_not_separate_bar_returns(self):
+        n = 2000
+        idx = pd.date_range("2020-01-01", periods=n, freq="D")
+        close = pd.Series(100 * np.exp(np.cumsum(0.01 * np.random.default_rng(0).standard_normal(n))), index=idx)
+        entries = pd.Series(False, index=idx)
+        entries.iloc[0] = True  # always long: strategy return = iid asset return from bar 1 on
+        exits = pd.Series(False, index=idx)
+        pf = vbt.Portfolio.from_signals(close, entries=entries, exits=exits, init_cash=10_000, freq="D")
+        bar_ret = close.pct_change().fillna(0.0)
+        label = pd.Series(np.where(bar_ret > 0, 1, -1), index=idx)  # sign of the SAME bar's return: pure look-ahead
+
+        # grouping by the same-bar label (the old behaviour) separates the regimes by ~0.8 sd each way
+        returns = pf.returns()
+        assert returns[label == 1].mean() > 0.005
+        assert returns[label == -1].mean() < -0.005
+
+        rpa = RegimePerformanceAnalyzer(pf, label)
+        by_regime = rpa._returns_by_regime()
+        stats = rpa.regime_return_stats()
+        for rid in (1, -1):
+            rets = by_regime[rid].dropna()
+            assert abs(rets.mean()) < 4 * rets.std() / np.sqrt(len(rets))  # ~0 under causal attribution
+            assert abs(stats.loc[str(rid), "sharpe"]) < 4 * np.sqrt(252 / len(rets))
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +318,8 @@ class TestFromSignal:
         )
         assert isinstance(rpa, RegimePerformanceAnalyzer)
         assert len(rpa._regimes) == 3
-        # metrics are vbt-native (came from the built portfolio), all bars accounted for
-        assert rpa.regime_return_stats()["n_bars"].sum() == len(sample_price_data)
+        # metrics are vbt-native (came from the built portfolio), all bars but the first (no prior label) accounted for
+        assert rpa.regime_return_stats()["n_bars"].sum() == len(sample_price_data) - 1
 
     def test_accepts_callable_regime_definition(self, sample_price_data: pd.DataFrame):
         def regime_fn(data: pd.DataFrame) -> pd.Series:

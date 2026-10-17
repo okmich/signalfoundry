@@ -1,27 +1,30 @@
 import warnings
-from typing import List, Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 from scipy import stats
 
+MIN_CLUSTERS = 20
+
 
 def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", return_col: str = "returns",
                                  method: str = "conservative", min_samples: int = 30, confidence_level: float = 0.95,
                                  mapping_dict: Optional[Dict[Any, int]] = None, min_sharpe: float = 0.3,
-                                 cost_threshold: Optional[float] = None,
-                                 return_diagnostics: bool = False, **kwargs, ) -> Dict[Any, int] | Tuple[Dict[Any, int], pd.DataFrame]:
+                                 cost_threshold: Optional[float] = None, horizon: int = 1,
+                                 cluster_size: Optional[int] = None, force_distinct_signs: bool = False,
+                                 return_diagnostics: bool = False,
+                                 **kwargs) -> Dict[Any, int] | Tuple[Dict[Any, int], pd.DataFrame]:
     """
-    Map HMM states to trend directions with guaranteed distinct sign assignment
+    Map states (HMM states, cluster ids, rule labels) to trade directions in {-1, 0, 1}.
 
-    Designed for production use in automated backtesting pipelines where:
-    - HMM states (0,1,2,3...) need to be mapped to directional signals (-1, 0, 1)
-    - GUARANTEE: n states → min(n, 3) distinct signs (1-to-1 mapping up to max 3)
-    - Data-adaptive thresholds inferred from state separation
-    - Fallback ranking ensures distinct signs when statistical tests fail
-    - Conservative defaults prevent false signals
-    - Robust handling of edge cases (small samples, noisy regimes)
-    - Deterministic results for reproducibility
+    - A state gets a sign only when its method's criteria pass; otherwise it gets 0 (no trade).
+    - The significance test is a cluster-robust t-test (see ``cluster_size``), so overlapping forward returns and
+      serial dependence do not inflate it. An iid t-test on overlapping 12-bar forward returns flags about 60% of
+      no-drift states.
+    - ``force_distinct_signs=True`` restores the old ranking fallback (min(n, 3) distinct signs whatever the test
+      says). A fallback sign is a rank, not evidence.
+    - Rows of ``df`` are taken to be in time order.
 
     Parameters
     ----------
@@ -56,6 +59,16 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         2. Fallback: Typical noise level (median absolute return * 0.1)
         3. Final: Larger of separation-based and noise-based thresholds
         This ensures thresholds adapt to timeframe and instrument characteristics
+    horizon : int, default=1
+        Bars spanned by each value of ``return_col``. Forward h-bar returns overlap, so pass h: the default cluster
+        size grows with it.
+    cluster_size : int, optional
+        Rows per cluster (consecutive rows of ``df``) for the cluster-robust t-test; inference uses a t distribution
+        with (clusters - 1) degrees of freedom. Default max(20 * horizon, ceil(sqrt(len(df)))), capped so there
+        are at least 20 clusters (never below ``horizon``); on short samples the test then runs mildly liberal.
+    force_distinct_signs : bool, default=False
+        If True and the method signs fewer than min(n, 3) distinct directions, rank the states by mean and assign
+        -1/0/+1 anyway (``fallback`` = True in the diagnostics). Never applied to a supplied ``mapping_dict``.
     return_diagnostics : bool, default=False
         If True, returns (mapping, diagnostics_df) for debugging
         If False, returns only mapping dict
@@ -70,34 +83,30 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         - 0: No trade (neutral/uncertain regime)
         - -1: Short signal (bearish regime)
     diagnostics_df : pd.DataFrame (if return_diagnostics=True)
-        Statistics for each state showing why it was labeled
+        Statistics for each state showing why it was labeled. ``test_direction`` is the method's own verdict;
+        ``direction`` differs from it only where the fallback fired.
 
-    Design Philosophy for HMM Backtesting
-    --------------------------------------
-    1. GUARANTEED MAPPING: n states → min(n, 3) distinct signs
-       - 2 states always get 2 distinct signs (e.g., -1 and 1)
-       - 3+ states always get 3 distinct signs (-1, 0, 1)
-       - If statistical tests fail, automatic fallback to ranking by mean
-    2. DATA-ADAPTIVE: Thresholds inferred from state separation, not hard-coded
-       - Works across different timeframes (1-min to daily)
-       - Works across different instruments (forex, equities, crypto)
-       - No manual threshold tuning required
-    3. STATISTICALLY SOUND: Prefer significance tests when states are well-separated
-       - Conservative: Requires significance + Sharpe + magnitude (strictest)
-       - Statistical: Requires significance + magnitude
-       - Sharpe: Requires risk-adjusted returns + magnitude
-       - Simple: Pure ranking by mean (fastest, least statistical)
-    4. ROBUST: Handle edge cases gracefully (never crash backtesting)
-    5. DETERMINISTIC: Same data → same labels (no randomness)
+    Methods
+    -------
+    - Conservative: significance + Sharpe + magnitude (strictest)
+    - Statistical: significance + magnitude
+    - Sharpe: risk-adjusted return + magnitude
+    - Simple: mean beyond half the cross-state spread of means (no test)
+
+    The map is fitted on ``df``: apply it out of sample through ``mapping_dict``, fitted on a training block.
     """
     if state_col not in df.columns:
         raise ValueError(f"Column '{state_col}' not found in DataFrame")
     if return_col not in df.columns:
         raise ValueError(f"Column '{return_col}' not found in DataFrame")
 
-    # Filter out NaN states and returns
+    # Filter out NaN states and returns. Clusters are cut on the row positions of ``df`` before filtering, so a
+    # dropped row never joins the bars on either side of it into one block.
     valid_mask = df[state_col].notna() & df[return_col].notna()
     df_clean = df.loc[valid_mask].copy()
+    block = cluster_size or min(max(20 * horizon, int(np.ceil(np.sqrt(len(df))))),
+                                max(horizon, len(df) // MIN_CLUSTERS))
+    df_clean["_block"] = np.flatnonzero(valid_mask.to_numpy()) // block
 
     if len(df_clean) == 0:
         warnings.warn("No valid data after removing NaN values")
@@ -123,6 +132,7 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
                     "sharpe": np.nan,
                     "t_stat": np.nan,
                     "p_value": np.nan,
+                    "n_clusters": np.nan,
                     "pos_ratio": np.nan,
                     "insufficient_data": True,
                 }
@@ -138,8 +148,8 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         # Risk-adjusted return
         sharpe = mean_ret / std_ret if std_ret > 0 else 0.0
 
-        # Statistical significance (one-sample t-test against 0)
-        t_stat, p_value = stats.ttest_1samp(returns, popmean=0.0, nan_policy="omit")
+        # Statistical significance (cluster-robust t-test of mean 0)
+        t_stat, p_value, n_clusters = _cluster_t_test(returns, state_df["_block"].to_numpy())
 
         stats_list.append(
             {
@@ -151,6 +161,7 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
                 "sharpe": sharpe,
                 "t_stat": t_stat,
                 "p_value": p_value,
+                "n_clusters": n_clusters,
                 "pos_ratio": pos_ratio,
                 "insufficient_data": False,
             }
@@ -197,7 +208,7 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
 
     alpha = 1 - confidence_level
 
-    frozen = bool(mapping_dict)
+    frozen = mapping_dict is not None
     if frozen:
         mapping = dict(mapping_dict)
         stats_df["direction"] = stats_df["state"].map(mapping).fillna(0).astype(int)
@@ -322,13 +333,13 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
     stats_df["test_direction"] = stats_df["direction"]
     stats_df["fallback"] = False
 
-    # ========== GUARANTEE: n states → min(n, 3) distinct signs ==========
-    # If the statistical method didn't produce enough distinct signs, use ranking fallback. Never on a supplied map:
-    # that would re-rank its states on ``df``, which is usually the evaluation block.
+    # ========== OPT-IN: n states → min(n, 3) distinct signs ==========
+    # Only on request: a ranking fallback overrides the test. Never on a supplied map: that would re-rank its states
+    # on ``df``, which is usually the evaluation block.
     valid_states = stats_df[~stats_df["insufficient_data"]]
     n_valid_states = len(valid_states)
 
-    if n_valid_states > 0 and not frozen:
+    if n_valid_states > 0 and not frozen and force_distinct_signs:
         # Count distinct signs assigned (excluding states with insufficient data)
         assigned_signs = set()
         for idx, row in valid_states.iterrows():
@@ -398,212 +409,18 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         return mapping
 
 
-def map_label_to_momentum_score(df: pd.DataFrame, regime_col: str = "regime", ret_col: str = "returns",
-                                method: str = "robust", min_samples: int = 30,
-                                momentum_range: int | tuple[int, int] = 5,
-                                is_directional: bool = True,
-                                return_diagnostics: bool = False) -> dict[Any, int] | tuple[dict[Any, int], pd.DataFrame]:
-    """
-    Map regime labels to an ordered momentum score where scores increase monotonically with empirical momentum estimates.
-
-    For directional mode (default): scores range from -n to +n where negative values indicate downward momentum and
-    positive values indicate upward momentum.
-
-    For non-directional mode: scores range from 0 to n where higher values indicate stronger momentum magnitude
-    regardless of direction.
-
-    The mapping is monotonic: if regime A is assigned a higher score than regime B, the momentum estimate of A is
-    guaranteed to be greater than (or equal to) that of B.
-    Designed for production pipelines that feed position-sizing or risk-on/risk-off flags.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Must contain at least the regime column and a return column.
-    regime_col : str, default='regime'
-        Column name for regime labels (any hashable dtype).
-    ret_col : str, default='returns'
-        Column name for (usually log) returns used to measure momentum.
-    method : {'robust', 'mean', 'sharpe'}, default='robust'
-        Momentum estimation method:
-        - 'robust': rank regimes by median return (resistant to outliers) [RECOMMENDED]
-        - 'mean': rank by arithmetic mean (faster, but sensitive to tails)
-        - 'sharpe': rank by Sharpe ratio (mean / std) to embed risk adjustment
-    min_samples : int, default=30
-        Minimum observations per regime for reliable statistics.
-        Regimes with fewer samples are assigned to:
-        - Directional mode: score 0 (neutral)
-        - Non-directional mode: score 0 (no momentum)
-    momentum_range : int or tuple(int, int), default=5
-        Defines the scoring range:
-        - If int and is_directional=True: scores range from -momentum_range to +momentum_range
-        - If int and is_directional=False: scores range from 0 to momentum_range
-        - If tuple: explicit (min, max) range (overrides is_directional interpretation)
-    is_directional : bool, default=True
-        If True: scores are directional (-n to +n) capturing both direction and strength
-        If False: scores are non-directional (0 to n) capturing only magnitude/strength
-    return_diagnostics : bool, default=False
-        If True, returns (mapping, diagnostics_df) showing statistics for each regime.
-        If False, returns only the mapping dict.
-
-    Returns
-    -------
-    mapping : dict
-        {regime_label: int_score} where scores satisfy monotonicity and range constraints
-    diagnostics_df : pd.DataFrame (if return_diagnostics=True)
-        One row per regime with statistics (mean, median, std, sharpe, count, score, reason)
-
-    Guarantees
-    ----------
-    1. Monotonic: score_i > score_j ⇒ momentum_estimate_i > momentum_estimate_j
-    2. Complete: every regime observed in df receives a score
-    3. Range-respecting: all scores lie inside the specified momentum_range
-    4. Deterministic: identical data → identical mapping
-    """
-    # Validate inputs
-    if regime_col not in df.columns:
-        raise ValueError(f"Column '{regime_col}' not found in DataFrame")
-    if ret_col not in df.columns:
-        raise ValueError(f"Column '{ret_col}' not found in DataFrame")
-    if method not in {"robust", "mean", "sharpe"}:
-        raise ValueError(
-            f"Unknown method '{method}'. Choose from: 'robust', 'mean', 'sharpe'"
-        )
-
-    # Parse momentum_range
-    if isinstance(momentum_range, int):
-        if is_directional:
-            score_min, score_max = -momentum_range, momentum_range
-        else:
-            score_min, score_max = 0, momentum_range
-    elif isinstance(momentum_range, tuple) and len(momentum_range) == 2:
-        score_min, score_max = momentum_range
-    else:
-        raise ValueError(
-            f"momentum_range must be int or tuple(int, int), got {type(momentum_range)}"
-        )
-
-    if score_min >= score_max:
-        raise ValueError(f"Invalid range: min={score_min} >= max={score_max}")
-
-    # Filter valid data
-    valid_mask = df[regime_col].notna() & df[ret_col].notna()
-    df_clean = df.loc[valid_mask].copy()
-
-    if len(df_clean) == 0:
-        warnings.warn("No valid data after removing NaN values")
-        return {} if not return_diagnostics else ({}, pd.DataFrame())
-
-    # ========== COMPUTE STATISTICS FOR EACH REGIME ==========
-    stats_list = []
-
-    for regime, regime_df in df_clean.groupby(regime_col):
-        returns = regime_df[ret_col].values
-        n = len(returns)
-
-        if n < min_samples:
-            # Insufficient data
-            stats_list.append(
-                {
-                    "regime": regime,
-                    "count": n,
-                    "mean": np.nan,
-                    "median": np.nan,
-                    "std": np.nan,
-                    "sharpe": np.nan,
-                    "insufficient_data": True,
-                }
-            )
-            continue
-
-        # Calculate statistics
-        mean_ret = np.mean(returns)
-        median_ret = np.median(returns)
-        std_ret = np.std(returns, ddof=1)
-        sharpe = mean_ret / std_ret if std_ret > 0 else 0.0
-
-        stats_list.append(
-            {
-                "regime": regime,
-                "count": n,
-                "mean": mean_ret,
-                "median": median_ret,
-                "std": std_ret,
-                "sharpe": sharpe,
-                "insufficient_data": False,
-            }
-        )
-
-    stats_df = pd.DataFrame(stats_list)
-
-    if stats_df.empty:
-        warnings.warn("No regimes found in data")
-        return {} if not return_diagnostics else ({}, pd.DataFrame())
-
-    # ========== SELECT RANKING METRIC ==========
-    if method == "robust":
-        metric_col = "median"
-    elif method == "mean":
-        metric_col = "mean"
-    elif method == "sharpe":
-        metric_col = "sharpe"
-
-    # ========== ASSIGN SCORES ==========
-    mapping = {}
-    stats_df["score"] = 0
-    stats_df["reason"] = ""
-
-    # Separate valid and insufficient-data regimes
-    valid_regimes = stats_df[~stats_df["insufficient_data"]].copy()
-    insufficient_regimes = stats_df[stats_df["insufficient_data"]].copy()
-
-    # For directional mode: use raw metric
-    # For non-directional mode: use absolute value of metric
-    if is_directional:
-        valid_regimes["rank_metric"] = valid_regimes[metric_col]
-    else:
-        valid_regimes["rank_metric"] = valid_regimes[metric_col].abs()
-
-    # Sort by rank metric
-    valid_regimes = valid_regimes.sort_values("rank_metric", ascending=True)
-
-    # Distribute scores across the range
-    n_valid = len(valid_regimes)
-    if n_valid > 0:
-        # Linear distribution of scores
-        scores = np.linspace(score_min, score_max, n_valid)
-        scores = np.round(scores).astype(int)
-
-        for i, (idx, row) in enumerate(valid_regimes.iterrows()):
-            regime = row["regime"]
-            score = scores[i]
-            mapping[regime] = score
-            stats_df.at[idx, "score"] = score
-            stats_df.at[idx, "reason"] = (
-                f"Rank {i + 1}/{n_valid}: {metric_col}={row[metric_col]:.6f}"
-            )
-
-    # Handle insufficient-data regimes
-    insufficient_score = 0
-    for idx, row in insufficient_regimes.iterrows():
-        regime = row["regime"]
-        mapping[regime] = insufficient_score
-        stats_df.at[idx, "score"] = insufficient_score
-        stats_df.at[idx, "reason"] = (
-            f'Insufficient data (n={row["count"]} < {min_samples})'
-        )
-
-    # Handle any regimes not in stats_df (defensive)
-    all_regimes = df[regime_col].unique()
-    for regime in all_regimes:
-        if pd.notna(regime) and regime not in mapping:
-            mapping[regime] = 0
-            warnings.warn(f"Regime {regime} not in mapping, defaulting to 0")
-
-    if return_diagnostics:
-        return mapping, stats_df
-    else:
-        return mapping
+def _cluster_t_test(values: np.ndarray, clusters: np.ndarray) -> Tuple[float, float, int]:
+    """Two-sided t-test of mean 0 with cluster-robust standard error, on (clusters - 1) degrees of freedom."""
+    _, inverse = np.unique(clusters, return_inverse=True)
+    sums = np.bincount(inverse, weights=values - values.mean())
+    n_clusters = sums.size
+    if n_clusters < 2:
+        return np.nan, np.nan, n_clusters
+    se = np.sqrt(n_clusters / (n_clusters - 1) * (sums ** 2).sum()) / values.size
+    if not se > 0:
+        return np.nan, np.nan, n_clusters
+    t_stat = values.mean() / se
+    return float(t_stat), float(2 * stats.t.sf(abs(t_stat), df=n_clusters - 1)), n_clusters
 
 
 def map_regime_to_volatility_score(df: pd.DataFrame, regime_col: str = "regime", vol_proxy_col: str = None,
@@ -845,305 +662,3 @@ def map_regime_to_volatility_score(df: pd.DataFrame, regime_col: str = "regime",
         return mapping, stats_df[diag_cols]
     else:
         return mapping
-
-
-def map_regime_to_path_structure_score(df: pd.DataFrame, regime_col: str = "regime", method: str = "id_chop",
-                                       min_samples: int = 30, choppiness_range: tuple[int, int] = (0, 4),
-                                       lookback: int = 14,
-                                       return_diagnostics: bool = False) -> dict[Any, int] | tuple[dict[Any, int], pd.DataFrame]:
-    """
-    Map regime labels to an ordered choppiness score where scores increase monotonically with empirical within-regime
-    choppiness (path complexity, oscillation, whipsaw).
-
-    Scores range from 0 to n where:
-    - 0 = "silky-smooth directional" (least choppy, trending)
-    - n = "maximum whipsaw/noise" (most choppy, oscillating)
-
-    The mapping is monotonic: higher score = higher choppiness.
-    Built for automated pipelines that throttle leverage, widen stops, or switch to mean-reverting models when markets get choppy.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Must contain the regime column and price data (or pre-computed choppiness proxy).
-    regime_col : str, default='regime'
-        Column name for regime labels (any hashable dtype).
-    method : {'id_chop', 'cv_range', 'atr_dr', 'custom'}, default='id_chop'
-        Choppiness estimation method:
-        - 'id_chop': Choppiness Index - 100×log(sum(TR)/range) / log(lookback)
-          Higher = choppier. Requires high, low, close columns.
-        - 'cv_range': Coefficient of variation of range (std/mean of high-low).
-          Higher = choppier. Requires high, low columns.
-        - 'atr_dr': Ratio of ATR to directional range (sum of ATR / sum of |close-open|).
-          Higher = choppier. Requires high, low, close, open columns.
-        - 'custom': User supplies pre-computed 'choppiness_proxy' column.
-    min_samples : int, default=30
-        Minimum observations per regime for reliable statistics.
-        Regimes with fewer samples are forced to bucket 0 (smoothest).
-    choppiness_range : tuple(int, int), default=(0, 4)
-        Closed interval [least_choppy, most_choppy] for integer scores.
-    lookback : int, default=14
-        Window length for rolling choppiness estimators (ignored for 'custom').
-    return_diagnostics : bool, default=False
-        If True, returns (mapping, diagnostics_df) showing statistics for each regime.
-        If False, returns only the mapping dict.
-
-    Returns
-    -------
-    mapping : dict
-        {regime_label: int_score} where score ∈ choppiness_range and
-        scores increase strictly with empirical choppiness estimate.
-    diagnostics_df : pd.DataFrame (if return_diagnostics=True)
-        Columns: regime, median_chop, mean_chop, count, assigned_score, reason
-
-    Guarantees
-    ----------
-    1. Monotonic: score_i > score_j ⇒ choppiness_i > choppiness_j
-    2. Complete: every regime receives a score
-    3. Range-respecting: all scores within choppiness_range
-    4. Deterministic: identical data → identical mapping
-    5. Fallback: ties broken by sample size; tiny regimes → bucket 0
-
-    Notes
-    -----
-    - Ties (difference < 1e-8) are broken by sample size (larger sample wins)
-    - Unseen regimes default to bucket 0 (production safety)
-    """
-    # Validate inputs
-    if regime_col not in df.columns:
-        raise ValueError(f"Column '{regime_col}' not found in DataFrame")
-    if method not in {"id_chop", "cv_range", "atr_dr", "custom"}:
-        raise ValueError(
-            f"Unknown method '{method}'. Choose from: 'id_chop', 'cv_range', 'atr_dr', 'custom'"
-        )
-
-    # Validate required columns based on method
-    if method == "custom":
-        if "choppiness_proxy" not in df.columns:
-            raise ValueError(
-                "method='custom' requires a 'choppiness_proxy' column in df"
-            )
-    elif method == "id_chop":
-        required = ["high", "low", "close"]
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            raise ValueError(f"method='id_chop' requires columns {required}, missing: {missing}")
-    elif method == "cv_range":
-        required = ["high", "low"]
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            raise ValueError(f"method='cv_range' requires columns {required}, missing: {missing}")
-    elif method == "atr_dr":
-        required = ["high", "low", "close", "open"]
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            raise ValueError(f"method='atr_dr' requires columns {required}, missing: {missing}")
-
-    if not isinstance(choppiness_range, tuple) or len(choppiness_range) != 2:
-        raise ValueError(f"choppiness_range must be tuple(int, int), got {choppiness_range}")
-    score_min, score_max = choppiness_range
-    if score_min >= score_max:
-        raise ValueError(f"Invalid range: min={score_min} >= max={score_max}")
-
-    # ========== COMPUTE CHOPPINESS PROXY ==========
-    df_work = df.copy()
-
-    if method == "custom":
-        # Use pre-computed proxy
-        chop_col = "choppiness_proxy"
-    else:
-        # Compute choppiness metric
-        chop_col = "choppiness_proxy"
-
-        if method == "id_chop":
-            # Choppiness Index = 100 × log(sum(TR) / (HH - LL)) / log(lookback)
-            # True Range
-            df_work["tr"] = np.maximum(
-                df_work["high"] - df_work["low"],
-                np.maximum(
-                    abs(df_work["high"] - df_work["close"].shift(1)),
-                    abs(df_work["low"] - df_work["close"].shift(1)),
-                ),
-            )
-            # Rolling calculations
-            sum_tr = df_work["tr"].rolling(window=lookback).sum()
-            hh = df_work["high"].rolling(window=lookback).max()
-            ll = df_work["low"].rolling(window=lookback).min()
-            range_hl = hh - ll
-
-            # Choppiness Index (avoid div by zero)
-            df_work[chop_col] = np.where(
-                range_hl > 0, 100 * np.log(sum_tr / range_hl) / np.log(lookback), np.nan
-            )
-
-        elif method == "cv_range":
-            # Coefficient of Variation of range
-            df_work["range"] = df_work["high"] - df_work["low"]
-            mean_range = df_work["range"].rolling(window=lookback).mean()
-            std_range = df_work["range"].rolling(window=lookback).std()
-            df_work[chop_col] = np.where(mean_range > 0, std_range / mean_range, np.nan)
-
-        elif method == "atr_dr":
-            # ATR / Directional Range ratio
-            # True Range (same as above)
-            df_work["tr"] = np.maximum(
-                df_work["high"] - df_work["low"],
-                np.maximum(
-                    abs(df_work["high"] - df_work["close"].shift(1)),
-                    abs(df_work["low"] - df_work["close"].shift(1)),
-                ),
-            )
-            atr = df_work["tr"].rolling(window=lookback).mean()
-
-            # Directional range (absolute change close to open)
-            df_work["dir_range"] = abs(df_work["close"] - df_work["open"])
-            sum_dir_range = df_work["dir_range"].rolling(window=lookback).sum()
-
-            df_work[chop_col] = np.where(
-                sum_dir_range > 0,
-                atr
-                * lookback
-                / sum_dir_range,  # Normalize: ATR×lookback / sum(dir_range)
-                np.nan,
-            )
-
-    # Filter valid data
-    valid_mask = df_work[regime_col].notna() & df_work[chop_col].notna()
-    df_clean = df_work.loc[valid_mask].copy()
-
-    if len(df_clean) == 0:
-        warnings.warn("No valid data after removing NaN values")
-        return {} if not return_diagnostics else ({}, pd.DataFrame())
-
-    # ========== COMPUTE REGIME-LEVEL STATISTICS ==========
-    stats_list = []
-
-    for regime, regime_df in df_clean.groupby(regime_col):
-        chop_values = regime_df[chop_col].values
-        n = len(chop_values)
-
-        if n < min_samples:
-            # Insufficient data
-            stats_list.append(
-                {
-                    "regime": regime,
-                    "count": n,
-                    "median_chop": np.nan,
-                    "mean_chop": np.nan,
-                    "insufficient_data": True,
-                }
-            )
-            continue
-
-        # Calculate statistics
-        median_chop = np.median(chop_values)
-        mean_chop = np.mean(chop_values)
-
-        stats_list.append(
-            {
-                "regime": regime,
-                "count": n,
-                "median_chop": median_chop,
-                "mean_chop": mean_chop,
-                "insufficient_data": False,
-            }
-        )
-
-    stats_df = pd.DataFrame(stats_list)
-
-    if stats_df.empty:
-        warnings.warn("No regimes found in data")
-        return {} if not return_diagnostics else ({}, pd.DataFrame())
-
-    # ========== ASSIGN SCORES ==========
-    mapping = {}
-    stats_df["assigned_score"] = score_min
-    stats_df["reason"] = ""
-
-    # Separate valid and insufficient-data regimes
-    valid_regimes = stats_df[~stats_df["insufficient_data"]].copy()
-    insufficient_regimes = stats_df[stats_df["insufficient_data"]].copy()
-
-    # Sort by median choppiness (ascending: smoothest first)
-    valid_regimes = valid_regimes.sort_values(
-        "median_chop", ascending=True
-    ).reset_index(drop=True)
-
-    # Distribute scores across the range
-    n_valid = len(valid_regimes)
-    if n_valid > 0:
-        # Linear distribution of scores
-        scores = np.linspace(score_min, score_max, n_valid)
-        scores = np.round(scores).astype(int)
-
-        for i in range(n_valid):
-            regime = valid_regimes.loc[i, "regime"]
-            score = scores[i]
-
-            # Check for ties with next regime (if exists)
-            tie_info = ""
-            if i < n_valid - 1:
-                current_chop = valid_regimes.loc[i, "median_chop"]
-                next_chop = valid_regimes.loc[i + 1, "median_chop"]
-
-                if abs(next_chop - current_chop) < 1e-8:
-                    # Tie detected
-                    current_count = valid_regimes.loc[i, "count"]
-                    next_count = valid_regimes.loc[i + 1, "count"]
-                    tie_info = (
-                        f" (tied, broke by count: {current_count} vs {next_count})"
-                    )
-
-            mapping[regime] = score
-            stats_df.loc[stats_df["regime"] == regime, "assigned_score"] = score
-            stats_df.loc[stats_df["regime"] == regime, "reason"] = (
-                f"Score {score} (rank {i + 1}/{n_valid}): median_chop={valid_regimes.loc[i, 'median_chop']:.4f}{tie_info}"
-            )
-
-    # Handle insufficient-data regimes → score_min (smoothest bucket)
-    for idx, row in insufficient_regimes.iterrows():
-        regime = row["regime"]
-        mapping[regime] = score_min
-        stats_df.loc[stats_df["regime"] == regime, "assigned_score"] = score_min
-        stats_df.loc[stats_df["regime"] == regime, "reason"] = (
-            f'Insufficient data (n={row["count"]} < {min_samples}) → forced to bucket {score_min} (smoothest)'
-        )
-
-    # Handle any regimes not in stats_df (defensive)
-    all_regimes = df[regime_col].unique()
-    for regime in all_regimes:
-        if pd.notna(regime) and regime not in mapping:
-            mapping[regime] = score_min
-            warnings.warn(
-                f"Regime {regime} not in mapping, defaulting to bucket {score_min}"
-            )
-
-    if return_diagnostics:
-        diag_cols = [
-            "regime",
-            "median_chop",
-            "mean_chop",
-            "count",
-            "assigned_score",
-            "reason",
-        ]
-        return mapping, stats_df[diag_cols]
-    else:
-        return mapping
-
-
-def create_consensus_labels(df: pd.DataFrame, label_columns: List[str]):
-    labels = df[label_columns]
-
-    consensus = pd.Series(0, index=df.index, dtype=np.int8)
-
-    # For each unique label value (excluding 0), check for unanimity
-    unique_labels = labels.values.flatten()
-    unique_labels = pd.Series(unique_labels).unique()
-    unique_labels = unique_labels[unique_labels != 0]
-
-    for label_value in unique_labels:
-        all_match = (labels == label_value).all(axis=1)
-        consensus[all_match] = label_value
-
-    return consensus

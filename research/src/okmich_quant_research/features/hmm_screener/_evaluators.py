@@ -9,10 +9,12 @@ Each ``evaluate_*`` function takes a fitted HMM's outputs plus the raw OHLC data
   * ``axis_separation`` — the primary axis-matched spread across states (forward-return spread for
                           DIRECTIONAL, forward-vol spread for VOLATILITY, choppiness-index spread for
                           PATH_STRUCTURE, forward-volume spread for LIQUIDITY).
-  * ``secondary_robustness`` — an axis-appropriate count / monotonicity stat.
+  * ``secondary_robustness`` — a count of distinguished states: states the direction test signs
+                              (DIRECTIONAL), or groups of states whose neighbours along the axis separate by
+                              at least ``MIN_RANK_SEPARATION`` (VOLATILITY, PATH_STRUCTURE, LIQUIDITY).
 
-Wraps the existing ``okmich_quant_labelling.utils.label_util`` mapper functions with ``return_diagnostics=True`` so the
-heavy lifting of statistical scoring lives in one place.
+The direction and volatility medians come from the ``okmich_quant_labelling.utils.label_util`` mappers with
+``return_diagnostics=True``; the path-structure medians are computed here, within episodes.
 """
 from __future__ import annotations
 
@@ -21,18 +23,20 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+from scipy.stats import rankdata
 
-from okmich_quant_labelling.utils.label_util import (
-    map_label_to_trend_direction,
-    map_regime_to_path_structure_score,
-    map_regime_to_volatility_score,
-)
+from okmich_quant_labelling.utils.label_util import map_label_to_trend_direction, map_regime_to_volatility_score
 
 from ..registry import AXIS_PRIMARY_HORIZON, Axis
 from ._result import AxisEvaluation
 
 
 AxisEvaluator = Callable[..., AxisEvaluation]
+
+# Neighbouring states along an axis count as distinct when their samples separate by |2·AUC - 1| >= 0.1 (AUC 0.55).
+MIN_RANK_SEPARATION = 0.1
+MIN_STATE_ROWS = 30
+CHOP_LOOKBACK = 14
 
 
 def _session_ids(raw_data: pd.DataFrame, respect_sessions: bool) -> NDArray | None:
@@ -121,6 +125,49 @@ def _weighted_separation_stats(diag: pd.DataFrame, median_col: str) -> tuple[flo
     return weighted_sd, raw_range
 
 
+def _rank_separation(a: NDArray, b: NDArray) -> float:
+    """|2·AUC - 1| of two samples: 0 = indistinguishable, 1 = no overlap."""
+    ranks = rankdata(np.concatenate([a, b]))
+    auc = (ranks[:a.size].sum() - a.size * (a.size + 1) / 2) / (a.size * b.size)
+    return float(abs(2 * auc - 1))
+
+
+def _distinguishable_states(frame: pd.DataFrame, state_col: str, value_col: str) -> tuple[float, list[float]]:
+    """Groups of states that the data tells apart along one axis.
+
+    States with at least ``MIN_STATE_ROWS`` rows are sorted by median; a new group starts wherever two neighbours
+    separate by at least ``MIN_RANK_SEPARATION``. Returns (number of groups, neighbour separations in order). It
+    replaces the old bucket and score counts, which equalled the number of states with enough rows whatever the data.
+    """
+    groups = [g[value_col].to_numpy(dtype=float) for _, g in frame.groupby(state_col)]
+    groups = sorted((g for g in groups if g.size >= MIN_STATE_ROWS), key=np.median)
+    if not groups:
+        return 0.0, []
+    separations = [_rank_separation(a, b) for a, b in zip(groups[:-1], groups[1:])]
+    return float(1 + sum(sep >= MIN_RANK_SEPARATION for sep in separations)), separations
+
+
+def _within_episode_choppiness(raw_data: pd.DataFrame, state_labels: NDArray, lookback: int) -> NDArray:
+    """Choppiness index, 100·log(ΣTR / (HH - LL)) / log(lookback), over the trailing ``lookback`` bars.
+
+    A bar keeps its value only when the whole window, including the previous close its first true range uses, lies
+    inside the bar's own episode. A rolling window across the episode start would score a state on its neighbour's
+    path, which dominates for states made of short episodes.
+    """
+    high, low, close = (raw_data[c].to_numpy(dtype=float) for c in ("high", "low", "close"))
+    prev_close = np.r_[np.nan, close[:-1]]
+    true_range = np.fmax(high - low, np.fmax(np.abs(high - prev_close), np.abs(low - prev_close)))
+    sum_tr = pd.Series(true_range).rolling(lookback).sum().to_numpy()
+    span = (pd.Series(high).rolling(lookback).max() - pd.Series(low).rolling(lookback).min()).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        chop = np.where(span > 0, 100 * np.log(sum_tr / span) / np.log(lookback), np.nan)
+
+    labels = pd.Series(state_labels[:len(close)])
+    run_position = labels.groupby(labels.ne(labels.shift()).cumsum()).cumcount().to_numpy()
+    chop[(run_position < lookback) | labels.isna().to_numpy()] = np.nan
+    return chop
+
+
 def _diag_is_empty(diag: pd.DataFrame, median_col: str) -> bool:
     """Did the label_util mapper come back with nothing usable?
 
@@ -161,14 +208,13 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
                               raw_details={"error": "fewer than 30 valid forward returns"})
 
     mapping, diag = map_label_to_trend_direction(fwd_df, state_col="state", return_col="returns",
-        method="conservative", return_diagnostics=True)
+                                                 method="conservative", horizon=primary_horizon,
+                                                 return_diagnostics=True)
     if _diag_is_empty(diag, "median"):
         return AxisEvaluation(0.0, 0.0, "n_significant_states",
                               raw_details={"error": "map_label_to_trend_direction returned no diagnostics",
                                            "horizon": primary_horizon})
-    # Count the states the conservative test itself signed. ``mapping`` is NOT the count: when the test signs fewer
-    # than min(n, 3) distinct directions the mapper ranks the states by mean and assigns -1/0/+1 anyway, so with three
-    # states it always holds two non-zero entries and the min_significant_states gate could never fire.
+    # Count the states the conservative test itself signed (``test_direction``), never a fallback rank.
     test_signed = diag.loc[~diag["insufficient_data"].astype(bool), "test_direction"]
     n_significant = int((test_signed != 0).sum())
 
@@ -187,11 +233,11 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
 def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
                        horizons: tuple[int, ...], primary_horizon: int | None = None,
                        respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
-    """VOLATILITY axis: forward realized-vol median spread + distinct bucket count."""
+    """VOLATILITY axis: forward realized-vol median spread + groups of states the forward vol tells apart."""
     primary_horizon = _resolve_horizon(primary_horizon, horizons)
     close = raw_data["close"].values
     if len(close) <= primary_horizon:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "not enough bars for forward vol"})
 
     sessions = _session_ids(raw_data, respect_sessions)
@@ -211,7 +257,7 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
 
     fwd_df = pd.DataFrame({"regime": state_labels[:len(close)], "realized_vol": fwd_vol}).dropna()
     if len(fwd_df) < 30:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "fewer than 30 valid forward-vol rows"})
 
     mapping, diag = map_regime_to_volatility_score(
@@ -219,58 +265,63 @@ def evaluate_volatility(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.D
         method="median", return_diagnostics=True,
     )
     if _diag_is_empty(diag, "median_vol"):
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "map_regime_to_volatility_score returned no diagnostics",
                                            "horizon": primary_horizon})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
-    n_distinct = len(set(mapping.values()))
+    n_groups, separations = _distinguishable_states(fwd_df, "regime", "realized_vol")
     return AxisEvaluation(
         axis_separation=weighted_sd,
-        secondary_robustness=float(n_distinct),
-        secondary_label="n_distinct_buckets",
+        secondary_robustness=n_groups,
+        secondary_label="n_distinguishable_states",
         axis_separation_range=raw_range,
-        raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()}},
+        raw_details={"horizon": primary_horizon, "mapping": {int(k): int(v) for k, v in mapping.items()},
+                     "neighbour_separations": separations},
     )
 
 
 def evaluate_path_structure(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
-                           horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
-    """PATH_STRUCTURE axis: choppiness-index median spread + distinct scores.
+                            horizons: tuple[int, ...], **_ignored) -> AxisEvaluation:
+    """PATH_STRUCTURE axis: within-episode choppiness-index median spread + groups of states it tells apart.
 
-    The only axis with no forward window: the choppiness index is measured on the bars the state
-    already occupies, so there is no horizon to pick and ``primary_horizon`` is accepted (via
-    ``**_ignored``) and deliberately unused. That is why ``raw_details`` carries no ``horizon`` key.
+    The only axis with no forward window: the choppiness index is measured on the bars the state already occupies
+    (``CHOP_LOOKBACK`` bars, inside the episode), so there is no horizon to pick and ``primary_horizon`` is accepted
+    (via ``**_ignored``) and deliberately unused. That is why ``raw_details`` carries no ``horizon`` key.
     """
     required = {"high", "low", "close"}
     missing = required - set(raw_data.columns)
     if missing:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_scores",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": f"path-structure requires {required}; missing {missing}"})
 
-    df = raw_data.copy()
-    df["regime"] = state_labels[:len(df)]
-    mapping, diag = map_regime_to_path_structure_score(df, regime_col="regime", method="id_chop",
-                                                       return_diagnostics=True)
-    if _diag_is_empty(diag, "median_chop"):
-        return AxisEvaluation(0.0, 0.0, "n_distinct_scores",
-                              raw_details={"error": "map_regime_to_path_structure_score returned no diagnostics"})
+    chop = _within_episode_choppiness(raw_data, state_labels, CHOP_LOOKBACK)
+    frame = pd.DataFrame({"regime": state_labels[:len(chop)], "chop": chop}).dropna()
+    counts = frame.groupby("regime")["chop"].agg(["size", "median"])
+    if counts.empty:
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
+                              raw_details={"error": f"no state has an episode of more than {CHOP_LOOKBACK} bars"})
+    diag = pd.DataFrame({"regime": counts.index, "count": counts["size"].to_numpy(),
+                         "median_chop": counts["median"].to_numpy(),
+                         "insufficient_data": (counts["size"] < MIN_STATE_ROWS).to_numpy()})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_chop")
-    n_distinct = len(set(mapping.values()))
+    n_groups, separations = _distinguishable_states(frame, "regime", "chop")
     return AxisEvaluation(
         axis_separation=weighted_sd,
-        secondary_robustness=float(n_distinct),
-        secondary_label="n_distinct_scores",
+        secondary_robustness=n_groups,
+        secondary_label="n_distinguishable_states",
         axis_separation_range=raw_range,
-        raw_details={"mapping": {int(k): int(v) for k, v in mapping.items()}},
+        raw_details={"median_chop": {int(r): float(m) for r, m in zip(diag["regime"], diag["median_chop"])},
+                     "within_episode_bars": {int(r): int(n) for r, n in zip(diag["regime"], diag["count"])},
+                     "neighbour_separations": separations},
     )
 
 
 def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.DataFrame,
                        horizons: tuple[int, ...], primary_horizon: int | None = None,
                        respect_sessions: bool = False, **_ignored) -> AxisEvaluation:
-    """LIQUIDITY axis: forward median volume spread + bucket monotonicity.
+    """LIQUIDITY axis: forward median volume spread + groups of states the forward volume tells apart.
 
     Computes the forward cumulative volume over ``primary_horizon`` bars, then ranks states by median forward volume via
     ``map_regime_to_volatility_score`` (mechanically generic — any non-negative scalar proxy works). Higher buckets
@@ -296,13 +347,13 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
             vol_col = c
             break
     if vol_col is None:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "liquidity axis requires a 'tick_volume' or 'volume' column"})
 
     close = raw_data["close"].values
     volume = np.asarray(raw_data[vol_col].values, dtype=float)
     if len(close) <= primary_horizon:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "not enough bars for forward volume"})
 
     # Forward cumulative volume over horizon h. Guard the trailing window with NaN.
@@ -321,7 +372,7 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
 
     fwd_df = pd.DataFrame({"regime": state_labels[:len(close)], "fwd_volume": fwd_vol}).dropna()
     if len(fwd_df) < 30:
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "fewer than 30 valid forward-volume rows"})
 
     mapping, diag = map_regime_to_volatility_score(
@@ -329,21 +380,22 @@ def evaluate_liquidity(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
         method="median", return_diagnostics=True,
     )
     if _diag_is_empty(diag, "median_vol"):
-        return AxisEvaluation(0.0, 0.0, "n_distinct_buckets",
+        return AxisEvaluation(0.0, 0.0, "n_distinguishable_states",
                               raw_details={"error": "map_regime_to_volatility_score returned no diagnostics",
                                            "horizon": primary_horizon, "volume_col": vol_col})
 
     weighted_sd, raw_range = _weighted_separation_stats(diag, median_col="median_vol")
-    n_distinct = len(set(mapping.values()))
+    n_groups, separations = _distinguishable_states(fwd_df, "regime", "fwd_volume")
     return AxisEvaluation(
         axis_separation=weighted_sd,
-        secondary_robustness=float(n_distinct),
-        secondary_label="n_distinct_buckets",
+        secondary_robustness=n_groups,
+        secondary_label="n_distinguishable_states",
         axis_separation_range=raw_range,
         raw_details={"horizon": primary_horizon, "volume_col": vol_col,
                      "polarity": "ascending = bucket 0 LEAST liquid (lowest forward volume), "
                                  "bucket k MOST liquid",
-                     "mapping": {int(k): int(v) for k, v in mapping.items()}},
+                     "mapping": {int(k): int(v) for k, v in mapping.items()},
+                     "neighbour_separations": separations},
     )
 
 

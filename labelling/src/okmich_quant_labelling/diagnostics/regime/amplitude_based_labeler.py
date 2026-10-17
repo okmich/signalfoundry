@@ -29,8 +29,6 @@ from typing import List, Tuple, Dict
 import numpy as np
 import pandas as pd
 
-from okmich_quant_labelling.utils.label_eval_util import trend_label_statistics
-
 
 class PriceType(Enum):
     PRICE = 1
@@ -344,6 +342,15 @@ class AmplitudeBasedLabeler:
             labels[i] = dir
 
 
+def _label_return_table(df: pd.DataFrame, state_col: str, return_col: str) -> pd.DataFrame:
+    """Per label: sum, count, min, max, mean and std of the return, plus the mean and longest run of the label."""
+    table = df.groupby(state_col)[return_col].agg(["sum", "count", "min", "max", "mean", "std"])
+    run_id = df[state_col].ne(df[state_col].shift()).cumsum()
+    run_lengths = df.groupby([df[state_col], run_id]).size()
+    persistence = run_lengths.groupby(level=0).agg(avg_persistence="mean", max_persistence="max")
+    return table.join(persistence).reset_index()
+
+
 def optimize_amplitude_base_labeler_parameters(df: pd.DataFrame, price_col: str = "close",
                                                min_amp_values: List[int] = None, t_inactive_values: List[float] = None,
                                                scale_value: List[float] = None, metric: str = "composite",
@@ -370,10 +377,7 @@ def optimize_amplitude_base_labeler_parameters(df: pd.DataFrame, price_col: str 
             df_eval["log_return"] = np.log(df[price_col] / df[price_col].shift(1))
             df_eval = df_eval.dropna()
 
-            # Get statistics using your function
-            stats = trend_label_statistics(
-                df_eval, state_col="label", return_col="log_return"
-            )
+            stats = _label_return_table(df_eval, state_col="label", return_col="log_return")
 
             # Skip if we don't have all three labels
             if len(stats) < 3:

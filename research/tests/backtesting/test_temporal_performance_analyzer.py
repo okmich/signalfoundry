@@ -217,6 +217,23 @@ class TestAggregationsAndDashboard:
 
         assert cnt.loc["Monday", 9] == 2
 
+    def test_hour_breakdown_is_descriptive_only(self, tmp_path):
+        # per-hour n / total / mean / win rate stay; the in-sample blocked-hours suggestion is retired
+        stamps = pd.DatetimeIndex(["2024-01-02 09:00", "2024-01-02 09:30", "2024-01-03 09:15", "2024-01-02 14:00"],
+                                  tz="UTC")
+        df = pd.DataFrame({"Entry Timestamp": stamps, "Exit Timestamp": stamps + pd.Timedelta(minutes=30),
+                           "PnL": [2.0, -1.0, 3.0, -4.0]})
+        ta = TemporalPerformanceAnalyzer(df)
+        stats = {h["hour"]: h for h in ta._hour_stats(ta._entry_df)}
+        assert sorted(stats) == [9, 14]
+        assert stats[9]["n_trades"] == 3 and stats[9]["total_pnl"] == 4.0
+        assert stats[9]["mean_pnl"] == pytest.approx(4.0 / 3) and stats[9]["win_rate"] == pytest.approx(200 / 3)
+        assert not hasattr(ta, "_hour_filter_analysis")
+
+        fig = ta.show_dashboard(output_html=str(tmp_path / "hours.html"), height=800)
+        titles = " ".join(a.text for a in fig.layout.annotations)
+        assert "Hour-Filter" not in titles and "Verdict" not in titles
+
     def test_show_dashboard_handles_empty_trades(self, tmp_path):
         empty_df = pd.DataFrame(columns=["Entry Index", "Exit Index", "PnL"])
         ta = TemporalPerformanceAnalyzer(empty_df)

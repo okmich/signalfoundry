@@ -22,6 +22,12 @@ class RegimePerformanceAnalyzer:
     Dual-mode: pass a ready ``vbt.Portfolio`` (backtest mode, below), or use ``from_signal``
     to build one from a values DataFrame + a signal function (alpha-hunting mode).
 
+    Causal attribution: bar ``t``'s return (close ``t-1`` -> close ``t``) is attributed to the regime known at the
+    close of bar ``t-1``, i.e. the labels shifted one bar on the portfolio index. A label that uses bar ``t``'s own
+    data therefore cannot condition bar ``t``'s return. The first bar has no earlier label and is left out of the
+    per-regime return statistics. Trades are assigned to the label at their entry bar, which is known when the trade
+    is opened; exposure counts each bar under its own label.
+
     Parameters
     ----------
     portfolio:
@@ -217,9 +223,11 @@ class RegimePerformanceAnalyzer:
         return float(dd.min())
 
     def _returns_by_regime(self) -> Dict[Union[int, str], pd.Series]:
+        """Bar returns per regime: bar t's return is attributed to the regime known at the close of bar t-1."""
+        prior_labels = self._labels.shift(1)  # NaN on the first bar: no earlier label, so it joins no regime
         result: Dict[Union[int, str], pd.Series] = {}
         for rid in self._regimes:
-            mask = self._labels == rid
+            mask = prior_labels == rid
             result[rid] = self._returns[mask]
         return result
 
@@ -363,6 +371,8 @@ class RegimePerformanceAnalyzer:
 
     def regime_return_stats(self) -> pd.DataFrame:
         """Per-regime return statistics.
+
+        Bar t's return is attributed to the regime known at the close of bar t-1; the first bar is left out.
 
         Returns a DataFrame indexed by regime display name with columns:
         ``n_bars``, ``total_return``, ``ann_return``, ``volatility``,

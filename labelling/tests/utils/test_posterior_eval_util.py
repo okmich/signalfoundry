@@ -430,3 +430,19 @@ def test_sign_map_override_is_used_verbatim():
     assert out["sign_map"].iloc[0] == forced
     # soft position is then a non-negative long-only exposure
     assert out.loc[out["position"] == "gated", "avg_abs_position"].iloc[0] >= 0.0
+
+class TestSignFitAlignment:
+    def test_mean_reverting_state_is_faded_not_followed(self):
+        """The audit probe: a mean-reverting AR(1) and a causal state equal to the sign of the last bar. The sign must
+        be fitted on the return the position earns (the next bar reverses), not on the bar the state was read from."""
+        rng = np.random.default_rng(0)
+        r = np.zeros(20_000)
+        for t in range(1, r.size):
+            r[t] = -0.3 * r[t - 1] + rng.normal(0, 1e-3)
+        up = (r > 0).astype(float)
+        df = pd.DataFrame({"close": 100 * np.exp(np.cumsum(r)), "post_a_s0": 1 - up, "post_a_s1": up})
+
+        out = evaluate_posterior_returns_potentials(df, ["post_a_s0", "post_a_s1"], progressive_skip=0)
+        soft = out.set_index("position").loc["soft"]
+        assert soft["sign_map"] == {0: 1, 1: -1}
+        assert soft["gross_return"] > 0

@@ -250,16 +250,17 @@ def _drift_frame(drifts: tuple[float, ...], block: int = 300, seed: int = 9) -> 
     return pd.DataFrame({"close": 100.0 * np.exp(np.cumsum(log_rets))}), labels
 
 
-def test_driftless_states_count_zero_significant_although_the_fallback_signs_two():
+def test_driftless_states_count_zero_significant_and_trade_flat():
     """Measured 2026-10-08 on four FXPIG symbols: no state passed the conservative test in 87-99% of directional
-    subsets, yet every one reported 2 — the mapper's ranking fallback always signs two of three states."""
+    subsets, yet every one reported 2, because the mapper's ranking fallback signed two of three states. The fallback
+    is now opt-in, so the mapping itself stays flat too."""
     raw, labels = _drift_frame((0.0, 0.0, 0.0))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         out = get_evaluator(Axis.DIRECTIONAL)(gamma=None, state_labels=labels, raw_data=raw, horizons=(12,))
     assert out.secondary_robustness == 0.0
-    assert out.raw_details["fallback_applied"]
-    assert sum(v != 0 for v in out.raw_details["mapping"].values()) == 2
+    assert not out.raw_details["fallback_applied"]
+    assert set(out.raw_details["mapping"].values()) == {0}
     assert set(out.raw_details["test_mapping"].values()) == {0}
 
 
@@ -450,18 +451,17 @@ def test_diag_guard_checks_the_median_column_not_just_count():
 
 @pytest.mark.parametrize("axis,label", [
     (Axis.DIRECTIONAL, "n_significant_states"),
-    (Axis.VOLATILITY, "n_distinct_buckets"),
-    (Axis.PATH_STRUCTURE, "n_distinct_scores"),
-    (Axis.LIQUIDITY, "n_distinct_buckets"),
+    (Axis.VOLATILITY, "n_distinguishable_states"),
+    (Axis.LIQUIDITY, "n_distinguishable_states"),
 ])
 def test_every_evaluator_reports_an_empty_mapper_as_an_error(axis, label, monkeypatch):
-    """All four, including LIQUIDITY, which originally had no guard at all: a total mapper failure has
-    to surface as an error rather than as a legitimate-looking ``axis_separation == 0.0``."""
+    """Every mapper-backed axis, including LIQUIDITY, which originally had no guard at all: a total mapper failure has
+    to surface as an error rather than as a legitimate-looking ``axis_separation == 0.0``. PATH_STRUCTURE computes its
+    medians itself (see the within-episode tests)."""
     import okmich_quant_research.features.hmm_screener._evaluators as ev
 
     monkeypatch.setattr(ev, "map_label_to_trend_direction", lambda *a, **k: ({}, pd.DataFrame()))
     monkeypatch.setattr(ev, "map_regime_to_volatility_score", lambda *a, **k: ({}, pd.DataFrame()))
-    monkeypatch.setattr(ev, "map_regime_to_path_structure_score", lambda *a, **k: ({}, pd.DataFrame()))
 
     raw = _make_ohlc(600)
     labels = np.zeros(len(raw), dtype=int)
@@ -471,3 +471,49 @@ def test_every_evaluator_reports_an_empty_mapper_as_an_error(axis, label, monkey
     assert out.axis_separation == 0.0
     assert "no diagnostics" in out.raw_details["error"]
     assert out.secondary_label == label
+
+
+# ── vol / path / liquidity: the secondary count comes from the data, not from the number of states ────────────
+
+def test_distinguishable_states_counts_separated_neighbours_only():
+    """Two identical states plus one shifted state: two groups, however many states there are."""
+    from okmich_quant_research.features.hmm_screener._evaluators import _distinguishable_states
+
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({"state": np.repeat([0, 1, 2], 500),
+                          "value": np.concatenate([rng.normal(0, 1, 500), rng.normal(0, 1, 500),
+                                                   rng.normal(2, 1, 500)])})
+    n_groups, separations = _distinguishable_states(frame, "state", "value")
+    assert n_groups == 2.0
+    assert len(separations) == 2 and min(separations) < 0.1 < max(separations)
+
+
+def test_volatility_secondary_is_one_group_when_states_do_not_differ():
+    """The old ``n_distinct_buckets`` reported 2 here: one bucket per state with enough rows."""
+    raw = _make_ohlc(3000)
+    labels = np.random.default_rng(1).integers(0, 2, len(raw))
+    out = get_evaluator(Axis.VOLATILITY)(gamma=None, state_labels=labels, raw_data=raw, horizons=(12,))
+    assert out.secondary_label == "n_distinguishable_states"
+    assert out.secondary_robustness == 1.0
+
+
+def test_path_structure_scores_choppiness_inside_episodes_only():
+    """A state made of episodes shorter than the window has no within-episode bars, so it cannot be scored on its
+    neighbour's path."""
+    from okmich_quant_research.features.hmm_screener._evaluators import CHOP_LOOKBACK, _within_episode_choppiness
+
+    raw = _make_ohlc(400)
+    labels = np.zeros(len(raw), dtype=int)
+    labels[200:205] = 1                                   # one 5-bar episode, shorter than the window
+    chop = _within_episode_choppiness(raw, labels, CHOP_LOOKBACK)
+    assert np.isnan(chop[200:205]).all()
+    assert np.isnan(chop[205:205 + CHOP_LOOKBACK]).all()   # state 0 restarts: its window must refill first
+    assert np.isfinite(chop[205 + CHOP_LOOKBACK:]).any()
+
+
+def test_path_structure_reports_an_error_when_no_episode_is_long_enough():
+    raw = _make_ohlc(300)
+    labels = np.arange(len(raw)) % 2                      # every episode is one bar long
+    out = get_evaluator(Axis.PATH_STRUCTURE)(gamma=None, state_labels=labels, raw_data=raw, horizons=(12,))
+    assert out.axis_separation == 0.0
+    assert "no state has an episode" in out.raw_details["error"]

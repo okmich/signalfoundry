@@ -10,7 +10,13 @@ promoted from the posterior-dynamics meta-labeling workstream, where they were t
     null isolates **timing**. The null's own mean IS the structure/beta benchmark. This is the correct
     significance test for timing — unlike a permutation shuffle, which destroys the hold structure and only
     rewards persistence (min-hold debounce can make random regimes look tradeable against a shuffle null, but
-    not against this one).
+    not against this one). The offsets are distinct and at least ``min_offset`` away from the real alignment
+    (in either direction); the p-value is ``(1 + #{null >= real}) / (1 + B)``, so it is never 0.
+
+    A bar roll moves positions to a different time of day, so on intraday data a time-of-day pattern in returns
+    (session drift, rollover) can pass for timing skill. Pass the bars' tz-aware ``index`` to rotate on the
+    trading-day lattice instead: positions move by whole trading days and every bar keeps its intraday slot, so
+    the null holds the same time-of-day exposure and only the day alignment is broken. Use it for intraday data.
 
   * ``beta_timing_decomposition`` — split the realised return ``pos·r`` into a constant-average-exposure
     (**beta**) component and a vary-the-exposure (**timing**) component:
@@ -26,7 +32,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
+
+from okmich_quant_labelling.utils.regime_diagnostics.clock import build_clock
+from okmich_quant_labelling.utils.regime_diagnostics.null import DayLattice, draw_offsets, p_value
 
 
 def _checked_positions(positions: NDArray) -> NDArray:
@@ -87,11 +97,16 @@ class CircularShiftNull:
     """Result of the circular-shift timing null.
 
     ``real_sharpe`` — annualised Sharpe of the actual positions.
-    ``beta_sharpe`` — mean Sharpe across the time-shifted copies = the structure/beta benchmark (what the same
+    ``beta_sharpe`` — mean Sharpe across the shifted copies = the structure/beta benchmark (what the same
       position structure earns at random alignment).
-    ``percentile`` — fraction of null Sharpes strictly below ``real_sharpe`` = the timing-significance p-level
-      (≈ 0.5 when the return is pure structure; → 1.0 when timing dominates). NaN if unscoreable.
-    ``null_sharpes`` — the (n_shuffle,) null distribution.
+    ``percentile`` — fraction of finite null Sharpes strictly below ``real_sharpe``; descriptive (≈ 0.5 when the
+      return is pure structure, → 1.0 when timing dominates). It reaches 1.0 against a finite null, so it is not a
+      p-value: significance uses ``p_value``. NaN if unscoreable.
+    ``null_sharpes`` — the (n_null,) null distribution, one Sharpe per distinct offset.
+    ``n_shuffle`` — the number of offsets requested.
+    ``p_value`` — one-sided timing p-value ``(1 + #{null >= real}) / (1 + B)`` over the B finite null Sharpes. Never
+      0: its floor is ``1 / (1 + B)``. NaN if unscoreable.
+    ``n_null`` — distinct offsets actually drawn (``<= n_shuffle``; fewer when the series admits fewer).
     """
 
     real_sharpe: float
@@ -99,28 +114,46 @@ class CircularShiftNull:
     percentile: float
     null_sharpes: NDArray
     n_shuffle: int
+    p_value: float
+    n_null: int
 
     def clears(self, level: float = 0.95) -> bool:
-        """Whether the real Sharpe beats the null at ``level`` (default 95th percentile) = timing skill present."""
-        return bool(np.isfinite(self.percentile) and self.percentile >= level)
+        """Whether the real Sharpe beats the null at ``level``: ``p_value <= 1 - level`` (default p <= 0.05) = timing
+        skill present. The smallest attainable p is ``1 / (1 + B)``, so below 19 finite null draws 0.95 never clears.
+        """
+        return bool(np.isfinite(self.p_value) and self.p_value <= 1 - level)
 
 
 def circular_shift_null(positions: NDArray, bar_returns: NDArray, *, periods_per_year: float, n_shuffle: int = 200,
-                        spread_frac: NDArray | float = 0.0, min_offset: int = 200, seed: int = 0) -> CircularShiftNull:
-    """Circular-shift timing null (see module docstring). Rolls the positions by ``n_shuffle`` random offsets in
-    ``[min_offset, n-min_offset)`` (clamped for short series) and re-scores each against ``bar_returns``.
+                        spread_frac: NDArray | float = 0.0, min_offset: int = 200, seed: int = 0,
+                        index: pd.DatetimeIndex | None = None) -> CircularShiftNull:
+    """Circular-shift timing null (see module docstring). Draws up to ``n_shuffle`` DISTINCT offsets, each at least
+    ``min_offset`` bars from the real alignment in either direction, and re-scores the shifted positions against the
+    fixed ``bar_returns``. Set ``min_offset`` to at least the holding period so a shifted copy never re-reads its own
+    trades; a series too short to honour it raises ``ValueError`` (it is never clamped).
 
-    The shifts are scored **circularly** — a circular lag and a circular turnover array are precomputed once and
-    rolled — so **total turnover is preserved exactly** across every shift (a rotation cannot change how many
-    transitions a cyclic sequence has); only the price-alignment changes. When ``spread_frac`` is per-bar the cost
-    still varies with alignment because a re-timed trade meets a different bar's spread — that is intended.
-    ``real_sharpe`` is the strategy's true **non-circular** return (flat start); it differs from the circular
-    nulls only at the single wrap bar, negligible for N ≫ 1.
+    Bar roll (``index=None``): positions roll by whole bars. The shifts are scored **circularly** — a circular lag
+    and a circular turnover array are precomputed once and rolled — so **total turnover is preserved exactly** across
+    every shift (a rotation cannot change how many transitions a cyclic sequence has); only the price-alignment
+    changes. When ``spread_frac`` is per-bar the cost still varies with alignment because a re-timed trade meets a
+    different bar's spread — that is intended. ``real_sharpe`` is the strategy's true **non-circular** return (flat
+    start); it differs from the circular nulls only at the single wrap bar, negligible for N ≫ 1.
+
+    Trading-day lattice (``index`` given): ``index`` holds the bars' tz-aware timestamps on the true clock, one per
+    position. Every bar is placed on (trading day, intraday slot) with the New York 17:00 roll, and positions rotate
+    by whole trading days, slot by slot, so each bar keeps its time of day (the day of week is not kept). A bar whose
+    source slot is empty (a short day, a holiday) is flat; many ragged days, or an index off the true clock (partial
+    weekend "days"), therefore thin the null's exposure and make the test liberal. Each rotation is scored like the
+    real series (``net_bar_returns``, flat start), so turnover is close to, not exactly, the real one. The minimum
+    shift is ``ceil(min_offset / median bars per trading day)`` days, at least 1. Use this mode for intraday data:
+    under a bar roll, time-of-day seasonality in the returns can pass for timing skill.
     """
     if periods_per_year <= 0:
         raise ValueError(f"periods_per_year must be positive, got {periods_per_year}.")
     if int(n_shuffle) < 1:
         raise ValueError(f"n_shuffle must be >= 1, got {n_shuffle}.")
+    if int(min_offset) < 1:
+        raise ValueError(f"min_offset must be >= 1 (offset 0 is the real alignment), got {min_offset}.")
     pos = _checked_positions(positions)
     r = np.asarray(bar_returns, dtype=float)
     if pos.shape != r.shape:
@@ -129,23 +162,53 @@ def circular_shift_null(positions: NDArray, bar_returns: NDArray, *, periods_per
     if n < 4:
         raise ValueError(f"circular_shift_null: need at least 4 bars, got {n}.")
     sf = _checked_spread(spread_frac, n)
-    r_ok = np.where(np.isfinite(r), r, 0.0)                     # missing return -> 0 gross contribution
-    held = np.roll(pos, 1)                                      # circular lag: held[t] = pos[t-1]
-    turn = np.abs(pos - held)                                  # circular turnover (sum invariant under rotation)
-
-    def _shifted_sharpe(offset: int) -> float:
-        net = np.roll(held, offset) * r_ok - np.roll(turn, offset) * sf
-        return _ann_sharpe(net, periods_per_year)
-
-    real = _ann_sharpe(net_bar_returns(positions, bar_returns, spread_frac=spread_frac), periods_per_year)
-    lo = max(1, min(int(min_offset), n // 4))
-    hi = max(lo + 1, n - lo)
     rng = np.random.default_rng(seed)
-    nulls = np.array([_shifted_sharpe(int(o)) for o in rng.integers(lo, hi, int(n_shuffle))], dtype=float)
+    if index is None:
+        nulls = _bar_roll_nulls(pos, r, sf, int(min_offset), int(n_shuffle), rng, periods_per_year)
+    else:
+        nulls = _lattice_nulls(pos, r, sf, index, int(min_offset), int(n_shuffle), rng, periods_per_year)
+
+    real = _ann_sharpe(net_bar_returns(pos, r, spread_frac=sf), periods_per_year)
     finite = nulls[np.isfinite(nulls)]
     percentile = float((finite < real).mean()) if finite.size and np.isfinite(real) else float("nan")
     beta_sharpe = float(finite.mean()) if finite.size else float("nan")
-    return CircularShiftNull(real, beta_sharpe, percentile, nulls, int(n_shuffle))
+    return CircularShiftNull(real, beta_sharpe, percentile, nulls, int(n_shuffle), p_value(real, nulls),
+                             int(nulls.size))
+
+
+def _bar_roll_nulls(pos: NDArray, r: NDArray, sf: NDArray, min_offset: int, n_shuffle: int, rng: np.random.Generator,
+                    periods_per_year: float) -> NDArray:
+    """Null Sharpes for distinct whole-bar rolls, scored circularly (turnover preserved exactly)."""
+    n = pos.size
+    offsets = draw_offsets(n, min_offset, n_shuffle, rng)
+    if offsets.size == 0:
+        raise ValueError(f"circular_shift_null: {n} bars cannot honour min_offset={min_offset} (offsets must lie in "
+                         f"[min_offset, n - min_offset]); pass a smaller min_offset or a longer series.")
+    r_ok = np.where(np.isfinite(r), r, 0.0)                     # missing return -> 0 gross contribution
+    held = np.roll(pos, 1)                                      # circular lag: held[t] = pos[t-1]
+    turn = np.abs(pos - held)                                  # circular turnover (sum invariant under rotation)
+    nulls = [_ann_sharpe(np.roll(held, o) * r_ok - np.roll(turn, o) * sf, periods_per_year) for o in offsets]
+    return np.asarray(nulls, dtype=float)
+
+
+def _lattice_nulls(pos: NDArray, r: NDArray, sf: NDArray, index: pd.DatetimeIndex, min_offset: int, n_shuffle: int,
+                   rng: np.random.Generator, periods_per_year: float) -> NDArray:
+    """Null Sharpes for distinct whole-trading-day rotations that keep every bar's intraday slot."""
+    if len(index) != pos.size:
+        raise ValueError(f"index has {len(index)} stamps but there are {pos.size} positions.")
+    clock = build_clock(index, exclude_windows=())
+    lattice = DayLattice.build(clock.trading_day, clock.slot, np.arange(pos.size))  # grid cell = that slot's bar
+    min_days = max(1, int(np.ceil(min_offset / np.median(np.bincount(lattice.day_pos)))))
+    offsets = draw_offsets(lattice.n_days, min_days, n_shuffle, rng)
+    if offsets.size == 0:
+        raise ValueError(f"circular_shift_null: {lattice.n_days} trading days cannot honour min_offset={min_offset} "
+                         f"bars ({min_days} day(s) each way); pass a smaller min_offset or a longer series.")
+    nulls = []
+    for days in offsets:
+        src = lattice.rotate(int(days))                         # source bar per bar, -1 where that slot is empty
+        rotated = np.where(src >= 0, pos[src], 0.0)             # an empty source slot is flat
+        nulls.append(_ann_sharpe(net_bar_returns(rotated, r, spread_frac=sf), periods_per_year))
+    return np.asarray(nulls, dtype=float)
 
 
 @dataclass(frozen=True)
