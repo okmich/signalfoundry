@@ -163,17 +163,17 @@ def count_sign_divergence(signs: Dict[int, int], pw_mean_return: np.ndarray) -> 
     return divergent
 
 
-def _state_signs(df: pd.DataFrame, probs: np.ndarray, price_col: str, method: str) -> Dict[int, int]:
+def _state_signs(df: pd.DataFrame, probs: np.ndarray, earned_returns: np.ndarray, method: str) -> Dict[int, int]:
     """Trade direction per state via ``map_label_to_trend_direction`` on ``argmax(gamma)``.
+
+    ``earned_returns[t]`` is the return a position decided at bar t first earns, so the sign is fitted on the same
+    alignment the P&L uses. Fitting on the same-bar return signs a mean-reverting state as trending.
 
     Returns ``{state: sign}`` with sign in ``{-1, 0, 1}``. Uses the same mapper the hard-label trio uses so the
     posterior returns table stays comparable.
     """
-    tmp = pd.DataFrame({
-        "_argmax_state": _argmax_label(probs),
-        "_log_ret": np.log(df[price_col].to_numpy(dtype=float) / df[price_col].shift(1).to_numpy(dtype=float)),
-    }, index=df.index)
-    mapping = map_label_to_trend_direction(tmp, state_col="_argmax_state", return_col="_log_ret", method=method)
+    tmp = pd.DataFrame({"_argmax_state": _argmax_label(probs), "_earned": earned_returns}, index=df.index)
+    mapping = map_label_to_trend_direction(tmp, state_col="_argmax_state", return_col="_earned", method=method)
     return {int(k): int(v) for k, v in mapping.items()}
 
 
@@ -377,7 +377,7 @@ def _backtest_position(position: np.ndarray, fwd_returns: np.ndarray, whipsaw_co
 
 def evaluate_posterior_returns_potentials(df: pd.DataFrame, posterior_cols: Sequence[str], price_col: str = "close",
                                           whipsaw_cost: float = 0.0, tau: float = 0.5,
-                                          sign_mapping_method: str = "sharpe", progressive_skip: int = 1,
+                                          sign_mapping_method: str = "simple", progressive_skip: int = 1,
                                           truth_col: Optional[str] = None,
                                           sign_map: Optional[Dict[int, int]] = None) -> pd.DataFrame:
     """Tradeability *potential* of one variant's posterior under soft vs confidence-gated positions.
@@ -388,7 +388,8 @@ def evaluate_posterior_returns_potentials(df: pd.DataFrame, posterior_cols: Sequ
     their posterior-weighted mean return (the cheap safety net against argmax contamination by ambiguous/transition bars).
 
     IN-SAMPLE BY CONSTRUCTION. When ``sign_map`` is not supplied the per-state direction is *learned from the same
-    sample it is then evaluated on* (identical to the hard-label ``evaluate_regime_returns_potentials``). The numbers are
+    sample it is then evaluated on* (identical to the hard-label ``evaluate_regime_returns_potentials``), on the return
+    the position first earns (``progressive_skip`` included). The numbers are
     therefore upper-bound *potential* diagnostics, NOT a deployable out-of-sample strategy estimate. For an honest OOS
     figure, pass a ``sign_map`` (``{state: sign in {-1,0,1}}``) prefit on a disjoint training window.
 
@@ -402,11 +403,13 @@ def evaluate_posterior_returns_potentials(df: pd.DataFrame, posterior_cols: Sequ
     log_ret = np.log(df[price_col].to_numpy(dtype=float) / df[price_col].shift(1).to_numpy(dtype=float))
     fwd_returns = np.roll(log_ret, -1)
     fwd_returns[-1] = np.nan
+    # A position decided at bar t is held from bar t + progressive_skip and first earns r_{t + 1 + progressive_skip}
+    earned = pd.Series(log_ret).shift(-(1 + progressive_skip)).to_numpy()
 
-    signs = dict(sign_map) if sign_map is not None else _state_signs(df, probs, price_col, sign_mapping_method)
+    signs = dict(sign_map) if sign_map is not None else _state_signs(df, probs, earned, sign_mapping_method)
 
-    # sign-divergence flag: argmax-mapped sign vs posterior-weighted-mean-return sign
-    pw_mean_ret = posterior_weighted_mean(probs, log_ret)
+    # sign-divergence flag: argmax-mapped sign vs posterior-weighted mean of the same earned return
+    pw_mean_ret = posterior_weighted_mean(probs, earned)
     n_divergent = count_sign_divergence({k: signs.get(k, 0) for k in range(K)}, pw_mean_ret)
 
     calibration = {}
@@ -429,7 +432,7 @@ def evaluate_posterior_returns_potentials(df: pd.DataFrame, posterior_cols: Sequ
 
 def evaluate_all_posteriors_returns_potentials(df: pd.DataFrame, variants: Optional[Sequence[str]] = None,
                                                price_col: str = "close", whipsaw_cost: float = 0.0, tau: float = 0.5,
-                                               sign_mapping_method: str = "sharpe", progressive_skip: int = 1,
+                                               sign_mapping_method: str = "simple", progressive_skip: int = 1,
                                                truth_cols: Optional[Dict[str, str]] = None,
                                                sign_maps: Optional[Dict[str, Dict[int, int]]] = None,
                                                provenance: Optional[Dict[str, str]] = None) -> pd.DataFrame:

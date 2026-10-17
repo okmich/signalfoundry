@@ -95,7 +95,7 @@ def test_evaluate_liquidity_finds_separation_on_constructed_two_regime_data() ->
                              raw_data=raw, horizons=(12,))
     assert out.axis_separation > 0.0
     assert out.secondary_robustness >= 2
-    assert out.secondary_label == "n_distinct_buckets"
+    assert out.secondary_label == "n_distinguishable_states"
     # State 0 (liquid: high volume) should map to a HIGHER bucket than state 1 (illiquid: low volume),
     # because the ascending-by-median ranking puts highest forward volume in the highest bucket.
     # See raw_details['polarity']: bucket 0 = LEAST liquid, bucket k = MOST liquid.

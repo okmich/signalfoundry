@@ -16,8 +16,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency
 from sklearn.metrics import cohen_kappa_score, f1_score
 
-from okmich_quant_labelling.utils.label_eval_util import evaluate_regime_returns_potentials
-from okmich_quant_labelling.utils.label_util import map_label_to_trend_direction
+from okmich_quant_labelling.utils.label_eval_util import evaluate_regime_returns_potentials, fit_label_sign_map
 
 
 # =========================================================================
@@ -103,7 +102,6 @@ def compute_economic_metrics(df: pd.DataFrame, label_col: str = "label", progres
 
     try:
         df_eval = df.copy()
-        df_eval["log_return"] = np.log(df_eval["close"] / df_eval["close"].shift(1))
 
         # Early exit: count regime changes cheaply before expensive evaluation
         regime_switches = (df_eval[label_col].diff().fillna(0) != 0).sum()
@@ -113,8 +111,7 @@ def compute_economic_metrics(df: pd.DataFrame, label_col: str = "label", progres
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module=r"okmich_quant_labelling\.utils\.label_util")
-            label_sign_map = map_label_to_trend_direction(df_eval, state_col=label_col, return_col="log_return",
-                                                          method="simple")
+            label_sign_map = fit_label_sign_map(df_eval, label_col, method="simple")
 
         metrics_df, _ = evaluate_regime_returns_potentials(df_eval, label_col=label_col, progressive_skip=progressive_skip,
                                                            whipsaw_cost=whipsaw_cost, label_sign_map=label_sign_map,

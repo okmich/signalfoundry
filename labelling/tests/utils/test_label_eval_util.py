@@ -7,6 +7,8 @@ Covers:
   - Original column set is preserved after the call
   - label_path_structure_statistics measures path statistics inside episodes, never across the join between two
   - regime_discriminability is an absolute, nearest-neighbour separation score
+  - evaluate_regime_returns_potentials: attribution, flat regimes, timing, penalty and sign-fit fixes
+  - label_transition_statistics: transitions, censored episodes, NaN and segment breaks
 """
 
 import numpy as np
@@ -16,7 +18,10 @@ import pytest
 from okmich_quant_labelling.utils.label_eval_util import (
     all_labels_path_structure_statistics,
     evaluate_all_labels_regime_returns_potentials,
+    evaluate_regime_returns_potentials,
+    fit_label_sign_map,
     label_path_structure_statistics,
+    label_transition_statistics,
 )
 
 
@@ -297,3 +302,117 @@ class TestPathStructureCompatibility:
         result = all_labels_path_structure_statistics(df, state_cols=["label_a", "label_b"])
 
         assert set(result["algo"]) == {"label_a", "label_b"}
+
+
+# ---------------------------------------------------------------------------
+# evaluate_regime_returns_potentials
+# ---------------------------------------------------------------------------
+
+def _bars(labels, returns=None, seed=0):
+    """Bars whose open-to-close log return is ``returns`` (random when None); open = 100 on every bar."""
+    labels = np.asarray(labels, dtype=float)
+    if returns is None:
+        returns = np.random.default_rng(seed).normal(0, 1e-3, labels.size)
+    return pd.DataFrame({"open": np.full(labels.size, 100.0), "close": 100.0 * np.exp(returns), "label": labels})
+
+
+class TestRegimeReturnsPotentials:
+    def test_one_bar_run_keeps_its_own_label(self):
+        """A 1-bar run of label 2 used to be credited to the next label."""
+        labels = [0] * 10 + [2] + [0] * 10 + [1] * 10
+        metrics, regimes = evaluate_regime_returns_potentials(_bars(labels), label_sign_map={0: -1, 1: 1, 2: 1})
+
+        one_bar = regimes[regimes["label"] == 2]
+        assert len(one_bar) == 1 and one_bar["regime_length"].iloc[0] == 1
+        assert metrics.set_index("label").loc[2, "count"] == 1
+
+    def test_flat_regimes_are_kept_and_no_trade_is_a_share_of_time(self):
+        """Label 0 maps to 0: its regimes still count, and no_trade% is the share of bars out of the market."""
+        labels = np.repeat([0, 1, 0, 1], 25)
+        metrics, regimes = evaluate_regime_returns_potentials(_bars(labels), label_sign_map={0: 0, 1: 1})
+        rows = metrics.set_index("label")
+
+        assert rows.loc[0, "count"] == 2 and rows.loc[0, "n_trades"] == 0
+        assert rows.loc["overall", "count"] == 4
+        # bars 1..99 have a decision label (bar 0 has none); label 0 decides bars 1-25 and 51-75
+        assert rows.loc["overall", "no_trade%"] == pytest.approx(100 * 50 / 99, abs=0.01)
+        assert rows.loc[0, "avg_dwell"] > 0
+
+    def test_progressive_skip_waits_extra_bars_and_zero_means_one(self):
+        labels = np.repeat([0, 1] * 5, 6)
+        df = _bars(labels)
+        sign_map = {0: -1, 1: 1}
+        traded = {k: evaluate_regime_returns_potentials(df, progressive_skip=k, label_sign_map=sign_map)[1]
+                  ["total_trades"].sum() for k in (0, 1, 2)}
+        assert traded[0] == traded[1]
+        assert traded[2] < traded[1]
+
+    def test_no_bar_trades_on_its_own_label(self):
+        """A label that is the sign of its own bar's return: same-bar trading would win every bar."""
+        returns = np.random.default_rng(3).normal(0, 1e-3, 2000)
+        labels = (returns > 0).astype(float)
+        _, regimes = evaluate_regime_returns_potentials(_bars(labels, returns), label_sign_map={0: -1, 1: 1})
+        assert abs(regimes["correct_direction_count"].sum() / regimes["total_trades"].sum() - 0.5) < 0.05
+
+    def test_wrong_direction_penalty_is_charged_once(self):
+        df = _bars(np.repeat([0, 1] * 10, 8), seed=4)
+        sign_map = {0: -1, 1: 1}
+        plain = evaluate_regime_returns_potentials(df, label_sign_map=sign_map)[0].set_index("label").loc["overall"]
+        penalised = evaluate_regime_returns_potentials(df, label_sign_map=sign_map, wrong_direction_penalty=0.5)[0]
+        penalised = penalised.set_index("label").loc["overall"]
+
+        assert penalised["total_return"] == pytest.approx(plain["total_return"])
+        assert penalised["total_wrong_direction_penalty"] == pytest.approx(0.5 * plain["adv_ret_cum_raw"])
+        assert penalised["net_return_after_costs"] == pytest.approx(plain["total_return"]
+                                                                    - 0.5 * plain["adv_ret_cum_raw"])
+
+    def test_nan_label_is_not_bridged(self):
+        """The bar after a NaN label has no confirmed sign, so it is not traded."""
+        labels = np.r_[np.ones(10), np.nan, np.ones(10)]
+        _, regimes = evaluate_regime_returns_potentials(_bars(np.r_[labels, np.zeros(5)]), label_sign_map={0: -1, 1: 1})
+        # decision regimes of label 1: bars 1..10 and bars 12..21 (bar 11's decision label is the NaN)
+        ones = regimes[regimes["label"] == 1]
+        assert ones["regime_length"].tolist() == [10, 10]
+        assert ones["total_trades"].tolist() == [10, 10]
+
+    def test_sign_map_is_fitted_on_the_next_bar_return(self):
+        """Mean-reverting bars labelled by the sign of their own return: the next bar reverses, so the fitted map
+        fades the label. A same-bar fit would have followed it."""
+        rng = np.random.default_rng(5)
+        returns = np.zeros(5000)
+        for t in range(1, returns.size):
+            returns[t] = -0.4 * returns[t - 1] + rng.normal(0, 1e-3)
+        df = _bars((returns > 0).astype(float), returns)
+        assert fit_label_sign_map(df, "label") == {0.0: 1, 1.0: -1}
+
+
+# ---------------------------------------------------------------------------
+# label_transition_statistics
+# ---------------------------------------------------------------------------
+
+class TestLabelTransitionStatistics:
+    def test_transition_matrix_and_mean_self_transition(self):
+        result = label_transition_statistics(pd.Series([0, 0, 1, 1, 1, 0]))
+        np.testing.assert_allclose(result.transition_matrix.to_numpy(), [[0.5, 0.5], [1 / 3, 2 / 3]])
+        assert result.mean_self_transition == pytest.approx((0.5 + 2 / 3) / 2)
+        assert result.occupancy["bars"].tolist() == [3, 3]
+
+    def test_episodes_cut_by_the_sample_ends_are_censored(self):
+        dwell = label_transition_statistics(pd.Series([0, 0, 1, 1, 1, 0])).dwell
+        assert dwell.loc[1, ["episodes", "censored", "mean"]].tolist() == [1, 0, 3.0]
+        assert dwell.loc[0, "episodes"] == 2 and dwell.loc[0, "censored"] == 2 and np.isnan(dwell.loc[0, "mean"])
+
+    def test_nan_and_segment_change_break_episodes(self):
+        result = label_transition_statistics(pd.Series([0, 0, np.nan, 0, 0]))
+        assert result.dwell.loc[0, "episodes"] == 2
+        assert result.transition_matrix.loc[0, 0] == 1.0  # two 0->0 steps, none across the NaN
+
+        segmented = label_transition_statistics(pd.Series([0, 0, 0, 0]), segment=pd.Series([1, 1, 2, 2]))
+        assert segmented.dwell.loc[0, "episodes"] == 2
+
+    def test_unused_category_does_not_break_the_matrix(self):
+        """The retired LabelEvaluator sized the matrix after dropping rows and indexed it before: IndexError."""
+        labels = pd.Series(pd.Categorical([0, 0, 2, 2], categories=[0, 1, 2]))
+        matrix = label_transition_statistics(labels).transition_matrix
+        assert matrix.shape == (3, 3)
+        assert matrix.loc[1].isna().all()

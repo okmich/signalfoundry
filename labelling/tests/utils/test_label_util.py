@@ -6,9 +6,7 @@ import pytest
 
 from okmich_quant_labelling.utils.label_util import (
     map_label_to_trend_direction,
-    map_label_to_momentum_score,
     map_regime_to_volatility_score,
-    map_regime_to_path_structure_score,
 )
 
 
@@ -467,16 +465,51 @@ class TestMapLabelToTrendDirection:
 
     # ========== TEST THE PRE-FALLBACK VERDICT ==========
 
-    def test_driftless_states_are_ranked_but_not_tested_significant(self):
-        """Three states with no drift: the conservative test signs none, the fallback ranks them -1/0/+1 anyway.
-        ``direction`` carries the rank; ``test_direction`` keeps the test's own verdict (all 0)."""
+    def test_driftless_states_stay_flat_by_default(self):
+        """Three states with no drift: the conservative test signs none, and no fallback overrides it."""
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
+        assert mapping == {0: 0, 1: 0, 2: 0}
+        assert not diag["fallback"].any()
+
+    def test_driftless_states_are_ranked_only_on_request(self):
+        """``force_distinct_signs=True``: the fallback ranks them -1/0/+1 anyway. ``direction`` carries the rank;
+        ``test_direction`` keeps the test's own verdict (all 0)."""
         rng = np.random.default_rng(3)
         df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
         with pytest.warns(UserWarning, match="ranking fallback"):
-            mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
+            mapping, diag = map_label_to_trend_direction(df, method="conservative", force_distinct_signs=True,
+                                                         return_diagnostics=True)
         assert sorted(mapping.values()) == [-1, 0, 1]
         assert (diag["test_direction"] == 0).all()
         assert diag["fallback"].all()
+
+    def test_overlapping_forward_returns_do_not_inflate_the_test(self):
+        """Overlapping 12-bar forward sums of pure noise: an iid t-test flags most states, the cluster-robust test
+        stays near its nominal 5%."""
+        horizon, n = 12, 6000
+        rejections = []
+        for seed in range(60):
+            rng = np.random.default_rng(seed)
+            noise = rng.standard_normal(n + horizon)
+            forward = np.convolve(noise, np.ones(horizon), mode="valid")[1:n + 1]
+            state = np.cumsum(rng.random(n) < 1 / 20) % 2
+            df = pd.DataFrame({"state": state, "returns": forward})
+            _, diag = map_label_to_trend_direction(df, method="statistical", horizon=horizon, return_diagnostics=True)
+            rejections.extend(diag["p_value"] < 0.05)
+        assert np.mean(rejections) < 0.12
+        assert {"n_clusters"} <= set(diag.columns)
+
+    def test_empty_supplied_mapping_is_still_frozen(self):
+        """``mapping_dict={}`` is a (useless) frozen map, not a request to refit: every state trades flat."""
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame({"state": np.repeat([0, 1], 400), "returns": rng.normal(0.002, 0.001, 800)})
+        with pytest.warns(UserWarning, match="not in mapping"):
+            mapping = map_label_to_trend_direction(df, mapping_dict={})
+        assert mapping == {0: 0, 1: 0}
 
     def test_significant_states_keep_their_test_direction(self):
         """Drifts the test passes on its own: no fallback, and ``test_direction`` equals ``direction``."""
@@ -514,327 +547,6 @@ class TestMapLabelToTrendDirection:
             mapping = map_label_to_trend_direction(df, mapping_dict=frozen)
         assert mapping == {0: -1, 1: 1, 2: 0}
         assert frozen == {0: -1, 1: 1}
-
-
-class TestMapLabelToMomentumScore:
-    """Test suite for map_label_to_momentum_score"""
-
-    @pytest.fixture
-    def momentum_data(self):
-        """
-        Test data with 4 regimes of varying momentum:
-        - Regime 0: Strong downward (-0.002)
-        - Regime 1: Weak downward (-0.0005)
-        - Regime 2: Weak upward (0.0003)
-        - Regime 3: Strong upward (0.0015)
-        """
-        np.random.seed(42)
-
-        regime0 = np.random.normal(-0.002, 0.0003, 50)
-        regime1 = np.random.normal(-0.0005, 0.0002, 50)
-        regime2 = np.random.normal(0.0003, 0.0002, 50)
-        regime3 = np.random.normal(0.0015, 0.0004, 50)
-
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50 + [1] * 50 + [2] * 50 + [3] * 50,
-                "returns": np.concatenate([regime0, regime1, regime2, regime3]),
-            }
-        )
-
-        return df.sample(frac=1, random_state=42).reset_index(drop=True)
-
-    # ========== TEST DIRECTIONAL MODE ==========
-
-    def test_directional_mode_basic(self, momentum_data):
-        """Test directional momentum scoring (-n to +n)"""
-        mapping = map_label_to_momentum_score(
-            momentum_data, method="robust", momentum_range=5, is_directional=True
-        )
-
-        assert isinstance(mapping, dict)
-        assert set(mapping.keys()) == {0, 1, 2, 3}
-
-        # All scores should be in [-5, +5]
-        assert all(-5 <= v <= 5 for v in mapping.values())
-
-        # Check monotonicity: scores increase with median return
-        # Regime 0 (most negative) should have lowest score
-        # Regime 3 (most positive) should have highest score
-        assert mapping[0] < mapping[1] < mapping[2] < mapping[3]
-
-    def test_directional_mode_with_diagnostics(self, momentum_data):
-        """Test diagnostics in directional mode"""
-        mapping, diag = map_label_to_momentum_score(
-            momentum_data,
-            method="robust",
-            momentum_range=5,
-            is_directional=True,
-            return_diagnostics=True,
-        )
-
-        assert isinstance(diag, pd.DataFrame)
-        assert len(diag) == 4  # 4 regimes
-
-        # Check columns
-        expected_cols = [
-            "regime",
-            "median",
-            "mean",
-            "sharpe",
-            "count",
-            "score",
-            "reason",
-        ]
-        for col in ["regime", "count", "score", "reason"]:
-            assert col in diag.columns, f"Missing column: {col}"
-
-    def test_directional_symmetric_range(self, momentum_data):
-        """Test that directional mode creates symmetric range"""
-        mapping = map_label_to_momentum_score(
-            momentum_data, momentum_range=3, is_directional=True
-        )
-
-        # Range should be -3 to +3
-        assert all(-3 <= v <= 3 for v in mapping.values())
-
-    # ========== TEST NON-DIRECTIONAL MODE ==========
-
-    def test_nondirectional_mode_basic(self, momentum_data):
-        """Test non-directional momentum scoring (0 to n)"""
-        mapping = map_label_to_momentum_score(
-            momentum_data, method="robust", momentum_range=5, is_directional=False
-        )
-
-        assert isinstance(mapping, dict)
-        assert set(mapping.keys()) == {0, 1, 2, 3}
-
-        # All scores should be in [0, 5]
-        assert all(0 <= v <= 5 for v in mapping.values())
-
-    def test_nondirectional_ranks_by_magnitude(self):
-        """Test that non-directional mode ranks by absolute value"""
-        np.random.seed(42)
-
-        # Create regimes with different magnitudes regardless of sign
-        # Regime 0: near zero
-        # Regime 1: moderate negative
-        # Regime 2: moderate positive
-        # Regime 3: large negative
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50 + [1] * 50 + [2] * 50 + [3] * 50,
-                "returns": np.concatenate(
-                    [
-                        np.random.normal(0.0001, 0.0001, 50),  # Near zero
-                        np.random.normal(-0.001, 0.0002, 50),  # Moderate neg
-                        np.random.normal(0.001, 0.0002, 50),  # Moderate pos
-                        np.random.normal(-0.003, 0.0003, 50),  # Large neg
-                    ]
-                ),
-            }
-        )
-
-        mapping = map_label_to_momentum_score(
-            df, method="robust", momentum_range=5, is_directional=False
-        )
-
-        # Regime 0 (near zero) should have lowest score
-        # Regime 3 (largest magnitude) should have highest score
-        assert mapping[0] < mapping[1]
-        assert mapping[0] < mapping[2]
-
-    # ========== TEST METHODS ==========
-
-    def test_robust_method(self, momentum_data):
-        """Test robust method uses median"""
-        mapping, diag = map_label_to_momentum_score(
-            momentum_data, method="robust", return_diagnostics=True
-        )
-
-        # Check that median is present in diagnostics
-        assert "median" in diag.columns or "median_" in str(diag.columns)
-
-    def test_mean_method(self, momentum_data):
-        """Test mean method"""
-        mapping = map_label_to_momentum_score(
-            momentum_data, method="mean", momentum_range=5
-        )
-
-        assert isinstance(mapping, dict)
-        assert len(mapping) == 4
-
-    def test_sharpe_method(self, momentum_data):
-        """Test Sharpe ratio method"""
-        mapping = map_label_to_momentum_score(
-            momentum_data, method="sharpe", momentum_range=5
-        )
-
-        assert isinstance(mapping, dict)
-        assert len(mapping) == 4
-
-    # ========== TEST MONOTONICITY ==========
-
-    def test_monotonicity_guarantee(self):
-        """Test strict monotonicity: higher score = higher momentum"""
-        np.random.seed(42)
-
-        # Create 5 regimes with clear ordering
-        regimes = []
-        returns = []
-        means = [-0.003, -0.001, 0.0, 0.001, 0.003]
-
-        for i, mean in enumerate(means):
-            regimes.extend([i] * 50)
-            returns.extend(np.random.normal(mean, 0.0001, 50))
-
-        df = pd.DataFrame({"regime": regimes, "returns": returns})
-
-        mapping, diag = map_label_to_momentum_score(
-            df,
-            method="robust",
-            momentum_range=10,
-            is_directional=True,
-            return_diagnostics=True,
-        )
-
-        # Verify monotonicity
-        sorted_regimes = diag.sort_values("score")["regime"].tolist()
-        sorted_medians = diag.sort_values("score")["median"].tolist()
-
-        # Medians should be increasing
-        for i in range(len(sorted_medians) - 1):
-            assert (
-                sorted_medians[i] <= sorted_medians[i + 1]
-            ), f"Monotonicity violated: median[{i}]={sorted_medians[i]}, median[{i + 1}]={sorted_medians[i + 1]}"
-
-    # ========== TEST EDGE CASES ==========
-
-    def test_insufficient_samples(self):
-        """Test handling of regimes with insufficient samples"""
-        np.random.seed(42)
-
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50
-                + [1] * 10
-                + [2] * 50,  # Regime 1 has only 10 samples
-                "returns": np.concatenate(
-                    [
-                        np.random.normal(0.001, 0.0002, 50),
-                        np.random.normal(-0.001, 0.0002, 10),
-                        np.random.normal(0.002, 0.0003, 50),
-                    ]
-                ),
-            }
-        )
-
-        mapping, diag = map_label_to_momentum_score(
-            df, min_samples=30, is_directional=True, return_diagnostics=True
-        )
-
-        # Regime 1 should be assigned score 0 (neutral)
-        assert mapping[1] == 0
-
-        # Check diagnostics
-        regime1_row = diag[diag["regime"] == 1]
-        assert "Insufficient" in regime1_row["reason"].values[0]
-
-    def test_empty_dataframe(self):
-        """Test handling of empty DataFrame"""
-        df = pd.DataFrame({"regime": [], "returns": []})
-
-        mapping = map_label_to_momentum_score(df)
-
-        assert mapping == {}
-
-    def test_nan_handling(self):
-        """Test that NaN values are properly filtered"""
-        np.random.seed(42)
-
-        returns = np.random.normal(0.001, 0.0002, 100)
-        returns[::10] = np.nan  # Insert NaNs
-
-        df = pd.DataFrame({"regime": [0] * 100, "returns": returns})
-
-        mapping = map_label_to_momentum_score(df, min_samples=30)
-
-        # Should not crash and should return valid mapping
-        assert isinstance(mapping, dict)
-        assert 0 in mapping
-
-    # ========== TEST RANGE CONSTRAINTS ==========
-
-    def test_custom_range_int(self):
-        """Test custom range specified as integer"""
-        np.random.seed(42)
-
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50 + [1] * 50 + [2] * 50,
-                "returns": np.concatenate(
-                    [
-                        np.random.normal(-0.001, 0.0001, 50),
-                        np.random.normal(0.0, 0.0001, 50),
-                        np.random.normal(0.001, 0.0001, 50),
-                    ]
-                ),
-            }
-        )
-
-        mapping = map_label_to_momentum_score(
-            df, momentum_range=10, is_directional=True
-        )
-
-        # Range should be -10 to +10
-        assert all(-10 <= v <= 10 for v in mapping.values())
-
-    def test_custom_range_tuple(self):
-        """Test custom range specified as tuple"""
-        np.random.seed(42)
-
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50 + [1] * 50,
-                "returns": np.concatenate(
-                    [
-                        np.random.normal(-0.001, 0.0001, 50),
-                        np.random.normal(0.001, 0.0001, 50),
-                    ]
-                ),
-            }
-        )
-
-        mapping = map_label_to_momentum_score(
-            df, momentum_range=(-3, 7), is_directional=True  # Asymmetric range
-        )
-
-        # Range should be -3 to +7
-        assert all(-3 <= v <= 7 for v in mapping.values())
-
-    # ========== TEST INPUT VALIDATION ==========
-
-    def test_invalid_regime_column(self, momentum_data):
-        """Test error when regime column doesn't exist"""
-        with pytest.raises(ValueError, match="Column 'invalid' not found"):
-            map_label_to_momentum_score(momentum_data, regime_col="invalid")
-
-    def test_invalid_return_column(self, momentum_data):
-        """Test error when return column doesn't exist"""
-        with pytest.raises(ValueError, match="Column 'invalid' not found"):
-            map_label_to_momentum_score(momentum_data, ret_col="invalid")
-
-    def test_invalid_method(self, momentum_data):
-        """Test error for invalid method"""
-        with pytest.raises(ValueError, match="Unknown method"):
-            map_label_to_momentum_score(momentum_data, method="invalid")
-
-    def test_deterministic_output(self, momentum_data):
-        """Test that same input produces same output"""
-        mapping1 = map_label_to_momentum_score(momentum_data)
-        mapping2 = map_label_to_momentum_score(momentum_data)
-
-        assert mapping1 == mapping2
 
 
 class TestMapRegimeToVolatilityScore:
@@ -1066,232 +778,3 @@ class TestMapRegimeToVolatilityScore:
             map_regime_to_volatility_score(
                 volatility_data, vol_proxy_col="realized_vol", method="invalid"
             )
-
-
-class TestMapRegimeToPathStructureScore:
-    """Test suite for map_regime_to_path_structure_score"""
-
-    @pytest.fixture
-    def ohlc_data(self):
-        """
-        Test data with OHLC prices and 3 regimes:
-        - Regime 0: Smooth trending (low choppiness)
-        - Regime 1: Moderate choppiness
-        - Regime 2: Very choppy (high oscillation)
-        """
-        np.random.seed(42)
-
-        n = 150
-        regimes = [0] * 50 + [1] * 50 + [2] * 50
-
-        # Generate realistic OHLC data
-        close = np.cumsum(np.random.randn(n) * 0.01) + 100
-
-        # High/Low around close with different ranges for each regime
-        hl_range = []
-        for r in regimes:
-            if r == 0:
-                hl_range.append(np.random.uniform(0.1, 0.3))  # Low range (smooth)
-            elif r == 1:
-                hl_range.append(np.random.uniform(0.3, 0.6))  # Medium range
-            else:
-                hl_range.append(np.random.uniform(0.6, 1.2))  # High range (choppy)
-
-        hl_range = np.array(hl_range)
-
-        high = close + hl_range * 0.5
-        low = close - hl_range * 0.5
-        open_price = close + np.random.randn(n) * 0.1
-
-        df = pd.DataFrame(
-            {
-                "regime": regimes,
-                "open": open_price,
-                "high": high,
-                "low": low,
-                "close": close,
-            }
-        )
-
-        return df
-
-    # ========== TEST BASIC FUNCTIONALITY ==========
-
-    def test_basic_choppiness_scoring(self, ohlc_data):
-        """Test basic choppiness score assignment"""
-        mapping = map_regime_to_path_structure_score(
-            ohlc_data, method="id_chop", lookback=10
-        )
-
-        assert isinstance(mapping, dict)
-        assert set(mapping.keys()) == {0, 1, 2}
-
-        # All scores should be in default range [0, 4]
-        assert all(0 <= v <= 4 for v in mapping.values())
-
-    def test_with_diagnostics(self, ohlc_data):
-        """Test diagnostics output"""
-        mapping, diag = map_regime_to_path_structure_score(
-            ohlc_data, method="id_chop", return_diagnostics=True
-        )
-
-        assert isinstance(diag, pd.DataFrame)
-        assert len(diag) == 3
-
-        # Check required columns
-        expected_cols = [
-            "regime",
-            "median_chop",
-            "mean_chop",
-            "count",
-            "assigned_score",
-            "reason",
-        ]
-        for col in expected_cols:
-            assert col in diag.columns, f"Missing column: {col}"
-
-    # ========== TEST METHODS ==========
-
-    def test_id_chop_method(self, ohlc_data):
-        """Test Choppiness Index method"""
-        mapping = map_regime_to_path_structure_score(
-            ohlc_data, method="id_chop", lookback=14
-        )
-
-        assert len(mapping) == 3
-        assert all(isinstance(v, (int, np.integer)) for v in mapping.values())
-
-    def test_cv_range_method(self, ohlc_data):
-        """Test Coefficient of Variation method"""
-        mapping = map_regime_to_path_structure_score(
-            ohlc_data, method="cv_range", lookback=10
-        )
-
-        assert len(mapping) == 3
-
-    def test_atr_dr_method(self, ohlc_data):
-        """Test ATR/DR ratio method"""
-        mapping = map_regime_to_path_structure_score(
-            ohlc_data, method="atr_dr", lookback=10
-        )
-
-        assert len(mapping) == 3
-
-    def test_custom_method(self):
-        """Test custom choppiness proxy"""
-        np.random.seed(42)
-
-        # Provide pre-computed choppiness proxy
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50 + [1] * 50 + [2] * 50,
-                "choppiness_proxy": np.concatenate(
-                    [
-                        np.random.uniform(20, 40, 50),  # Low choppiness
-                        np.random.uniform(40, 60, 50),  # Medium
-                        np.random.uniform(60, 80, 50),  # High choppiness
-                    ]
-                ),
-            }
-        )
-
-        mapping = map_regime_to_path_structure_score(df, method="custom")
-
-        assert len(mapping) == 3
-        # Regime 0 (low chop) should have lower score than regime 2 (high chop)
-        assert mapping[0] < mapping[2]
-
-    # ========== TEST MONOTONICITY ==========
-
-    def test_monotonicity_guarantee(self, ohlc_data):
-        """Test that scores increase monotonically with choppiness"""
-        mapping, diag = map_regime_to_path_structure_score(
-            ohlc_data, method="id_chop", return_diagnostics=True
-        )
-
-        # Sort by score and check that choppiness is increasing
-        sorted_df = diag.sort_values("assigned_score")
-        chops = sorted_df["median_chop"].tolist()
-
-        for i in range(len(chops) - 1):
-            assert (
-                chops[i] <= chops[i + 1]
-            ), f"Monotonicity violated: chop[{i}]={chops[i]}, chop[{i + 1}]={chops[i + 1]}"
-
-    # ========== TEST RANGE CONSTRAINTS ==========
-
-    def test_custom_range(self, ohlc_data):
-        """Test custom choppiness range"""
-        mapping = map_regime_to_path_structure_score(
-            ohlc_data, method="id_chop", choppiness_range=(0, 10)
-        )
-
-        # All scores should be in [0, 10]
-        assert all(0 <= v <= 10 for v in mapping.values())
-
-    def test_invalid_range(self, ohlc_data):
-        """Test error for invalid range"""
-        with pytest.raises(ValueError, match="choppiness_range must be tuple"):
-            map_regime_to_path_structure_score(
-                ohlc_data, choppiness_range=[0, 4]  # Wrong type
-            )
-
-    # ========== TEST EDGE CASES ==========
-
-    def test_insufficient_samples(self):
-        """Test regimes with insufficient samples"""
-        np.random.seed(42)
-
-        n = 80
-        close = np.cumsum(np.random.randn(n) * 0.01) + 100
-        hl_range = np.random.uniform(0.2, 0.5, n)
-
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50
-                + [1] * 10
-                + [2] * 20,  # Regime 1 has only 10 samples
-                "open": close + np.random.randn(n) * 0.1,
-                "high": close + hl_range * 0.5,
-                "low": close - hl_range * 0.5,
-                "close": close,
-            }
-        )
-
-        mapping, diag = map_regime_to_path_structure_score(
-            df, method="id_chop", min_samples=30, return_diagnostics=True
-        )
-
-        # Regime 1 should be forced to min score (smoothest)
-        assert mapping[1] == 0
-
-        # Check diagnostics
-        regime1_row = diag[diag["regime"] == 1]
-        assert "Insufficient" in regime1_row["reason"].values[0]
-
-    def test_missing_required_columns(self):
-        """Test error when required OHLC columns are missing"""
-        df = pd.DataFrame(
-            {
-                "regime": [0] * 50,
-                "close": np.random.randn(50),
-                # Missing 'high' and 'low'
-            }
-        )
-
-        with pytest.raises(ValueError, match="requires columns"):
-            map_regime_to_path_structure_score(df, method="id_chop")
-
-    # ========== TEST INPUT VALIDATION ==========
-
-    def test_invalid_method(self, ohlc_data):
-        """Test error for invalid method"""
-        with pytest.raises(ValueError, match="Unknown method"):
-            map_regime_to_path_structure_score(ohlc_data, method="invalid")
-
-    def test_deterministic_output(self, ohlc_data):
-        """Test that same input produces same output"""
-        mapping1 = map_regime_to_path_structure_score(ohlc_data, method="id_chop")
-        mapping2 = map_regime_to_path_structure_score(ohlc_data, method="id_chop")
-
-        assert mapping1 == mapping2

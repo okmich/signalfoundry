@@ -1,4 +1,3 @@
-from .evaluator import RegimeQualityEvaluator
 from .factorial import FactorialHMM
 from .inference_cache import InferenceCache
 from .pomegranate import PomegranateHMM, DistType

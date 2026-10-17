@@ -297,28 +297,19 @@ class TemporalPerformanceAnalyzer:
         return df
 
     # ------------------------------------------------------------------
-    # Hour-filter impact analysis
+    # Per-hour / per-session breakdown (descriptive)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _hour_filter_analysis(df: pd.DataFrame) -> dict:
+    def _hour_stats(df: pd.DataFrame) -> list:
         """
-        Identify toxic hours and compute the return impact of filtering them.
+        Per-hour trade statistics, sorted by hour: [{hour, n_trades, total_pnl, mean_pnl, win_rate}, ...].
 
-        Returns a dict with:
-            total_trades, total_pnl,
-            hour_stats: [{hour, n_trades, total_pnl, mean_pnl, win_rate}, ...],
-            toxic_hours: [hour, ...],        # hours with negative cumulative PnL
-            profitable_hours: [hour, ...],   # top hours by cumulative PnL
-            filter_scenarios: [{label, removed_hours, trades_kept, trades_removed, pnl_kept, pnl_removed, pnl_delta_pct}, ...]
+        Descriptive only. Blocking the hours that lost on this same sample raises its PnL by construction, so no
+        blocked-hours filter is suggested; an hour gate must be chosen on one sample and judged on another.
         """
-        total_pnl = df["PnL"].sum()
-        total_trades = len(df)
-
-        # Per-hour stats
-        hour_groups = df.groupby("hour")["PnL"]
         hour_stats = []
-        for hour, grp in hour_groups:
+        for hour, grp in df.groupby("hour")["PnL"]:
             hour_stats.append({
                 "hour": int(hour),
                 "n_trades": len(grp),
@@ -327,151 +318,40 @@ class TemporalPerformanceAnalyzer:
                 "win_rate": (grp > 0).mean() * 100,
             })
         hour_stats.sort(key=lambda x: x["hour"])
+        return hour_stats
 
-        # Identify toxic hours (negative cumulative PnL, at least 5 trades)
-        toxic = [h for h in hour_stats if h["total_pnl"] < 0 and h["n_trades"] >= 5]
-        toxic.sort(key=lambda x: x["total_pnl"])
-        toxic_hours = [h["hour"] for h in toxic]
-
-        # Top profitable hours
-        profitable = [h for h in hour_stats if h["total_pnl"] > 0]
-        profitable.sort(key=lambda x: x["total_pnl"], reverse=True)
-        profitable_hours = [h["hour"] for h in profitable[:5]]
-
-        # Build filter scenarios
-        scenarios = [{"label": "Baseline (all hours)", "removed_hours": [], "trades_kept": total_trades, "trades_removed": 0, "pnl_kept": total_pnl, "pnl_removed": 0.0, "pnl_delta_pct": 0.0}]
-
-        if toxic_hours:
-            # Scenario: remove all toxic hours
-            toxic_mask = df["hour"].isin(toxic_hours)
-            kept = df[~toxic_mask]
-            removed = df[toxic_mask]
-            scenarios.append({
-                "label": f"Remove toxic hours {toxic_hours}",
-                "removed_hours": toxic_hours,
-                "trades_kept": len(kept),
-                "trades_removed": len(removed),
-                "pnl_kept": kept["PnL"].sum(),
-                "pnl_removed": removed["PnL"].sum(),
-                "pnl_delta_pct": (kept["PnL"].sum() - total_pnl) / abs(total_pnl) * 100 if total_pnl != 0 else 0.0,
-            })
-
-            # Scenario: remove toxic + low-activity hours (< 5 trades)
-            low_activity = [h["hour"] for h in hour_stats if h["n_trades"] < 5 and h["hour"] not in toxic_hours]
-            if low_activity:
-                extended = toxic_hours + low_activity
-                ext_mask = df["hour"].isin(extended)
-                kept_ext = df[~ext_mask]
-                removed_ext = df[ext_mask]
-                scenarios.append({
-                    "label": f"Remove toxic + low-activity hours",
-                    "removed_hours": sorted(extended),
-                    "trades_kept": len(kept_ext),
-                    "trades_removed": len(removed_ext),
-                    "pnl_kept": kept_ext["PnL"].sum(),
-                    "pnl_removed": removed_ext["PnL"].sum(),
-                    "pnl_delta_pct": (kept_ext["PnL"].sum() - total_pnl) / abs(total_pnl) * 100 if total_pnl != 0 else 0.0,
-                })
-
-        # Per-session stats
-        session_groups = df.groupby("session")["PnL"]
+    @staticmethod
+    def _session_stats(df: pd.DataFrame) -> list:
+        """Per-session trade statistics: [{session, n_trades, total_pnl, win_rate}, ...]."""
         session_stats = []
-        for session, grp in session_groups:
+        for session, grp in df.groupby("session")["PnL"]:
             session_stats.append({
                 "session": session,
                 "n_trades": len(grp),
                 "total_pnl": grp.sum(),
                 "win_rate": (grp > 0).mean() * 100,
             })
+        return session_stats
 
-        return {
-            "total_trades": total_trades,
-            "total_pnl": total_pnl,
-            "hour_stats": hour_stats,
-            "toxic_hours": toxic_hours,
-            "profitable_hours": profitable_hours,
-            "session_stats": session_stats,
-            "filter_scenarios": scenarios,
-        }
-
-    def _build_filter_analysis_table(self, df: pd.DataFrame) -> go.Table:
-        """Build a Plotly Table trace summarizing hour-filter impact analysis."""
-        analysis = self._hour_filter_analysis(df)
-
-        # --- Section 1: Hour breakdown ---
-        hour_stats = analysis["hour_stats"]
-        toxic_set = set(analysis["toxic_hours"])
-        profitable_set = set(analysis["profitable_hours"])
-
-        h_hours, h_trades, h_pnl, h_mean, h_wr, h_verdict = [], [], [], [], [], []
-        for h in hour_stats:
-            h_hours.append(str(h["hour"]))
-            h_trades.append(str(h["n_trades"]))
-            h_pnl.append(f"{h['total_pnl']:+.2f}")
-            h_mean.append(f"{h['mean_pnl']:+.4f}")
-            h_wr.append(f"{h['win_rate']:.0f}%")
-            if h["hour"] in toxic_set:
-                h_verdict.append("TOXIC")
-            elif h["hour"] in profitable_set:
-                h_verdict.append("STRONG")
-            elif h["n_trades"] < 5:
-                h_verdict.append("LOW-N")
-            else:
-                h_verdict.append("")
-
-        # Color rows by verdict
-        row_colors = []
-        for v in h_verdict:
-            if v == "TOXIC":
-                row_colors.append(self._RED)
-            elif v == "STRONG":
-                row_colors.append(self._GREEN)
-            elif v == "LOW-N":
-                row_colors.append(self._ORANGE)
-            else:
-                row_colors.append(self._TEXT)
-
+    def _build_hour_table(self, df: pd.DataFrame) -> go.Table:
+        """Build a Plotly Table trace of the per-hour breakdown."""
+        hour_stats = self._hour_stats(df)
         return go.Table(
             header=dict(
-                values=["Hour", "Trades", "Total PnL", "Mean PnL", "Win Rate", "Verdict"],
+                values=["Hour", "Trades", "Total PnL", "Mean PnL", "Win Rate"],
                 fill_color=self._PANEL,
                 font=dict(color=self._TEXT, size=11, family="'Courier New', monospace"),
                 line_color=self._BORDER,
                 align="center",
             ),
             cells=dict(
-                values=[h_hours, h_trades, h_pnl, h_mean, h_wr, h_verdict],
-                fill_color=self._BG,
-                font=dict(color=[row_colors] * 6, size=10, family="'Courier New', monospace"),
-                line_color=self._BORDER,
-                align="center",
-            ),
-        )
-
-    def _build_scenario_table(self, df: pd.DataFrame) -> go.Table:
-        """Build a Plotly Table trace for filter scenarios."""
-        analysis = self._hour_filter_analysis(df)
-        scenarios = analysis["filter_scenarios"]
-
-        s_label, s_hours, s_kept, s_removed, s_pnl, s_delta = [], [], [], [], [], []
-        for s in scenarios:
-            s_label.append(s["label"])
-            s_hours.append(str(s["removed_hours"]) if s["removed_hours"] else "—")
-            s_kept.append(str(s["trades_kept"]))
-            s_removed.append(str(s["trades_removed"]))
-            s_pnl.append(f"{s['pnl_kept']:+.2f}")
-            s_delta.append(f"{s['pnl_delta_pct']:+.1f}%" if s["pnl_delta_pct"] != 0 else "—")
-
-        return go.Table(
-            header=dict(
-                values=["Scenario", "Blocked Hours", "Trades Kept", "Removed", "Net PnL", "PnL Delta %"],
-                fill_color=self._PANEL,
-                font=dict(color=self._TEXT, size=11, family="'Courier New', monospace"),
-                line_color=self._BORDER,
-                align="center",
-            ),
-            cells=dict(
-                values=[s_label, s_hours, s_kept, s_removed, s_pnl, s_delta],
+                values=[
+                    [str(h["hour"]) for h in hour_stats],
+                    [str(h["n_trades"]) for h in hour_stats],
+                    [f"{h['total_pnl']:+.2f}" for h in hour_stats],
+                    [f"{h['mean_pnl']:+.4f}" for h in hour_stats],
+                    [f"{h['win_rate']:.0f}%" for h in hour_stats],
+                ],
                 fill_color=self._BG,
                 font=dict(color=self._TEXT, size=10, family="'Courier New', monospace"),
                 line_color=self._BORDER,
@@ -479,45 +359,31 @@ class TemporalPerformanceAnalyzer:
             ),
         )
 
-    @staticmethod
-    def _format_recommendation(analysis: dict) -> list:
-        """Format the hour-filter analysis into human-readable recommendation lines."""
-        lines = []
-        total_pnl = analysis["total_pnl"]
-        toxic = analysis["toxic_hours"]
-        profitable = analysis["profitable_hours"]
-        scenarios = analysis["filter_scenarios"]
-
-        if not toxic:
-            lines.append("No consistently toxic hours detected (all hours with 5+ trades are net positive).")
-            return lines
-
-        # Toxic hours summary
-        toxic_stats = [h for h in analysis["hour_stats"] if h["hour"] in toxic]
-        toxic_pnl = sum(h["total_pnl"] for h in toxic_stats)
-        toxic_trades = sum(h["n_trades"] for h in toxic_stats)
-        lines.append(f"TOXIC HOURS: {toxic} — {toxic_trades} trades contributing {toxic_pnl:+.2f} PnL drag")
-
-        # Best scenario
-        if len(scenarios) > 1:
-            best = max(scenarios[1:], key=lambda s: s["pnl_kept"])
-            lines.append(f"BEST FILTER: {best['label']}")
-            lines.append(f"  Removes {best['trades_removed']} trades, net PnL improves from {total_pnl:+.2f} to {best['pnl_kept']:+.2f} ({best['pnl_delta_pct']:+.1f}%)")
-            lines.append(f"  Suggested blocked_hours config: {best['removed_hours']}")
-
-        # Top profitable hours
-        if profitable:
-            top = analysis["hour_stats"]
-            top_sorted = sorted([h for h in top if h["total_pnl"] > 0], key=lambda x: x["total_pnl"], reverse=True)[:3]
-            top_str = ", ".join(f"hour {h['hour']} ({h['total_pnl']:+.2f}, {h['n_trades']}t)" for h in top_sorted)
-            lines.append(f"TOP HOURS: {top_str}")
-
-        # Session summary
-        for s in analysis["session_stats"]:
-            status = "+" if s["total_pnl"] > 0 else "-"
-            lines.append(f"  {s['session']:15s}: {s['n_trades']:3d} trades, PnL={s['total_pnl']:+.2f}, WR={s['win_rate']:.0f}% [{status}]")
-
-        return lines
+    def _build_session_table(self, df: pd.DataFrame) -> go.Table:
+        """Build a Plotly Table trace of the per-session breakdown, in session order."""
+        order = {name: i for i, name in enumerate(self._session_order)}
+        session_stats = sorted(self._session_stats(df), key=lambda s: order.get(s["session"], len(order)))
+        return go.Table(
+            header=dict(
+                values=["Session", "Trades", "Total PnL", "Win Rate"],
+                fill_color=self._PANEL,
+                font=dict(color=self._TEXT, size=11, family="'Courier New', monospace"),
+                line_color=self._BORDER,
+                align="center",
+            ),
+            cells=dict(
+                values=[
+                    [str(s["session"]) for s in session_stats],
+                    [str(s["n_trades"]) for s in session_stats],
+                    [f"{s['total_pnl']:+.2f}" for s in session_stats],
+                    [f"{s['win_rate']:.0f}%" for s in session_stats],
+                ],
+                fill_color=self._BG,
+                font=dict(color=self._TEXT, size=10, family="'Courier New', monospace"),
+                line_color=self._BORDER,
+                align="center",
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Aggregation helpers
@@ -619,7 +485,7 @@ class TemporalPerformanceAnalyzer:
             y=list(cnt.index),
             colorscale="Blues",
             showscale=True,
-            colorbar=dict(x=1.02, len=0.20, y=0.27, thickness=10,
+            colorbar=dict(x=1.02, len=0.13, y=0.41, thickness=10,  # centred on row 4 of the 6-row grid
                           tickfont=dict(color=self._SUB, size=9)),
             name="Trade Count",
             visible=(tag == "entry"),
@@ -636,7 +502,7 @@ class TemporalPerformanceAnalyzer:
             colorscale=[[0.0, self._RED], [0.5, self._PANEL], [1.0, self._GREEN]],
             zmid=0, zmin=-max_abs, zmax=max_abs,
             showscale=True,
-            colorbar=dict(x=0.46, len=0.20, y=0.06, thickness=10,
+            colorbar=dict(x=0.46, len=0.13, y=0.24, thickness=10,  # centred on row 5 of the 6-row grid
                           tickfont=dict(color=self._SUB, size=9)),
             name="PnL Heatmap",
             visible=(tag == "entry"),
@@ -662,17 +528,16 @@ class TemporalPerformanceAnalyzer:
     # Dashboard
     # ------------------------------------------------------------------
 
-    def show_dashboard(self, output_html: str = None, height: int = 2300):
+    def show_dashboard(self, output_html: str = None, height: int = 2000):
         fig = make_subplots(
-            rows=7, cols=2,
+            rows=6, cols=2,
             subplot_titles=[
                 f"① PnL by Hour of Day ({self.tz})", "② PnL by Day of Week",
                 "③ PnL by Market Session",      "④ PnL by Month",
                 "⑤ PnL by Quarter",             "⑥ PnL by Trade Duration",
                 "⑦ PnL by Direction",           "⑧ Trade Count Heatmap (Hour × Day)",
                 "⑨ PnL Heatmap (Hour × Day)",   "⑩ Cumulative PnL by Session",
-                "⑪ Hour Breakdown & Verdict",   "⑫ Hour-Filter Impact Scenarios",
-                "⑬ Hour-Filter Recommendation",
+                "⑪ Hour Breakdown (entry)",     "⑫ Session Breakdown (entry)",
             ],
             vertical_spacing=0.035,
             horizontal_spacing=0.08,
@@ -683,7 +548,6 @@ class TemporalPerformanceAnalyzer:
                 [{"type": "xy"},      {"type": "heatmap"}],
                 [{"type": "heatmap"}, {"type": "xy"}],
                 [{"type": "table"},   {"type": "table"}],
-                [{"type": "table", "colspan": 2}, None],
             ],
         )
 
@@ -695,30 +559,9 @@ class TemporalPerformanceAnalyzer:
         for t in all_traces:
             fig.add_trace(t["trace"], row=t["row"], col=t["col"])
 
-        # Hour-filter analysis tables (entry perspective — always visible)
-        fig.add_trace(self._build_filter_analysis_table(self._entry_df), row=6, col=1)
-        fig.add_trace(self._build_scenario_table(self._entry_df), row=6, col=2)
-
-        # Recommendation summary
-        analysis = self._hour_filter_analysis(self._entry_df)
-        rec_lines = self._format_recommendation(analysis)
-        fig.add_trace(go.Table(
-            header=dict(
-                values=["Hour-Filter Recommendation"],
-                fill_color=self._PANEL,
-                font=dict(color=self._BLUE, size=13, family="'Courier New', monospace"),
-                line_color=self._BORDER,
-                align="left",
-            ),
-            cells=dict(
-                values=[rec_lines],
-                fill_color=self._BG,
-                font=dict(color=self._TEXT, size=11, family="'Courier New', monospace"),
-                line_color=self._BORDER,
-                align="left",
-                height=25,
-            ),
-        ), row=7, col=1)
+        # Breakdown tables (entry perspective — always visible)
+        fig.add_trace(self._build_hour_table(self._entry_df), row=6, col=1)
+        fig.add_trace(self._build_session_table(self._entry_df), row=6, col=2)
 
         # ------------------------------------------------------------------
         # Visibility masks for the dropdown
@@ -726,7 +569,7 @@ class TemporalPerformanceAnalyzer:
         # ------------------------------------------------------------------
         n_entry = len(entry_traces)
         n_exit  = len(exit_traces)
-        n_tables = 3  # hour breakdown, scenarios, recommendation — always visible
+        n_tables = 2  # hour and session breakdowns — always visible
 
         entry_vis = [True]  * n_entry + [False] * n_exit + [True] * n_tables
         exit_vis  = [False] * n_entry + [True]  * n_exit + [True] * n_tables
