@@ -133,11 +133,6 @@ def _handle_rates(rates, symbol: str):
     return df[["open", "high", "low", "close", "tick_volume", "spread"]]
 
 
-def _handle_ticks(rates, symbol: str):
-    df = _stamp_server_time(pd.DataFrame(rates), symbol)
-    return df[["bid", "ask", "last", "flags"]]
-
-
 def is_market_open(symbol: str) -> bool:
     symbol_info = mt5.symbol_info(symbol)
     if not symbol_info:
@@ -210,39 +205,6 @@ def fetch_recent_data(
         logging.error(msg)
         raise DataFetchError(msg)
     return _handle_rates(rates, symbol)
-
-
-def fetch_recent_data(
-    symbol: str, timeframe: int, now_dt: datetime, count: int
-) -> Optional[pd.DataFrame]:
-    if count <= 0:
-        raise ValueError("Count must be positive")
-    if timeframe not in timeframe_minutes_dict:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
-
-    rates = mt5.copy_rates_from(symbol, timeframe, _to_server_naive(now_dt, symbol), count)
-    if rates is None or len(rates) == 0:
-        msg = f"Failed to retrieve data for {symbol} from server. Cause: {mt5.last_error()}"
-        logging.error(msg)
-        raise DataFetchError(msg)
-    return _handle_rates(rates, symbol)
-
-
-def fetch_tick_data_date_range(
-    symbol: str,
-    start_date: datetime,
-    end_date: datetime,
-    include_info_ticks: bool = False,
-) -> Optional[pd.DataFrame]:
-    copy_flag = mt5.COPY_TICKS_ALL if include_info_ticks else mt5.COPY_TICKS_TRADE
-    # ticks = mt5.copy_ticks_range(symbol, start_date, end_date, copy_flag)
-    ticks = mt5.copy_ticks_from(symbol, start_date, 10000, copy_flag)
-    print(ticks)
-    if ticks is None or len(ticks) == 0:
-        msg = f"Failed to retrieve tick data for {symbol} from server. Cause: {mt5.last_error()}"
-        logging.error(msg)
-        raise DataFetchError(msg)
-    return _handle_ticks(ticks, symbol)
 
 
 def get_positions(symbol, magic) -> List[Dict[str, Any]]:
@@ -667,32 +629,21 @@ def cancel_pending_order(ticket: int) -> bool:
 
 
 def get_pending_orders(symbol: Optional[str] = None, magic: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Pending orders, filtered by symbol (None = all symbols) and magic (None = all magic numbers).
+
+    The magic filter is applied HERE, never passed to MT5: ``mt5.orders_get`` filters by symbol/group/ticket only
+    and accepts any other keyword without complaint, so ``orders_get(symbol=s, magic=m)`` returned every system's
+    orders on ``s`` — and ``cancel_all_pending_orders(s, m)`` would have cancelled orders this system does not own.
+
+    RAISES on a query failure instead of returning [], for the reason ``get_positions`` does: None is a failed query,
+    an empty tuple is a genuinely empty book, and a caller must not read the first as the second.
     """
-    Get list of pending orders.
-
-    Args:
-        symbol: Filter by symbol (None = all symbols)
-        magic: Filter by magic number (None = all magic numbers)
-
-    Returns:
-        List of pending orders as dictionaries
-    """
-    if symbol and magic is not None:
-        orders = mt5.orders_get(symbol=symbol, magic=magic)
-    elif symbol:
-        orders = mt5.orders_get(symbol=symbol)
-    elif magic is not None:
-        # MT5 doesn't support filtering by magic only, so get all and filter
-        orders = mt5.orders_get()
-        if orders:
-            orders = [o for o in orders if o.magic == magic]
-    else:
-        orders = mt5.orders_get()
-
-    if not orders:
-        return []
-
-    return [o._asdict() for o in orders]
+    orders = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
+    if orders is None:
+        msg = f"Failed to query pending orders for {symbol or 'all symbols'}. Cause: {mt5.last_error()}"
+        logging.error(msg)
+        raise DataFetchError(msg)
+    return [o._asdict() for o in orders if magic is None or o.magic == magic]
 
 
 def cancel_all_pending_orders(symbol: Optional[str] = None, magic: Optional[int] = None) -> List[int]:

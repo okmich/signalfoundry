@@ -12,7 +12,6 @@ from .mt5 import (
     fetch_data_from_position,
     fetch_recent_data,
     fetch_data_date_range,
-    fetch_tick_data_date_range,
     fetch_symbol_info,
     fetch_symbol_tick_info,
     DataFetchError,

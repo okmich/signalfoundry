@@ -613,6 +613,14 @@ class GenericBasicStrategy(BaseMt5Strategy):
                 direction = "buy" if entries_long > 0  else ("sell" if entries_short > 0 else "hold")
                 tick = self.fetch_latest_tick_info()
 
+                # No tick at all already raised in fetch_symbol_tick_info. A tick can still carry a zero quote (no
+                # price yet this session): SpreadFilter blocks on that, but with no SpreadFilter configured the order
+                # went out at price 0.0. Skip the entry the same way here, whatever the filters are.
+                price = tick.get("ask") if direction == "buy" else tick.get("bid")
+                if not price or price <= 0:
+                    logger.warning(f"Skipping {direction} entry for {_symbol} ({_magic}): no usable quote in {tick}")
+                    return
+
                 # Check filters before opening position
                 filter_context = {
                     "datetime": self.latest_run_dt,
@@ -628,7 +636,6 @@ class GenericBasicStrategy(BaseMt5Strategy):
                     return
 
                 # Filters passed - proceed with opening position
-                price = tick["ask"] if direction == "buy" else tick["bid"]
                 opened = self.open_position(direction, price=price)
                 if opened and self.notifier:
                     self.notifier.on_trade_opened(
