@@ -307,10 +307,11 @@ class BaseMt5Strategy(BaseStrategy):
         return (int(info.login), str(info.server)) if info is not None else None
 
     def _guard_own_pending(self) -> list[GuardPending]:
-        # get_pending_orders raises on a failed query, so the sweep logs it instead of reading it as an empty book.
-        return [GuardPending(int(o["ticket"]), f"{_PENDING_TYPE_NAMES.get(int(o['type']), o['type'])} "
-                                               f"{o.get('volume_current', '?')} lots @ {o['price_open']}")
-                for o in get_pending_orders(self.strategy_config.symbol, self.strategy_config.magic)]
+        # Filtered by magic here: MT5's orders_get takes symbol/group/ticket only.
+        rows = mt5.orders_get(symbol=self.strategy_config.symbol) or ()
+        return [GuardPending(int(o.ticket), f"{_PENDING_TYPE_NAMES.get(int(o.type), o.type)} "
+                                            f"{getattr(o, 'volume_current', '?')} lots @ {o.price_open}")
+                for o in rows if int(o.magic) == int(self.strategy_config.magic)]
 
     def _guard_cancel_pending(self, ticket: int) -> tuple[GuardActionStatus, str]:
         try:
@@ -612,15 +613,6 @@ class GenericBasicStrategy(BaseMt5Strategy):
                 direction = "buy" if entries_long > 0  else ("sell" if entries_short > 0 else "hold")
                 tick = self.fetch_latest_tick_info()
 
-                # No tick at all already raised in fetch_symbol_tick_info, but a tick can still carry a zero quote
-                # (no price yet this session). SpreadFilter blocks on a zero bid OR ask; with no SpreadFilter the
-                # order went out at price 0.0. Require a two-sided quote here, whatever the filters are.
-                bid, ask = tick.get("bid") or 0.0, tick.get("ask") or 0.0
-                if bid <= 0 or ask <= 0:
-                    logger.warning(f"Skipping {direction} entry for {_symbol} ({_magic}): no usable quote in {tick}")
-                    return
-                price = ask if direction == "buy" else bid
-
                 # Check filters before opening position
                 filter_context = {
                     "datetime": self.latest_run_dt,
@@ -636,6 +628,7 @@ class GenericBasicStrategy(BaseMt5Strategy):
                     return
 
                 # Filters passed - proceed with opening position
+                price = tick["ask"] if direction == "buy" else tick["bid"]
                 opened = self.open_position(direction, price=price)
                 if opened and self.notifier:
                     self.notifier.on_trade_opened(

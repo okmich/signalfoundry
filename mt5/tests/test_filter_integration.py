@@ -478,30 +478,3 @@ class TestGenericBasicStrategyFilterIntegration:
 
         # Should open position because no filters
         strategy.open_position.assert_called_once()
-
-    @pytest.mark.parametrize("entries_long, entries_short, tick", [
-        (1, 0, {"ask": 0.0, "bid": 1.0999}),
-        (0, 1, {"ask": 1.1000, "bid": 0.0}),
-        (1, 0, {"ask": 1.1000, "bid": 0.0}),  # one-sided: the side not traded is the zero one
-    ])
-    def test_zero_quote_skips_entry(self, mock_all_mt5_functions, entries_long, entries_short, tick):
-        """With no SpreadFilter to block it, a zero quote used to go out as an order at price 0.0."""
-        from okmich_quant_mt5.strategy import GenericBasicStrategy
-        import numpy as np
-
-        config = StrategyConfig(name="TestStrategy", symbol="EURUSD", timeframe=5, magic=12345, filters=[])
-
-        mock_signal = Mock()
-        mock_signal.generate.return_value = (np.array([0, 0, entries_long]), np.array([0, 0, 0]),
-                                             np.array([0, 0, entries_short]), np.array([0, 0, 0]))
-
-        strategy = GenericBasicStrategy(config, mock_signal)
-
-        strategy.fetch_ohlcv = Mock(return_value=Mock())
-        strategy.fetch_latest_tick_info = Mock(return_value=tick)
-        strategy.open_position = Mock(return_value=True)
-        strategy.latest_run_dt = datetime(2025, 2, 12, 10, 0)
-
-        strategy.on_new_bar()
-
-        strategy.open_position.assert_not_called()

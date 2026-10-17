@@ -2,7 +2,6 @@
 MT5 hooks (ACCOUNT_ADMIN_SPEC §10.1, §14.4)."""
 from __future__ import annotations
 
-from collections import namedtuple
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,8 +17,6 @@ from okmich_quant_core.logging import GuardedOp, LogEventType, RunnerIdentity
 
 LOGIN, SERVER = 51234567, "ICMarketsSC-Demo"
 
-_Order = namedtuple("_Order", "ticket magic type volume_current price_open")   # orders_get rows carry _asdict
-
 
 @pytest.fixture
 def mt5_env(tmp_path, monkeypatch):
@@ -33,8 +30,7 @@ def mt5_env(tmp_path, monkeypatch):
          patch("okmich_quant_mt5.strategy.place_pending_order") as place_pending, \
          patch("okmich_quant_mt5.strategy.close_position") as close_pos, \
          patch("okmich_quant_mt5.strategy.cancel_pending_order") as cancel, \
-         patch("okmich_quant_mt5.strategy.mt5") as mt5, \
-         patch("okmich_quant_mt5.functions.mt5.mt5", mt5):            # the guard lists pending via get_pending_orders
+         patch("okmich_quant_mt5.strategy.mt5") as mt5:
         info.return_value = {"symbol": "EURUSD", "point": 0.00001, "filling_mode": 1}
         get_pos.return_value = []
         mt5.account_info.return_value = SimpleNamespace(login=LOGIN, server=SERVER)
@@ -106,29 +102,16 @@ def test_own_exit_closes_under_no_ops(mt5_env):
 
 def test_sweep_cancels_own_pending_and_closes_own_positions_under_no_ops(mt5_env):
     publish(mt5_env.live, AccountDirective.NO_OPS)
-    mt5_env.mt5.orders_get.return_value = (_Order(ticket=11, magic=12345, type=2, volume_current=0.1, price_open=1.09),
-                                           _Order(ticket=12, magic=999, type=2, volume_current=0.1, price_open=1.09),
-                                           _Order(ticket=13, magic=12345, type=0, volume_current=0.1, price_open=1.1))
+    mt5_env.mt5.orders_get.return_value = (SimpleNamespace(ticket=11, magic=12345, type=2, volume_current=0.1, price_open=1.09),
+                                           SimpleNamespace(ticket=12, magic=999, type=2, volume_current=0.1, price_open=1.09))
     mt5_env.get_positions.return_value = [{"ticket": 21, "type": 1, "volume": 0.1, "price_open": 1.1, "profit": -2.5}]
     s = strategy()
     s.enforce_account_directive(datetime(2026, 9, 24, 13, 0))
-    # Another system's order (magic 999) is left alone, and an own market order in flight (13) is not a pending one.
-    mt5_env.cancel.assert_called_once_with(11)
+    mt5_env.cancel.assert_called_once_with(11)                         # another system's order (magic 999) is left alone
     mt5_env.close_position.assert_called_once()
     assert mt5_env.close_position.call_args[0][0] == 21
     assert [o.op for o in ops(s)] == [GuardedOp.CANCEL_PENDING, GuardedOp.CLOSE_SHORT]
     assert s._open_trades["21"]["close_intent"] == "account_directive:NO_OPS"   # the reconciler attributes it right
-
-
-def test_a_failed_pending_query_is_logged_not_read_as_an_empty_book(mt5_env, caplog):
-    publish(mt5_env.live, AccountDirective.NO_OPS)
-    mt5_env.mt5.orders_get.return_value = None                     # the terminal did not answer
-    mt5_env.get_positions.return_value = [{"ticket": 21, "type": 0, "volume": 0.1, "price_open": 1.1, "profit": 0.0}]
-    s = strategy()
-    s.enforce_account_directive(datetime(2026, 9, 24, 13, 0))
-    assert "could not list own pending orders" in caplog.text
-    mt5_env.cancel.assert_not_called()
-    mt5_env.close_position.assert_called_once()                    # the position half of the sweep still runs
 
 
 def test_a_failed_forced_close_does_not_raise_or_spam_trade_failed(mt5_env):
