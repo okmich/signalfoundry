@@ -307,11 +307,10 @@ class BaseMt5Strategy(BaseStrategy):
         return (int(info.login), str(info.server)) if info is not None else None
 
     def _guard_own_pending(self) -> list[GuardPending]:
-        # Filtered by magic here: MT5's orders_get takes symbol/group/ticket only.
-        rows = mt5.orders_get(symbol=self.strategy_config.symbol) or ()
-        return [GuardPending(int(o.ticket), f"{_PENDING_TYPE_NAMES.get(int(o.type), o.type)} "
-                                            f"{getattr(o, 'volume_current', '?')} lots @ {o.price_open}")
-                for o in rows if int(o.magic) == int(self.strategy_config.magic)]
+        # get_pending_orders raises on a failed query, so the sweep logs it instead of reading it as an empty book.
+        return [GuardPending(int(o["ticket"]), f"{_PENDING_TYPE_NAMES.get(int(o['type']), o['type'])} "
+                                               f"{o.get('volume_current', '?')} lots @ {o['price_open']}")
+                for o in get_pending_orders(self.strategy_config.symbol, self.strategy_config.magic)]
 
     def _guard_cancel_pending(self, ticket: int) -> tuple[GuardActionStatus, str]:
         try:

@@ -12,6 +12,7 @@ from ..timeframe_utils import timeframe_minutes_dict
 from okmich_quant_core import OrderType
 from ..resilience import (
     with_retry,
+    MT5ConnectionError,
     MT5TransientError,
     MT5PermanentError,
     classify_mt5_error,
@@ -628,12 +629,20 @@ def cancel_pending_order(ticket: int) -> bool:
     return True
 
 
+#: Resting pending-order types. ``orders_get`` also returns market and close-by orders still in flight; those are not
+#: pending, and TRADE_ACTION_REMOVE cannot cancel them.
+_PENDING_ORDER_TYPES = frozenset((mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                  mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP,
+                                  mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_SELL_STOP_LIMIT))
+
+
 def get_pending_orders(symbol: Optional[str] = None, magic: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Pending orders, filtered by symbol (None = all symbols) and magic (None = all magic numbers).
+    """Resting pending orders, filtered by symbol (None = all symbols) and magic (None = all magic numbers).
 
     The magic filter is applied HERE, never passed to MT5: ``mt5.orders_get`` filters by symbol/group/ticket only
     and accepts any other keyword without complaint, so ``orders_get(symbol=s, magic=m)`` returned every system's
     orders on ``s`` — and ``cancel_all_pending_orders(s, m)`` would have cancelled orders this system does not own.
+    Market orders still in flight are excluded (see ``_PENDING_ORDER_TYPES``).
 
     RAISES on a query failure instead of returning [], for the reason ``get_positions`` does: None is a failed query,
     an empty tuple is a genuinely empty book, and a caller must not read the first as the second.
@@ -643,34 +652,33 @@ def get_pending_orders(symbol: Optional[str] = None, magic: Optional[int] = None
         msg = f"Failed to query pending orders for {symbol or 'all symbols'}. Cause: {mt5.last_error()}"
         logging.error(msg)
         raise DataFetchError(msg)
-    return [o._asdict() for o in orders if magic is None or o.magic == magic]
+    return [o._asdict() for o in orders if o.type in _PENDING_ORDER_TYPES and (magic is None or o.magic == magic)]
 
 
 def cancel_all_pending_orders(symbol: Optional[str] = None, magic: Optional[int] = None) -> List[int]:
-    """
-    Cancel all pending orders matching criteria.
+    """Cancel every pending order matching (symbol, magic) and return the tickets actually cancelled.
 
-    Args:
-        symbol: Filter by symbol (None = all symbols)
-        magic: Filter by magic number (None = all magic numbers)
-
-    Returns:
-        List of cancelled order tickets
+    One order failing (filled or removed meanwhile, refused by the server) is logged and the rest are still attempted,
+    so the result can be shorter than the book; a caller needing certainty re-reads ``get_pending_orders``. A lost
+    connection stops the loop instead: every remaining cancel would wait out the same retries and fail the same way.
 
     Raises:
         DataFetchError: when the pending-order query itself fails (see ``get_pending_orders``)
+        MT5ConnectionError: when the connection is lost part-way; the tickets cancelled before it are logged
     """
-    orders = get_pending_orders(symbol=symbol, magic=magic)
-    if not orders:
-        print(f"No pending orders found for symbol={symbol}, magic={magic}")
-        return []
-
     cancelled = []
-    for order in orders:
-        if cancel_pending_order(order['ticket']):
-            cancelled.append(order['ticket'])
-
-    print(f"Cancelled {len(cancelled)} pending orders")
+    for order in get_pending_orders(symbol=symbol, magic=magic):
+        ticket = order["ticket"]
+        try:
+            cancel_pending_order(ticket)
+        except MT5ConnectionError:
+            logging.error(f"Connection lost while cancelling pending orders; cancelled before it: {cancelled}")
+            raise
+        except (ValueError, MT5TransientError, MT5PermanentError) as e:
+            logging.error(f"Could not cancel pending order {ticket}: {e}")
+        else:
+            cancelled.append(ticket)
+    logging.info(f"Cancelled {len(cancelled)} pending order(s) for symbol={symbol}, magic={magic}")
     return cancelled
 
 
