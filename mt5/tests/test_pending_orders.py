@@ -1,9 +1,4 @@
-"""Pending-order queries: the magic filter and the failed-query contract.
-
-``mt5.orders_get`` filters by symbol/group/ticket only and accepts unknown keywords without complaint, so the old
-``orders_get(symbol=s, magic=m)`` returned every system's orders on ``s`` and ``cancel_all_pending_orders(s, m)``
-would have cancelled orders this system does not own.
-"""
+"""Pending-order queries: magic is filtered client-side and a failed query raises (see ``get_pending_orders``)."""
 from __future__ import annotations
 
 from collections import namedtuple

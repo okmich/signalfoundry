@@ -613,13 +613,14 @@ class GenericBasicStrategy(BaseMt5Strategy):
                 direction = "buy" if entries_long > 0  else ("sell" if entries_short > 0 else "hold")
                 tick = self.fetch_latest_tick_info()
 
-                # No tick at all already raised in fetch_symbol_tick_info. A tick can still carry a zero quote (no
-                # price yet this session): SpreadFilter blocks on that, but with no SpreadFilter configured the order
-                # went out at price 0.0. Skip the entry the same way here, whatever the filters are.
-                price = tick.get("ask") if direction == "buy" else tick.get("bid")
-                if not price or price <= 0:
+                # No tick at all already raised in fetch_symbol_tick_info, but a tick can still carry a zero quote
+                # (no price yet this session). SpreadFilter blocks on a zero bid OR ask; with no SpreadFilter the
+                # order went out at price 0.0. Require a two-sided quote here, whatever the filters are.
+                bid, ask = tick.get("bid") or 0.0, tick.get("ask") or 0.0
+                if bid <= 0 or ask <= 0:
                     logger.warning(f"Skipping {direction} entry for {_symbol} ({_magic}): no usable quote in {tick}")
                     return
+                price = ask if direction == "buy" else bid
 
                 # Check filters before opening position
                 filter_context = {

@@ -656,6 +656,9 @@ def cancel_all_pending_orders(symbol: Optional[str] = None, magic: Optional[int]
 
     Returns:
         List of cancelled order tickets
+
+    Raises:
+        DataFetchError: when the pending-order query itself fails (see ``get_pending_orders``)
     """
     orders = get_pending_orders(symbol=symbol, magic=magic)
     if not orders:

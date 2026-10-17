@@ -482,6 +482,7 @@ class TestGenericBasicStrategyFilterIntegration:
     @pytest.mark.parametrize("entries_long, entries_short, tick", [
         (1, 0, {"ask": 0.0, "bid": 1.0999}),
         (0, 1, {"ask": 1.1000, "bid": 0.0}),
+        (1, 0, {"ask": 1.1000, "bid": 0.0}),  # one-sided: the side not traded is the zero one
     ])
     def test_zero_quote_skips_entry(self, mock_all_mt5_functions, entries_long, entries_short, tick):
         """With no SpreadFilter to block it, a zero quote used to go out as an order at price 0.0."""
