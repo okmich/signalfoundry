@@ -179,7 +179,7 @@ Usage:
 from typing import Literal
 
 from keras import layers, models
-from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name
+from .common import TaskType, create_output_layer_and_loss, get_optimizer, get_model_name, causal_max_pooling_1d
 
 RNNType = Literal['gru', 'lstm']
 
@@ -280,8 +280,8 @@ def build_cnn_rnn(sequence_length=100, num_features=20, num_classes=3, task_type
         # Add skip connection from input
         x = layers.Add(name="residual_add")([inputs, x])
 
-    # MaxPooling to reduce sequence length
-    x = layers.MaxPooling1D(pool_size=pool_size, name="maxpool")(x)
+    # MaxPooling to reduce sequence length (windows aligned to the newest bar)
+    x = causal_max_pooling_1d(x, pool_size, name="maxpool")
 
     # RNN layer — return_sequences=False takes only the final hidden state.
     # Instead of GlobalAveragePooling1D over all timesteps, we use the RNN's
@@ -407,9 +407,9 @@ def build_deep_cnn_rnn(sequence_length=100, num_features=20, num_classes=3, task
         if use_batch_norm:
             x = layers.BatchNormalization(name=f"bn{i + 1}")(x)
 
-        # Add pooling after each conv block
+        # Add pooling after each conv block (windows aligned to the newest bar)
         if i < len(conv_filters) - 1:  # Don't pool after last conv
-            x = layers.MaxPooling1D(pool_size=pool_size, name=f"pool{i + 1}")(x)
+            x = causal_max_pooling_1d(x, pool_size, name=f"pool{i + 1}")
 
     # RNN layer — return_sequences=False takes only the final hidden state.
     if rnn_type == 'gru':
@@ -554,8 +554,8 @@ def build_cnn_rnn_tunable(hp, num_features, num_classes, task_type=TaskType.CLAS
     if use_residual and num_features == conv2_filters:
         x = layers.Add(name="residual")([inputs, x])
 
-    # Pooling
-    x = layers.MaxPooling1D(pool_size=pool_size, name="pool")(x)
+    # Pooling (windows aligned to the newest bar)
+    x = causal_max_pooling_1d(x, pool_size, name="pool")
 
     # RNN layer — return_sequences=False takes only the final hidden state.
     if rnn_type == 'gru':
