@@ -129,6 +129,24 @@ def create_output_layer_and_loss(x, task_type: TaskType, num_classes: int = None
     return output_layer, loss_fn, metrics_list
 
 
+def causal_max_pooling_1d(x, pool_size: int, name: str):
+    """
+    MaxPooling1D whose windows end on the newest timestep.
+
+    Valid pooling tiles windows from the oldest timestep and silently drops the trailing ``length % pool_size``
+    timesteps, which in a causal sequence are the newest bars. Cropping that many of the oldest timesteps first keeps
+    the newest bar inside the last window. When the length divides evenly no crop layer is added, so the model is
+    unchanged.
+    """
+    length = x.shape[1]
+    if length is None:
+        raise ValueError("causal_max_pooling_1d needs a static sequence length")
+    excess = length % pool_size
+    if excess:
+        x = layers.Cropping1D(cropping=(excess, 0), name=f"{name}_crop_oldest")(x)
+    return layers.MaxPooling1D(pool_size=pool_size, name=name)(x)
+
+
 def get_optimizer(optimizer_name: str, learning_rate: float, clipnorm: float = 1.0) -> keras.optimizers.Optimizer:
     optimizer_name = optimizer_name.lower()
     if optimizer_name == 'adam':
