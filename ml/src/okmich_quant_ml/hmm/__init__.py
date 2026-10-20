@@ -1,8 +1,9 @@
 from .factorial import FactorialHMM
 from .inference_cache import InferenceCache
+from .iohmm import InputDrivenTransitions, InputLikelihoodRatio, PomegranateIOHMM, input_likelihood_ratio_test
 from .pomegranate import PomegranateHMM, DistType
 from .pomegranate_mm import PomegranateMixtureHMM
-from .util import InferenceMode, SelectionCriterion, SelectionScores
+from .util import InferenceMode, InputTiming, SelectionCriterion, SelectionScores
 
 
 _REMOVED_HSMM_KWARGS: frozenset = frozenset({"duration_model", "duration_type", "max_duration"})
