@@ -6,7 +6,8 @@ import pandas as pd
 import pytest
 
 from okmich_quant_labelling.utils.regime_diagnostics import (Axis, LabelVerdict, TargetKey, build_clock,
-                                                            forward_separability, forward_targets, seasonal_cost)
+                                                            conditional_analysis, forward_separability,
+                                                            forward_targets, regime_diagnostics, seasonal_cost)
 from okmich_quant_labelling.utils.regime_diagnostics import synthetic as syn
 from okmich_quant_labelling.utils.regime_diagnostics.folds import walk_forward_folds
 from okmich_quant_labelling.utils.regime_diagnostics.null import DayLattice, episode_starts, mean_dwell
@@ -217,6 +218,64 @@ class TestForwardSeparability:
         expected = np.nanmean(d[oos & (label.to_numpy() == 1.0)])
         got = result.per_state.set_index("state").loc[1.0, "mean"]
         assert got == pytest.approx(expected)
+
+
+class TestUnmeasurableTargets:
+    """Horizons count bars. On 1h bars the 5m-sized defaults include spans that always cross the 4-hour roll."""
+
+    @staticmethod
+    def _hourly_case(seed=3):
+        rng = np.random.default_rng(seed)
+        index = syn.fx_index(320, spacing="1h")
+        states = syn.sticky_label(len(index), 2, 12, rng)
+        close = syn.simulate_close(index, rng, states=states, vol_mult=[1.0, 1.5])
+        return close, pd.Series(states.astype(float), index=index)
+
+    def test_targets_with_no_measurable_bar_are_dropped_with_a_warning(self):
+        close, label = self._hourly_case()
+        with pytest.warns(RuntimeWarning, match="Dropped"):
+            result = forward_separability(close, label, first_test_start="2019-10-01", min_train="180D", n_null=9,
+                                          n_boot=20)
+        tested = set(result.summary["target"])
+        assert {"direction_h24", "volatility_h24", "path_h12_L12", "path_h24_L12"}.isdisjoint(tested)
+        assert {"direction_h3", "volatility_h3", "path_h3_L12"} <= tested
+        assert any(w.startswith("Dropped") for w in result.meta["warnings"])
+
+    def test_the_factory_writes_its_report_on_hourly_bars(self, tmp_path):
+        close, label = self._hourly_case()
+        with pytest.warns(RuntimeWarning, match="Dropped"):
+            diag = regime_diagnostics(close, label, first_test_start="2019-10-01", min_train="180D", n_null=9,
+                                      n_boot=20, out_dir=tmp_path)
+        assert diag.report_path.exists() and "Dropped" in diag.story
+
+    def test_no_measurable_target_at_all_raises(self):
+        close, label = self._hourly_case()
+        with pytest.raises(ValueError, match="No forward target is measurable"):
+            forward_separability(close, label, first_test_start="2019-10-01", min_train="180D", axes=(Axis.DIRECTION,),
+                                 horizons=(24,), n_null=9, n_boot=20)
+
+
+def test_within_condition_leaves_thin_cells_out_of_the_statistic():
+    rng = np.random.default_rng(5)
+    index = syn.fx_index(320)
+    states = syn.sticky_label(len(index), 3, 36, rng)
+    close = syn.simulate_close(index, rng, states=states, vol_mult=[1.0, 1.3, 1.8])
+    label = pd.Series(states.astype(float), index=index)
+    in_b = np.zeros(len(index), dtype=bool)
+    in_b[states < 2] = rng.random(int((states < 2).sum())) < 0.5
+    in_b[np.flatnonzero(states == 2)[-20:]] = True  # stratum B holds only 20 bars of state 2: a thin cell
+    condition = pd.Series(np.where(in_b, "B", "A"), index=index, name="cond")
+
+    result = forward_separability(close, label, first_test_start="2019-10-01", min_train="180D",
+                                  axes=(Axis.VOLATILITY,), horizons=(3,), n_null=19, n_boot=20)
+    within = conditional_analysis(result, condition, n_null=19)
+    cells = within.within_states
+    thin = cells[(cells["condition"] == "cond=B") & (cells["state"] == 2.0)].iloc[0]
+    assert thin["n"] < 300 and not thin["tested"] and np.isnan(thin["t"])
+    tested = cells[cells["tested"]]
+    assert len(tested) == 5  # stratum A: three states; stratum B: states 0 and 1
+    row = within.within.set_index("target").loc["volatility_h3"]
+    assert row["cells_tested"] == 5 and row["statistic"] == pytest.approx((tested["t"] ** 2).sum())
 
 
 def test_seasonal_cost_profile_uses_only_the_fit_window():

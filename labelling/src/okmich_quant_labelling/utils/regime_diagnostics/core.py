@@ -1,6 +1,7 @@
 """forward_separability(): the walk-forward forward-separability test of a causal regime label (see README.md)."""
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -125,13 +126,14 @@ def forward_separability(close: pd.Series, label: pd.Series, *, first_test_start
         raise ValueError("label needs at least two states.")
 
     oos = np.concatenate([np.arange(f.test_start, f.test_end) for f in folds])
+    targets, axes, dropped_note = _drop_unmeasurable(targets, axes, oos, clock.spacing)
     fold_slices = _fold_slices(folds)
     fold_oos = np.concatenate([np.full(f.test_end - f.test_start, f.number) for f in folds])
     codes_oos = codes[oos]
     lattice = DayLattice.build(clock.trading_day[oos], clock.slot[oos], codes_oos)
 
     dwell = mean_dwell(codes_oos)
-    reach = max(horizons) + 2 * (dwell if np.isfinite(dwell) else 1)
+    reach = max(key.horizon for key in targets) + 2 * (dwell if np.isfinite(dwell) else 1)
     day_offsets = draw_offsets(lattice.n_days, max(1, int(np.ceil(reach / clock.bars_per_day))), n_null, rng)
     bar_offsets = draw_offsets(oos.size, max(int(np.ceil(reach)), clock.bars_per_day), n_null, rng)
 
@@ -172,6 +174,8 @@ def forward_separability(close: pd.Series, label: pd.Series, *, first_test_start
         f"Only {day_offsets.size} day rotations; Holm over {family} tests needs about {meta['required_B_for_holm']}. "
         "The best attainable p cannot clear the family-wise threshold: raise n_null, or lengthen the out-of-sample "
         f"span ({lattice.n_days} trading days caps the rotations)."]
+    if dropped_note:
+        meta["warnings"].append(dropped_note)
     per_state = pd.concat(per_state_rows, ignore_index=True)
     values = pd.DataFrame({"state": codes_oos, "fold": fold_oos}, index=close.index[oos])
     for key, prep in prepared.items():
@@ -550,6 +554,30 @@ def _merge_label_verdict(current: LabelVerdict, verdicts: pd.Series) -> LabelVer
 # ---------------------------------------------------------------------------------------------------------------
 # Inputs
 # ---------------------------------------------------------------------------------------------------------------
+
+def _drop_unmeasurable(targets: dict[TargetKey, np.ndarray], axes: tuple, oos: np.ndarray,
+                       spacing: pd.Timedelta) -> tuple[dict[TargetKey, np.ndarray], tuple, str | None]:
+    """Drop, with a warning, every target that has no measurable out-of-sample bar, and every axis left without a
+    target (so it gets no verdict rather than a FLAT it was never tested for). Returns the kept targets and axes and
+    the warning text (None when nothing was dropped).
+
+    Horizons and lookbacks count bars, and a span that always crosses an excluded clock window or a data gap is never
+    measurable: on 1h bars, a 24-bar horizon (or a 12-bar lookback plus a 12-bar horizon) always crosses the 4-hour
+    New York roll."""
+    empty = [key for key, y in targets.items() if not np.isfinite(y[oos]).any()]
+    if not empty:
+        return targets, axes, None
+    kept = {key: y for key, y in targets.items() if key not in empty}
+    names = ", ".join(map(str, empty))
+    if not kept:
+        raise ValueError(f"No forward target is measurable out of sample at {spacing} bars ({names}). Horizons and "
+                         "lookbacks count bars: pass shorter ones for this bar size.")
+    note = (f"Dropped {len(empty)} forward target(s) with no measurable out-of-sample bar at {spacing} bars: {names}. "
+            "Horizons and lookbacks count bars, and every such span crosses an excluded clock window or a data gap; "
+            "pass shorter ones for this bar size.")
+    warnings.warn(note, RuntimeWarning, stacklevel=3)
+    return kept, tuple(axis for axis in axes if any(key.axis == axis for key in kept)), note
+
 
 def _check_provenance(label_fit_end, index: pd.DatetimeIndex, folds: list[Fold], diagnostic: bool) -> bool:
     """True when the label was fitted on data at or after an out-of-sample fold start; raises unless diagnostic."""

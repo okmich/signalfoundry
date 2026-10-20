@@ -115,6 +115,8 @@ def distributions_chart(result) -> go.Figure:
         column = f"{row.target}|raw"
         for code, state in enumerate(states):
             part = values.loc[values["state"] == code, ["fold", column]].dropna()
+            if part.empty:  # a state with no measurable bar at this horizon has no box to draw
+                continue
             q = part.groupby("fold")[column].quantile([0.05, 0.25, 0.5, 0.75, 0.95]).unstack()
             starts = result.per_fold.drop_duplicates("fold").set_index("fold")["fold_start"].reindex(q.index)
             fig.add_trace(go.Box(x=starts, q1=q[0.25], median=q[0.5], q3=q[0.75], lowerfence=q[0.05],

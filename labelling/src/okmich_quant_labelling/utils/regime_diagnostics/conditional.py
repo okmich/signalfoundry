@@ -5,7 +5,8 @@
   This is "what do we expect next, given where we are".
 - Within-condition test: does the label still separate the forward law *inside* each condition stratum? Label effects
   are studentized within each stratum and summed; the null rotates the label by whole trading days while the
-  condition stays fixed, so a label that only proxies the condition is not credited.
+  condition stays fixed, so a label that only proxies the condition is not credited. Only (stratum, state) cells with
+  at least ``min_bars`` bars of the observed label enter, in the observed and the rotated statistic alike.
 """
 from __future__ import annotations
 
@@ -133,29 +134,43 @@ def _within_condition(values, targets, label_codes, cond_codes, cond_names, stat
     bars_per_day = int(np.ceil(len(label_codes) / lattice.n_days))
     offsets = draw_offsets(lattice.n_days, max(1, int(np.ceil(reach / bars_per_day))), n_null, rng)
 
-    def stratified(codes: np.ndarray, y: np.ndarray) -> list[Studentized | None]:
+    def cell_counts(y: np.ndarray) -> np.ndarray:
+        """(strata, states) bars of the observed label with a measurable target."""
+        ok = (cond_codes >= 0) & (label_codes >= 0) & np.isfinite(y)
+        counts = np.bincount(cond_codes[ok] * n_states + label_codes[ok], minlength=n_cond * n_states)
+        return counts.reshape(n_cond, n_states)
+
+    def stratified(codes: np.ndarray, y: np.ndarray, eligible: np.ndarray) -> list[Studentized | None]:
+        """Studentized one-vs-rest effects per stratum over the eligible (stratum, state) cells only. Eligibility is
+        fixed from the observed label, so the observed and the rotated statistics are the same function: a thin cell
+        (a handful of bars in one cluster) has a collapsed standard error and would dominate the sum of t^2."""
         out = []
         for c in range(n_cond):
-            in_stratum = (cond_codes == c) & (codes >= 0) & np.isfinite(y)
-            enough = np.bincount(codes[in_stratum], minlength=n_states)
-            out.append(Studentized.of(np.where(cond_codes == c, codes, -1), y, cluster, n_states, n_clusters)
-                       if (enough >= min_bars).sum() >= 2 else None)
+            if eligible[c].sum() < 2:
+                out.append(None)
+                continue
+            keep = (cond_codes == c) & (codes >= 0) & eligible[c][np.maximum(codes, 0)]
+            out.append(Studentized.of(np.where(keep, codes, -1), y, cluster, n_states, n_clusters))
         return out
 
     rows, state_rows = [], []
     columns = [f"{t}|primary" for t in targets if f"{t}|primary" in values.columns]
-    observed = {col: stratified(label_codes, values[col].to_numpy()) for col in columns}
+    counts = {col: cell_counts(values[col].to_numpy()) for col in columns}
+    eligible = {col: counts[col] >= min_bars for col in columns}
+    observed = {col: stratified(label_codes, values[col].to_numpy(), eligible[col]) for col in columns}
     null = {col: np.full((offsets.size, 1 + n_cond * n_states), np.nan) for col in columns}
     for b, offset in enumerate(offsets):
         rotated = lattice.rotate(int(offset))
         for col in columns:
-            parts = stratified(rotated, values[col].to_numpy())
+            parts = stratified(rotated, values[col].to_numpy(), eligible[col])
             null[col][b] = _flatten(parts, n_states)
 
     for col in columns:
         flat = _flatten(observed[col], n_states)
         p_omnibus = p_value(flat[0], null[col][:, 0])
         rows.append({"target": col.split("|")[0], "strata_tested": sum(p is not None for p in observed[col]),
+                     "cells_tested": int(sum(eligible[col][c].sum() for c, p in enumerate(observed[col])
+                                             if p is not None)),
                      "statistic": flat[0], "B": int(offsets.size), "p": p_omnibus})
         p_cells = np.array([p_value(abs(flat[1 + i]), np.abs(null[col][:, 1 + i])) for i in range(n_cond * n_states)])
         p_cells_holm = holm(p_cells)
@@ -163,7 +178,9 @@ def _within_condition(values, targets, label_codes, cond_codes, cond_names, stat
             part = observed[col][c]
             for s, state in enumerate(states):
                 i = c * n_states + s
+                tested = bool(part is not None and eligible[col][c, s])
                 state_rows.append({"target": col.split("|")[0], "condition": cond_name, "state": state,
+                                   "n": int(counts[col][c, s]), "tested": tested,
                                    "effect": part.effect[s] if part is not None else np.nan, "t": flat[1 + i],
                                    "p": p_cells[i], "p_holm": p_cells_holm[i]})
     within = pd.DataFrame(rows)
