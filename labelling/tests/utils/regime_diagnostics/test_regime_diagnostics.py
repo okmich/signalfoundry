@@ -255,6 +255,19 @@ class TestUnmeasurableTargets:
                                  horizons=(24,), n_null=9, n_boot=20)
 
 
+@pytest.mark.parametrize("stray_bar", [False, True])
+def test_the_factory_reports_an_axis_with_no_computable_test(tmp_path, stray_bar):
+    close, label = _small_case()
+    oos = label.index >= pd.Timestamp("2019-10-01", tz="UTC")
+    label[oos] = 0.0  # one state out of sample: every one-vs-rest t is undefined, so every Holm p is NaN
+    if stray_bar:
+        label.iloc[np.flatnonzero(oos)[100]] = 1.0  # a one-bar state has no standard error either
+    diag = regime_diagnostics(close, label, first_test_start="2019-10-01", min_train="180D", axes=(Axis.DIRECTION,),
+                              horizons=(6,), n_null=9, n_boot=20, out_dir=tmp_path)
+    assert diag.forward.label_verdicts[Axis.DIRECTION] == LabelVerdict.FLAT
+    assert "direction: no primary test is computable" in diag.story and diag.report_path.exists()
+
+
 def test_within_condition_leaves_thin_cells_out_of_the_statistic():
     rng = np.random.default_rng(5)
     index = syn.fx_index(320)

@@ -81,6 +81,8 @@ Every baseline is refitted per fold, on train data only, with a per-horizon purg
 - Per state: `flat`, `unstable`, `separable`, `actionable` or `insufficient`.
 - Per label and axis: `KEEP`, `SEPARABLE-ONLY` or `FLAT`. `FLAT` ("no personality") is a classification outcome,
   not a failure.
+- An axis with no computable primary test (out of sample the label stays in one state, or its other states are too
+  thin for a standard error) is `FLAT`, and the story says it was untested.
 - `actionable`, for direction and path: the 90% one-sided block-bootstrap bound clears cost. For volatility: the
   ratio bound is ≥ 1.25 or ≤ 0.80.
 - Stability: the effect has the same sign in ≥ 2/3 of folds, and no single fold carries more than max(0.5, 2/F) of
