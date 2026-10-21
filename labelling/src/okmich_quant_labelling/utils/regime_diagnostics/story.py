@@ -150,6 +150,11 @@ def _verdicts(forward) -> list[str]:
     text = ["Verdicts (they summarise the distributions above): "
             + ", ".join(f"{axis} {verdict}" for axis, verdict in forward.label_verdicts.items()) + "."]
     for axis, rows in s.groupby("axis", sort=False):
+        rows = rows.dropna(subset=["p_holm"])
+        if rows.empty:  # every t undefined: one state out of sample, or the others too thin for a standard error
+            text.append(f"  {axis}: no primary test is computable (out of sample the label has no two states with a "
+                        f"standard error), so its FLAT means untested.")
+            continue
         best = rows.loc[rows["p_holm"].idxmin()]
         text.append(f"  {axis}: best primary test h={best['horizon']}, Holm p {best['p_holm']:.3f}, "
                     f"eta2 {best['eta2']:.2e}.")

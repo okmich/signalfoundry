@@ -70,6 +70,25 @@ class SelectionCriterion(StrEnum):
     ICL = "icl"
 
 
+class InputTiming(StrEnum):
+    """
+    When a ``PomegranateIOHMM`` input value becomes known, relative to the bar whose row it sits on.
+
+    The transition from bar ``t - 1`` into bar ``t`` is governed by the *effective* input row ``t``, which must be
+    known by the close of bar ``t - 1``. That makes the filtered posterior at ``t`` and the one-step state forecast
+    for ``t + 1`` both causal.
+
+    - KNOWN_AHEAD: the value on row ``t`` is known before bar ``t`` opens (clock, calendar, scheduled events). It is
+      used as given: row ``t`` drives the transition into ``t``.
+    - AT_BAR_CLOSE: the value on row ``t`` is only known once bar ``t`` closes (anything computed from bar ``t``'s
+      prices, e.g. a volatility ratio). The model shifts it by one bar within each sequence, so raw row ``t`` drives
+      the transition into ``t + 1``. Pass the raw series; never pre-shift it as well.
+    """
+
+    KNOWN_AHEAD = "known_ahead"
+    AT_BAR_CLOSE = "at_bar_close"
+
+
 def as_selection_criterion(value: "SelectionCriterion | str") -> SelectionCriterion:
     """Coerce a criterion given as an enum member or its string value; an unknown value raises, naming the allowed."""
     try:
