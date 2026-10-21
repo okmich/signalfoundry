@@ -1,3 +1,4 @@
+from .coupled import CoupledHMM
 from .factorial import FactorialHMM
 from .inference_cache import InferenceCache
 from .pomegranate import PomegranateHMM, DistType
