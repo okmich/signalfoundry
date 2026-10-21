@@ -40,6 +40,11 @@ summarise them.
 A window that touches an excluded span is dropped. By default that is the New York 16:00–20:00 roll, where FX
 5m bars carry spread artefacts.
 
+Horizons and the path lookback count **bars**, and the defaults are sized for 5m bars. On slower bars, pass
+clock-equivalent values (on 1h bars, e.g. `horizons=(3, 6, 12)`, `lookbacks=(3,)`). A target with no measurable
+out-of-sample bar is dropped with a warning (also listed in `meta["warnings"]` and the story), and an axis left with
+no target gets no verdict. On 1h bars, a span longer than 20 bars always crosses the 4-hour roll window.
+
 ## Layers: what "beyond" means
 
 | Layer | Baseline removed | Null |
@@ -63,6 +68,10 @@ Every baseline is refitted per fold, on train data only, with a per-horizon purg
   statistic is a one-vs-rest t with 5-trading-day cluster standard errors; the omnibus is Σt². η² is reported as
   the effect size only.
 - **Multiple testing:** Holm across axis × horizon (the primary family), and separately across the tail family.
+- **Within-condition test:** only (condition stratum, label state) cells with at least `min_bars` measurable bars of
+  the observed label enter the sum of t², and the rotations use the same cells. A thin cell, with a handful of bars
+  in one cluster, has a collapsed standard error and would otherwise dominate the statistic. `within_states` reports
+  each cell's `n` and whether it was `tested`.
 - **Bands:** moving-block bootstrap over trading days (5-day blocks). Quantile bands use per-day histograms.
   - The bands hold the label fixed, so they understate slow persistence.
   - When a band excludes zero but the rotation null does not reject, the null decides, and the story says so.
@@ -72,6 +81,8 @@ Every baseline is refitted per fold, on train data only, with a per-horizon purg
 - Per state: `flat`, `unstable`, `separable`, `actionable` or `insufficient`.
 - Per label and axis: `KEEP`, `SEPARABLE-ONLY` or `FLAT`. `FLAT` ("no personality") is a classification outcome,
   not a failure.
+- An axis with no computable primary test (out of sample the label stays in one state, or its other states are too
+  thin for a standard error) is `FLAT`, and the story says it was untested.
 - `actionable`, for direction and path: the 90% one-sided block-bootstrap bound clears cost. For volatility: the
   ratio bound is ≥ 1.25 or ≤ 0.80.
 - Stability: the effect has the same sign in ≥ 2/3 of folds, and no single fold carries more than max(0.5, 2/F) of
