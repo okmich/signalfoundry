@@ -14,8 +14,13 @@ dependencies = [
     "pandas==2.3.0",
     "pyarrow==20.0.0",
     "tables==3.10.2",
-    "python-dotenv==1.1.1"
+    "python-dotenv==1.1.1",
+
+    "holidays==0.94"
 ]
+
+[project.scripts]
+raw-data-audit = "okmich_quant_utils.ohlc_audit.cli:main"
 
 [tool.uv.sources]
 okmich-quant-core = { workspace = true }
