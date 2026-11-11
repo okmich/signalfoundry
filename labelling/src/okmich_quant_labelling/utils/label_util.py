@@ -12,18 +12,20 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
                                  method: str = "conservative", min_samples: int = 30, confidence_level: float = 0.95,
                                  mapping_dict: Optional[Dict[Any, int]] = None, min_sharpe: float = 0.3,
                                  cost_threshold: Optional[float] = None, horizon: int = 1,
-                                 cluster_size: Optional[int] = None, force_distinct_signs: bool = False,
+                                 cluster_size: Optional[int] = None, force_distinct_signs: bool = True,
                                  return_diagnostics: bool = False,
                                  **kwargs) -> Dict[Any, int] | Tuple[Dict[Any, int], pd.DataFrame]:
     """
     Map states (HMM states, cluster ids, rule labels) to trade directions in {-1, 0, 1}.
 
-    - A state gets a sign only when its method's criteria pass; otherwise it gets 0 (no trade).
+    - GUARANTEE (default): n states -> min(n, 3) distinct signs. When the method's criteria sign fewer, the states are
+      ranked by mean and given -1/0/+1 (``fallback`` = True in the diagnostics). On intraday bars the per-bar tests
+      rarely pass, so without the ranking nearly every map is all 0.
+    - A fallback sign is a rank, not evidence: ``test_direction`` keeps the method's own verdict. Pass
+      ``force_distinct_signs=False`` to get only the states the test signs.
     - The significance test is a cluster-robust t-test (see ``cluster_size``), so overlapping forward returns and
       serial dependence do not inflate it. An iid t-test on overlapping 12-bar forward returns flags about 60% of
       no-drift states.
-    - ``force_distinct_signs=True`` restores the old ranking fallback (min(n, 3) distinct signs whatever the test
-      says). A fallback sign is a rank, not evidence.
     - Rows of ``df`` are taken to be in time order.
 
     Parameters
@@ -66,9 +68,10 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
         Rows per cluster (consecutive rows of ``df``) for the cluster-robust t-test; inference uses a t distribution
         with (clusters - 1) degrees of freedom. Default max(20 * horizon, ceil(sqrt(len(df)))), capped so there
         are at least 20 clusters (never below ``horizon``); on short samples the test then runs mildly liberal.
-    force_distinct_signs : bool, default=False
-        If True and the method signs fewer than min(n, 3) distinct directions, rank the states by mean and assign
-        -1/0/+1 anyway (``fallback`` = True in the diagnostics). Never applied to a supplied ``mapping_dict``.
+    force_distinct_signs : bool, default=True
+        If the method signs fewer than min(n, 3) distinct directions, rank the states by mean and assign -1/0/+1
+        (``fallback`` = True in the diagnostics). False leaves the test's verdict alone. Never applied to a supplied
+        ``mapping_dict``.
     return_diagnostics : bool, default=False
         If True, returns (mapping, diagnostics_df) for debugging
         If False, returns only mapping dict
@@ -333,9 +336,9 @@ def map_label_to_trend_direction(df: pd.DataFrame, state_col: str = "state", ret
     stats_df["test_direction"] = stats_df["direction"]
     stats_df["fallback"] = False
 
-    # ========== OPT-IN: n states → min(n, 3) distinct signs ==========
-    # Only on request: a ranking fallback overrides the test. Never on a supplied map: that would re-rank its states
-    # on ``df``, which is usually the evaluation block.
+    # ========== GUARANTEE (default): n states → min(n, 3) distinct signs ==========
+    # The ranking fallback overrides the test unless force_distinct_signs=False. Never on a supplied map: that would
+    # re-rank its states on ``df``, which is usually the evaluation block.
     valid_states = stats_df[~stats_df["insufficient_data"]]
     n_valid_states = len(valid_states)
 

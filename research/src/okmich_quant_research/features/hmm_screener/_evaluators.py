@@ -209,7 +209,7 @@ def evaluate_direction(*, gamma: NDArray, state_labels: NDArray, raw_data: pd.Da
 
     mapping, diag = map_label_to_trend_direction(fwd_df, state_col="state", return_col="returns",
                                                  method="conservative", horizon=primary_horizon,
-                                                 return_diagnostics=True)
+                                                 force_distinct_signs=False, return_diagnostics=True)
     if _diag_is_empty(diag, "median"):
         return AxisEvaluation(0.0, 0.0, "n_significant_states",
                               raw_details={"error": "map_label_to_trend_direction returned no diagnostics",
