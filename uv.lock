@@ -2938,6 +2938,7 @@ version = "0.6.0"
 source = { editable = "utils" }
 dependencies = [
     { name = "h5py" },
+    { name = "holidays" },
     { name = "imageio" },
     { name = "ml-dtypes" },
     { name = "okmich-quant-core" },
@@ -2951,6 +2952,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "h5py", specifier = "==3.14.0" },
+    { name = "holidays", specifier = "==0.94" },
     { name = "imageio", specifier = "==2.37.0" },
     { name = "ml-dtypes", specifier = "==0.5.3" },
     { name = "okmich-quant-core", editable = "core" },
