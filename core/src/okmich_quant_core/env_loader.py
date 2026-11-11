@@ -5,6 +5,32 @@ from typing import Optional
 from dotenv import load_dotenv
 import argparse
 
+#: Machine-level variable naming the folder that holds every broker ``.env.<broker>.<account>`` file
+#: (docs/ops/OPS_REFERENCE_GUIDE.md, App. B).
+ENV_DIR_VAR = "OKMICH_QUANT_ENV_DIR"
+
+
+class EnvDirNotConfiguredError(RuntimeError):
+    """``OKMICH_QUANT_ENV_DIR`` is unset or not a folder, and no explicit env folder was given."""
+
+
+def resolve_env_dir(base_dir: Optional[str | Path] = None) -> Path:
+    """Folder holding the broker ``.env.<broker>.<account>`` files.
+
+    An explicit ``base_dir`` wins (tests, one-off overrides). Otherwise ``OKMICH_QUANT_ENV_DIR`` is required: there is
+    no fallback to the working directory or a repo folder, because an unset variable means the machine is not set up.
+    """
+    if base_dir:
+        return Path(base_dir)
+    value = os.environ.get(ENV_DIR_VAR, "").strip()
+    if not value:
+        raise EnvDirNotConfiguredError(f"{ENV_DIR_VAR} is not set: this machine is not set up for okmich_quant "
+                                       f"(it must name the folder holding the .env.<broker>.<account> files)")
+    path = Path(value)
+    if not path.is_dir():
+        raise EnvDirNotConfiguredError(f"{ENV_DIR_VAR}={value} is not an existing folder")
+    return path
+
 
 class EnvLoader:
     """
@@ -13,10 +39,12 @@ class EnvLoader:
     Naming convention for env files:
     - .env.{broker}.{account_type}
     - Examples: .env.deriv.demo, .env.icmarkets.live
+
+    Files are looked up in ``OKMICH_QUANT_ENV_DIR`` unless ``base_dir`` is given (see :func:`resolve_env_dir`).
     """
 
-    def __init__(self, base_dir: Optional[str] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path.cwd()
+    def __init__(self, base_dir: Optional[str | Path] = None):
+        self.base_dir = resolve_env_dir(base_dir)
 
     def load(self, broker: str, account_type: str = "demo", override: bool = True) -> bool:
         env_file = self.base_dir / f".env.{broker}.{account_type}"
@@ -119,7 +147,8 @@ def load_broker_env(
     Args:
         broker: Broker name. If None, tries to load from command line args or env var
         account_type: Account type ('demo' or 'live')
-        base_dir: Base directory for .env files
+        base_dir: Folder holding the .env files (default: ``OKMICH_QUANT_ENV_DIR``; unset raises
+            :class:`EnvDirNotConfiguredError`)
         auto: If True, automatically tries command line args, then env var
 
     Returns:

@@ -23,7 +23,7 @@ from typing import List, Dict, Any, Union
 
 import MetaTrader5 as mt5
 
-from okmich_quant_core.env_loader import load_broker_env, EnvLoader
+from okmich_quant_core.env_loader import load_broker_env, EnvDirNotConfiguredError, EnvLoader
 from okmich_quant_mt5.utils.mt5_data_fetcher import MT5MarketDataFetcher, WriteMode
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class MarketDataDownloader:
         Args:
             broker: Broker name (e.g., 'deriv', 'icmarkets')
             account_type: Account type ('demo' or 'live')
-            base_dir: Base directory for .env files (defaults to current working directory)
+            base_dir: Folder holding the .env files (default: OKMICH_QUANT_ENV_DIR; unset raises EnvDirNotConfiguredError)
             auto_load: If True and broker is None, auto-detect from environment/CLI (not recommended for production)
         """
         self.broker = broker
@@ -91,6 +91,8 @@ class MarketDataDownloader:
             logger.info(f"Environment loaded: {os.getenv('BROKER_NAME', self.broker)} {os.getenv('ACCOUNT_TYPE', self.account_type)}")
             return True
 
+        except EnvDirNotConfiguredError:
+            raise  # machine not set up: fail loudly instead of downloading nothing
         except Exception as e:
             logger.error(f"Error loading environment: {e}")
             return False
@@ -292,16 +294,16 @@ Examples:
       --symbols "EURUSD,GBPUSD,USDJPY" --timeframes "M5,H1,D1" \\
       --start-date 2023-01-01 --output ./my_data
 
-  # Use custom directory for .env files
+  # .env files are read from $OKMICH_QUANT_ENV_DIR; override it for one run
   fetch-mt5-data --broker deriv --account demo \\
       --symbols EURUSD --timeframe H1 \\
       --env-dir /path/to/env/files
 
-  # List available broker configurations
+  # List available broker configurations (in $OKMICH_QUANT_ENV_DIR)
   fetch-mt5-data --list-brokers
 
-  # List brokers from custom directory
-  fetch-mt5-data --list-brokers --env-dir ./playground/systems
+  # List brokers from another directory
+  fetch-mt5-data --list-brokers --env-dir /path/to/env/files
         """,
     )
 
@@ -312,13 +314,16 @@ Examples:
     parser.add_argument("--start-date", type=str, default="2020-01-01", help="Start date (format: YYYY-MM-DD, default: 2020-01-01)")
     parser.add_argument("--output", type=str, default="./market_data", help="Output directory (default: ./market_data)")
     parser.add_argument("--format", type=str, default="parquet", choices=[m.value for m in WriteMode], help="Storage format (default: parquet)")
-    parser.add_argument("--env-dir", type=str, default=None, help="Directory containing .env files (default: current directory)")
+    parser.add_argument("--env-dir", type=str, default=None, help="Directory containing .env files (default: $OKMICH_QUANT_ENV_DIR)")
     parser.add_argument("--list-brokers", action="store_true", help="List available broker configurations")
 
     args = parser.parse_args()
 
     if args.list_brokers:
-        MarketDataDownloader.list_available_brokers(base_dir=args.env_dir)
+        try:
+            MarketDataDownloader.list_available_brokers(base_dir=args.env_dir)
+        except EnvDirNotConfiguredError as e:
+            sys.exit(f"fetch-mt5-data: {e}")
         return
 
     if not args.broker:
@@ -336,7 +341,10 @@ Examples:
         parser.error("--timeframe produced no valid timeframes after parsing")
     write_mode = WriteMode(args.format)
 
-    downloader = MarketDataDownloader(args.broker, args.account, base_dir=args.env_dir)
+    try:
+        downloader = MarketDataDownloader(args.broker, args.account, base_dir=args.env_dir)
+    except EnvDirNotConfiguredError as e:
+        sys.exit(f"fetch-mt5-data: {e}")
 
     if len(timeframes) == 1:
         results = downloader.download(symbols=symbols, timeframe=timeframes[0], start_date=args.start_date, output_dir=args.output, write_mode=write_mode)
