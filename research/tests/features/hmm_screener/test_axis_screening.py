@@ -252,8 +252,8 @@ def _drift_frame(drifts: tuple[float, ...], block: int = 300, seed: int = 9) -> 
 
 def test_driftless_states_count_zero_significant_and_trade_flat():
     """Measured 2026-10-08 on four FXPIG symbols: no state passed the conservative test in 87-99% of directional
-    subsets, yet every one reported 2, because the mapper's ranking fallback signed two of three states. The fallback
-    is now opt-in, so the mapping itself stays flat too."""
+    subsets, yet every one reported 2, because the mapper's ranking fallback signed two of three states. The screener
+    turns the fallback off, so the mapping itself stays flat too."""
     raw, labels = _drift_frame((0.0, 0.0, 0.0))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

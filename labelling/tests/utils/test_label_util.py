@@ -465,24 +465,25 @@ class TestMapLabelToTrendDirection:
 
     # ========== TEST THE PRE-FALLBACK VERDICT ==========
 
-    def test_driftless_states_stay_flat_by_default(self):
-        """Three states with no drift: the conservative test signs none, and no fallback overrides it."""
+    def test_driftless_states_stay_flat_when_the_fallback_is_off(self):
+        """``force_distinct_signs=False``: the conservative test signs none of three driftless states, and no
+        fallback overrides it."""
         rng = np.random.default_rng(3)
         df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
+            mapping, diag = map_label_to_trend_direction(df, method="conservative", force_distinct_signs=False,
+                                                         return_diagnostics=True)
         assert mapping == {0: 0, 1: 0, 2: 0}
         assert not diag["fallback"].any()
 
-    def test_driftless_states_are_ranked_only_on_request(self):
-        """``force_distinct_signs=True``: the fallback ranks them -1/0/+1 anyway. ``direction`` carries the rank;
-        ``test_direction`` keeps the test's own verdict (all 0)."""
+    def test_driftless_states_are_ranked_by_default(self):
+        """Default: the fallback ranks them -1/0/+1 anyway. ``direction`` carries the rank; ``test_direction`` keeps
+        the test's own verdict (all 0)."""
         rng = np.random.default_rng(3)
         df = pd.DataFrame({"state": np.repeat([0, 1, 2], 400), "returns": rng.normal(0.0, 0.001, 1200)})
         with pytest.warns(UserWarning, match="ranking fallback"):
-            mapping, diag = map_label_to_trend_direction(df, method="conservative", force_distinct_signs=True,
-                                                         return_diagnostics=True)
+            mapping, diag = map_label_to_trend_direction(df, method="conservative", return_diagnostics=True)
         assert sorted(mapping.values()) == [-1, 0, 1]
         assert (diag["test_direction"] == 0).all()
         assert diag["fallback"].all()
