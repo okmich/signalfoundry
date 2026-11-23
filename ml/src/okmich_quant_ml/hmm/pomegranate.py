@@ -6,7 +6,7 @@ from pomegranate.hmm import DenseHMM
 from typing import Optional, Sequence
 
 from .base_pomegranate import BasePomegranateHMM
-from .distribution import Lambda
+from .distribution import Lambda, lambda_kwargs
 from .util import InferenceMode, DistType, SelectionCriterion, as_selection_criterion
 
 
@@ -239,7 +239,7 @@ class PomegranateHMM(BasePomegranateHMM):
             case DistType.GAMMA:
                 return Gamma(dtype=torch.float64)
             case DistType.LAMDA:
-                return Lambda(dtype=torch.float64)
+                return Lambda(dtype=torch.float64, **lambda_kwargs(self.dist_kwargs))
             case DistType.LOGNORMAL:
                 mu_start = rng.normal(0.0, 1.0)
                 sigma_start = rng.uniform(0.2, 1.0)

@@ -1,1 +1,1 @@
-from ._lambda import Lambda
+from ._lambda import LAMBDA_KWARGS, Lambda, lambda_kwargs
