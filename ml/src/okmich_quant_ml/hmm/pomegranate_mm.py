@@ -11,7 +11,7 @@ from pomegranate.hmm import DenseHMM
 from typing import Optional, Sequence
 
 from .base_pomegranate import BasePomegranateHMM
-from .distribution import Lambda
+from .distribution import Lambda, lambda_kwargs
 from .util import DistType, InferenceMode, SelectionCriterion, as_selection_criterion
 
 
@@ -430,7 +430,7 @@ class PomegranateMixtureHMM(BasePomegranateHMM):
             case DistType.EXPONENTIAL:
                 return Exponential(dtype=torch.float64)
             case DistType.LAMDA:
-                return Lambda(dtype=torch.float64)
+                return Lambda(dtype=torch.float64, **lambda_kwargs(self.dist_kwargs))
             case _:
                 raise ValueError(
                     f"Distribution type {self.distribution_type} not supported for mixture models"
