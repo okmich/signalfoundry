@@ -107,7 +107,7 @@ class BasePomegranateHMM(ABC):
         _FIT_MAX_RETRIES times with perturbed random seeds. This is common
         with mixture emissions on near-collinear or low-variance features.
         """
-        X_list = self._split_sequences(X, lengths)
+        X_list = self._split_sequences(X, lengths, min_length=2)
         X_all = X if isinstance(X, np.ndarray) else np.vstack(X_list)
 
         # Validate input before expensive EM iterations
@@ -178,13 +178,20 @@ class BasePomegranateHMM(ABC):
 
     @staticmethod
     def _fitted_log_prob(model, X_list) -> float:
-        """Total training log-likelihood of a fitted DenseHMM over the sequence list (restart score)."""
-        lp = model.log_probability(X_list)
-        if hasattr(lp, "sum"):
-            lp = lp.sum()
-        if hasattr(lp, "item"):
-            lp = lp.item()
-        return float(lp)
+        """Total training log-likelihood of a fitted DenseHMM over the sequence list (restart score).
+
+        Scored one sequence at a time: pomegranate needs a homogeneous batch, so a single call over sequences of
+        unequal length fails (and joining them would score transitions across the sequence boundaries).
+        """
+        total = 0.0
+        for x in X_list:
+            lp = model.log_probability([x])
+            if hasattr(lp, "sum"):
+                lp = lp.sum()
+            if hasattr(lp, "item"):
+                lp = lp.item()
+            total += float(lp)
+        return total
 
     @staticmethod
     def _is_covariance_error(e: Exception) -> bool:
@@ -295,11 +302,15 @@ class BasePomegranateHMM(ABC):
         """
         Posterior state probabilities: shape (n_samples, n_states).
 
-        (Formerly misnamed ``log_likelihood``.)
+        (Formerly misnamed ``log_likelihood``.) Returned as a numpy array (it used to leak pomegranate's torch Tensor).
         """
         if self._model is None:
             raise RuntimeError("Model has not been fitted yet.")
-        return self._model.predict_proba([X])
+        proba = self._model.predict_proba([X])
+        if hasattr(proba, "detach"):
+            proba = proba.detach().cpu().numpy()
+        proba = np.asarray(proba, dtype=np.float64)
+        return proba[0] if proba.ndim == 3 else proba
 
     def log_likelihood(self, X: np.ndarray) -> float:
         """
@@ -1267,14 +1278,32 @@ class BasePomegranateHMM(ABC):
 
         return {"centroids": centroids, "covs_full": covs_full, "covs_diag": covs_diag}
 
-    def _split_sequences(self, X: np.ndarray, lengths: Optional[Sequence[int]]):
-        """Convert concatenated X + lengths into list of arrays."""
-        if lengths is None:
-            return [X]
+    def _split_sequences(self, X: np.ndarray, lengths: Optional[Sequence[int]], min_length: int = 1):
+        """Convert concatenated X + lengths into a list of arrays.
 
+        ``lengths`` must be positive integers summing exactly to ``len(X)``: a shorter total used to drop the remaining
+        rows silently. ``min_length=2`` is used when fitting, because pomegranate cannot fit a one-observation
+        sequence (it fails with a tensor reshape error); drop or merge such sequences first.
+        """
+        n = len(X)
+        if lengths is None:
+            if n < min_length:
+                raise ValueError(f"X has {n} observation(s); fitting needs a sequence of at least {min_length}")
+            return [X]
+        raw = np.asarray(list(lengths), dtype=np.float64)
+        if raw.ndim != 1 or not np.all(np.isfinite(raw)) or np.any(raw != np.floor(raw)):
+            raise ValueError(f"lengths must be whole numbers, got {list(lengths)}")
+        lengths = [int(l) for l in raw]
+        if any(l < 1 for l in lengths) or sum(lengths) != n:
+            raise ValueError(f"lengths must be positive and sum to the {n} rows of X, got {lengths} (sum "
+                             f"{sum(lengths)})")
+        short = [k for k, l in enumerate(lengths) if l < min_length]
+        if short:
+            raise ValueError(f"Sequences {short} have fewer than {min_length} observations; pomegranate cannot fit a "
+                             f"one-observation sequence. Drop or merge them before fitting.")
         start, seqs = 0, []
         for l in lengths:
-            seqs.append(X[start : start + l])
+            seqs.append(X[start: start + l])
             start += l
         return seqs
 

@@ -1,108 +1,112 @@
 """
-Hierarchical HMM — macro-regime (Run / Reversal) x event-time microstructure.
+Hierarchical hidden Markov models.
 
-Native pomegranate implementation: the 3-level Tayal/Wisebourt HHMM is reduced (Murphy 2002 DBN
-flattening) to a flat 4-state ``DenseHMM`` with a masked transition matrix. EM preserves the hard
-structural zeros, so all of ``BasePomegranateHMM`` (fixed-lag, forward-backward, drift log-lik,
-serialisation) is reused and FILTER / FIXED_LAG / SMOOTHER, mixtures and pluggable emission
-distributions come for free.
+- ``engine``: a general HHMM. Any state tree (entry, horizontal and exit parameters per internal node, structural
+  zeros anywhere), exact inference by flattening onto the leaves, EM on the tree's own parameters, exit schedules
+  (forbid / force exits per depth and bar), categorical / Gaussian / Student-t emissions tied at any level, and
+  causal (filter, online Viterbi) and hindsight (smoother, fixed-lag, Viterbi) decoders.
+- ``inputs``: observation builders. Zigzag legs of a configurable size (``LegThreshold``) and per-leg features
+  (Tayal's structure and volume, leg size, BOCPD break intensity, signed volume) combined by a ``SymbolEncoder``.
+- ``flavours``: paper presets on the engine. ``TayalHHMM`` (Tayal 2009), ``joint_multiscale``, ``embedded_hhmm``
+  (Adam et al. 2019) and ``legacy_model`` (the removed 2026-07 build, a masked flat HMM, for parity and old files).
+
+Every model here duck-types ``BasePomegranateHMM`` (``predict_proba``, ``predict_proba_fixed_lag``,
+``compute_per_bar_predictive_loglik``, ``save`` / ``load`` ...) with the leaves as its states, so it plugs into
+``HmmModelWrapper`` and the posterior-inference stack; ``*_level`` methods read any tree level.
 """
 from __future__ import annotations
 
-from .config import (
-    ALPHABET_SIZE,
-    N_STATES,
-    AssetGroup,
-    AssetGroupConfig,
-    FlowBucket,
-    FlowFeatureKind,
-    HHMMLevel,
-    MacroRegime,
-    PosteriorMode,
-    RefitCadenceUnit,
-    SessionPolicy,
-    TrendStrength,
-    ZigzagDirection,
-    all_asset_group_configs,
-    decode_symbol,
-    encode_symbol,
-    get_asset_group_config,
+from .engine import (
+    HHMM,
+    CategoricalEmission,
+    CovarianceType,
+    ExitMode,
+    ExitSchedule,
+    FitReport,
+    GaussianEmission,
+    LeafEmission,
+    StateNode,
+    StudentTEmission,
+    Topology,
 )
-from .observations import (
-    BOCPDFlowFeature,
-    FlowFeature,
+from .flavours import (
+    BarLayout,
+    BlockUnit,
+    EmissionFamily,
+    FlowInput,
+    RegimeLabel,
+    TayalHHMM,
+    TrendInput,
+    block_ids,
+    block_schedule,
+    embedded_hhmm,
+    joint_multiscale,
+    legacy_block_posterior,
+    legacy_model,
+    tayal_tree,
+)
+from .inputs import (
+    LegThreshold,
     MarketData,
-    SignedVolumeFlowFeature,
+    SymbolEncoder,
+    ThresholdMode,
     Zigzag,
-    ZigzagObservationPipeline,
-    ZigzagObservations,
+    ZigzagDirection,
+    ZigzagLegBuilder,
     aggregate_zigzags,
-    build_flow_feature,
     calibrate_k,
     events_per_hour,
+    leg_feature_frame,
+    legs_confirmed_from,
+    legs_to_bars,
+    observed_hours,
     realized_vol,
     vol_scaled_threshold,
 )
-from .hhmm import (
-    HierarchicalHMM,
-    build_transition_mask,
-    state_block,
-    state_direction,
-)
-from .persistence import (
-    HHMM_SCHEMA_VERSION,
-    from_param_dict,
-    load_model,
-    load_param_dict,
-    save_model,
-    save_param_dict,
-    to_param_dict,
-)
 
 __all__ = [
-    # config
-    "ALPHABET_SIZE",
-    "N_STATES",
-    "AssetGroup",
-    "AssetGroupConfig",
-    "FlowBucket",
-    "FlowFeatureKind",
-    "HHMMLevel",
-    "MacroRegime",
-    "PosteriorMode",
-    "RefitCadenceUnit",
-    "SessionPolicy",
-    "TrendStrength",
-    "ZigzagDirection",
-    "all_asset_group_configs",
-    "decode_symbol",
-    "encode_symbol",
-    "get_asset_group_config",
-    # observations
-    "BOCPDFlowFeature",
-    "FlowFeature",
+    # engine
+    "HHMM",
+    "CategoricalEmission",
+    "CovarianceType",
+    "ExitMode",
+    "ExitSchedule",
+    "FitReport",
+    "GaussianEmission",
+    "LeafEmission",
+    "StateNode",
+    "StudentTEmission",
+    "Topology",
+    # inputs
+    "LegThreshold",
     "MarketData",
-    "SignedVolumeFlowFeature",
+    "SymbolEncoder",
+    "ThresholdMode",
     "Zigzag",
-    "ZigzagObservationPipeline",
-    "ZigzagObservations",
+    "ZigzagDirection",
+    "ZigzagLegBuilder",
     "aggregate_zigzags",
-    "build_flow_feature",
     "calibrate_k",
     "events_per_hour",
+    "leg_feature_frame",
+    "legs_confirmed_from",
+    "legs_to_bars",
+    "observed_hours",
     "realized_vol",
     "vol_scaled_threshold",
-    # hhmm
-    "HierarchicalHMM",
-    "build_transition_mask",
-    "state_block",
-    "state_direction",
-    # persistence
-    "HHMM_SCHEMA_VERSION",
-    "from_param_dict",
-    "to_param_dict",
-    "save_param_dict",
-    "load_param_dict",
-    "save_model",
-    "load_model",
+    # flavours
+    "BarLayout",
+    "BlockUnit",
+    "EmissionFamily",
+    "FlowInput",
+    "RegimeLabel",
+    "TayalHHMM",
+    "TrendInput",
+    "block_ids",
+    "block_schedule",
+    "embedded_hhmm",
+    "joint_multiscale",
+    "legacy_block_posterior",
+    "legacy_model",
+    "tayal_tree",
 ]
