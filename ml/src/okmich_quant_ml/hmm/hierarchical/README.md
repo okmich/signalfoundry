@@ -119,8 +119,10 @@ likelihoods and selection scores are per leg; `compute_per_bar_predictive_loglik
 density on its confirmation bar (0 elsewhere). Prices must reach it unscaled (an identity transform pipeline), and the
 bounded-window lag sweep is not supported (pass `window_size=None` to `compute_trajectories`).
 
-`HmmModelWrapper` passes `.values`, so a numpy matrix has no timestamps and its bars get a regular `bar_interval`
-clock. That is exact only when the configuration never reads the clock (`reads_the_clock` is False): structure trend,
-no flow or `VolumeRateUnit.BAR` volume, and a bar-count `vol_window` for leg-size or BOCPD inputs (legs and the frozen
-threshold never depend on the clock). A clock-reading configuration refuses a numpy matrix rather than invent
-timestamps; give it `MarketData` or a DataFrame with a DatetimeIndex.
+A numpy matrix has no timestamps, so its bars get a regular `bar_interval` clock. That is exact only when the
+configuration never reads the clock (`reads_the_clock` is False): structure trend, no flow or `VolumeRateUnit.BAR`
+volume, and a bar-count `vol_window` for leg-size or BOCPD inputs (legs and the frozen threshold never depend on the
+clock). A clock-reading configuration refuses a numpy matrix rather than invent timestamps; give it `MarketData` or a
+DataFrame with a DatetimeIndex. Its `needs_timestamps` is True, so `HmmModelWrapper` passes it the transformed
+features as a DataFrame on the index of the DataFrame the wrapper is given (every other model still gets numpy).
+`compute_trajectories` passes numpy, so adaptive lag needs a clock-free configuration.

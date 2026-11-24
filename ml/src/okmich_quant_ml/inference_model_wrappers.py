@@ -111,6 +111,12 @@ class HmmModelWrapper:
         - optional transformer chain
         - inferer defaults to ArgmaxInferer
 
+        Timestamps:
+        - the model gets the transformed features as a numpy array, unless it declares
+          ``needs_timestamps = True`` (e.g. a TayalHHMM that reads the clock). Such a model gets
+          them as a DataFrame on the input's DatetimeIndex, so ``predict`` and
+          ``compute_per_bar_predictive_loglik`` must then be given a DataFrame with a DatetimeIndex.
+
         validate_posterior_invariants / posterior_sum_tolerance:
         - Gates this wrapper's own pre-check (_validate_probability_matrix), which lets the
           tolerance be tuned independently of the posterior_inference pipeline's default. Setting
@@ -152,8 +158,7 @@ class HmmModelWrapper:
             raise ValueError(f"posterior_sum_tolerance must be > 0, got {self.posterior_sum_tolerance}")
 
     def predict(self, data: Union[np.ndarray, pd.DataFrame]) -> tuple[np.ndarray, Any]:
-        _features = data if isinstance(data, np.ndarray) else data.values
-        transformed_features = self.transform_pipeline.transform(_features)
+        transformed_features = self._model_input(data)
 
         if self.use_fixed_lag_posterior:
             full_probs = np.asarray(self.model.predict_proba_fixed_lag(transformed_features, lag=self.fixed_lag), dtype=float)
@@ -184,9 +189,28 @@ class HmmModelWrapper:
         drift monitor (``score_loglik_health``); the full series is returned
         for flexibility.
         """
+        return self.model.compute_per_bar_predictive_loglik(self._model_input(data))
+
+    def _model_input(self, data: Union[np.ndarray, pd.DataFrame]) -> Union[np.ndarray, pd.DataFrame]:
+        """The transformed features in the form the model takes them.
+
+        Every model gets the numpy array the transform pipeline returns, except one whose ``needs_timestamps`` is
+        exactly True: it gets that array as a DataFrame on the input's DatetimeIndex, so it sees the real bar times.
+        """
         _features = data if isinstance(data, np.ndarray) else data.values
         transformed_features = self.transform_pipeline.transform(_features)
-        return self.model.compute_per_bar_predictive_loglik(transformed_features)
+        if getattr(self.model, "needs_timestamps", False) is not True:
+            return transformed_features
+        if not isinstance(data, pd.DataFrame) or not isinstance(data.index, pd.DatetimeIndex):
+            raise ValueError(f"{type(self.model).__name__} needs timestamps: pass a DataFrame with a DatetimeIndex "
+                             f"(one row per bar), got {type(data).__name__}"
+                             f"{'' if not isinstance(data, pd.DataFrame) else ' without a DatetimeIndex'}.")
+        values = np.asarray(transformed_features)
+        if values.ndim != 2 or values.shape[0] != len(data.index):
+            raise ValueError(f"The transform pipeline returned shape {values.shape}; a model that needs timestamps "
+                             f"needs one row per input bar ({len(data.index)}).")
+        columns = data.columns if values.shape[1] == data.shape[1] else None
+        return pd.DataFrame(values, index=data.index, columns=columns)
 
     def validate_fixed_lag_alignment(self, asof_timestamp: Any, label_timestamp: Any, bar_timedelta: Any) -> None:
         """Validate fixed-lag as-of alignment: label_timestamp must equal asof_timestamp - L * bar_timedelta."""

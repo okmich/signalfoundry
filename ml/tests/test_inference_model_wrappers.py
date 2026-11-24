@@ -451,3 +451,79 @@ class TestHmmModelWrapperPredict:
                 label_timestamp=pd.Timestamp("2026-04-15 09:40:00"),
                 bar_timedelta="5min",
             )
+
+
+# ---------------------------------------------------------------------------
+# HmmModelWrapper — models that need timestamps
+# ---------------------------------------------------------------------------
+
+class _RecordingModel:
+    """Uniform two-state posteriors; records every X it is given."""
+
+    def __init__(self, needs_timestamps=None):
+        if needs_timestamps is not None:
+            self.needs_timestamps = needs_timestamps
+        self.seen = []
+
+    def predict_proba(self, X):
+        self.seen.append(X)
+        return np.full((len(X), 2), 0.5)
+
+    def predict_proba_fixed_lag(self, X, lag):
+        self.seen.append(X)
+        return np.full((len(X), 2), 0.5)
+
+    def compute_per_bar_predictive_loglik(self, X):
+        self.seen.append(X)
+        return np.zeros(len(X))
+
+
+def _recording_wrapper(tmp_path: Path, model: _RecordingModel, frame: pd.DataFrame, **kwargs) -> HmmModelWrapper:
+    artifact_dir = tmp_path / "recording_export"
+    artifact_dir.mkdir()
+    joblib.dump(model, artifact_dir / HmmModelWrapper.MODEL_FILENAME)
+    joblib.dump(StandardScaler().fit(frame.to_numpy()), artifact_dir / HmmModelWrapper.PIPELINE_FILENAME)
+    (artifact_dir / HmmModelWrapper.METADATA_FILENAME).write_text(json.dumps({"target_lag": 2}), encoding="utf-8")
+    return HmmModelWrapper({"type": "hmm", "model_path": str(artifact_dir)}, **kwargs)
+
+
+def _bar_frame(n: int = 40) -> pd.DataFrame:
+    index = pd.date_range("2026-01-05 00:00", periods=n, freq="5min", tz="UTC")
+    return pd.DataFrame(np.random.default_rng(3).standard_normal((n, 2)), index=index, columns=["close", "volume"])
+
+
+class TestHmmModelWrapperTimestamps:
+    @pytest.mark.parametrize("flag", [None, False, "yes", 1])
+    def test_a_model_that_does_not_declare_true_gets_numpy(self, tmp_path, flag):
+        frame = _bar_frame()
+        wrapper = _recording_wrapper(tmp_path, _RecordingModel(needs_timestamps=flag), frame)
+        wrapper.predict(frame)
+        wrapper.compute_per_bar_predictive_loglik(frame)
+        expected = wrapper.transform_pipeline.transform(frame.to_numpy())
+        for X in wrapper.model.seen:
+            assert isinstance(X, np.ndarray)
+            np.testing.assert_allclose(X, expected)
+
+    @pytest.mark.parametrize("fixed_lag", [False, True])
+    def test_a_model_that_needs_timestamps_gets_the_input_index(self, tmp_path, fixed_lag):
+        frame = _bar_frame()
+        wrapper = _recording_wrapper(tmp_path, _RecordingModel(needs_timestamps=True), frame,
+                                     use_fixed_lag_posterior=fixed_lag)
+        wrapper.predict(frame)
+        wrapper.compute_per_bar_predictive_loglik(frame)
+        expected = wrapper.transform_pipeline.transform(frame.to_numpy())
+        assert len(wrapper.model.seen) == 2
+        for X in wrapper.model.seen:
+            assert isinstance(X, pd.DataFrame)
+            pd.testing.assert_index_equal(X.index, frame.index)
+            assert list(X.columns) == list(frame.columns)
+            np.testing.assert_allclose(X.to_numpy(), expected)
+
+    def test_a_model_that_needs_timestamps_rejects_input_without_them(self, tmp_path):
+        frame = _bar_frame()
+        wrapper = _recording_wrapper(tmp_path, _RecordingModel(needs_timestamps=True), frame)
+        with pytest.raises(ValueError, match="needs timestamps"):
+            wrapper.predict(frame.to_numpy())
+        with pytest.raises(ValueError, match="without a DatetimeIndex"):
+            wrapper.compute_per_bar_predictive_loglik(frame.reset_index(drop=True))
+        assert wrapper.model.seen == []

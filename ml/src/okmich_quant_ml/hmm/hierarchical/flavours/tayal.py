@@ -117,21 +117,24 @@ class TayalHHMM:
     Two ways in:
 
     - market data: ``fit(MarketData)``, ``decode``, ``bar_regime``, ``legs``: legs on the real clock;
-    - the duck-typed ``BasePomegranateHMM`` surface on a bar matrix ``X`` (numpy, columns per ``bar_layout``), as
-      ``HmmModelWrapper`` passes it: ``fit(X)``, ``predict_proba(X)``, ``predict_proba_fixed_lag(X, lag)``,
-      ``compute_per_bar_predictive_loglik(X)``, ``save`` / ``load`` ...
+    - the duck-typed ``BasePomegranateHMM`` surface on a bar matrix ``X`` (numpy, or a DataFrame whose DatetimeIndex
+      is the clock; columns read by position per ``bar_layout``), as ``HmmModelWrapper`` passes it: ``fit(X)``,
+      ``predict_proba(X)``, ``predict_proba_fixed_lag(X, lag)``, ``compute_per_bar_predictive_loglik(X)``,
+      ``save`` / ``load`` ...
 
     The duck-typed surface reports the four leaves (``n_states`` = 4) per *bar*: a leg's posterior holds from its
     confirmation bar until the next leg confirms, and bars before the first confirmed leg carry the entry
     distribution. ``*_level`` methods give the regimes (level 1). The leg size is a fraction of price, so a transform
     pipeline in front of the model must leave prices unscaled (an identity transform).
 
-    Clock. A numpy ``X`` has no timestamps (``HmmModelWrapper`` passes ``.values``), so its bars get a regular clock of
-    ``bar_interval``. That is exact only for a configuration that never reads the clock (``reads_the_clock`` False):
-    structure trend, no flow or ``VolumeRateUnit.BAR`` volume, and a bar-count ``vol_window`` for leg-size or BOCPD
-    inputs. Legs and the frozen threshold do not depend on the clock. A clock-reading configuration refuses a numpy
-    matrix rather than invent timestamps (volume per second across a session gap would change); give it a
-    ``MarketData`` or a DataFrame with a DatetimeIndex.
+    Clock. A numpy ``X`` has no timestamps, so its bars get a regular clock of ``bar_interval``. That is exact only for
+    a configuration that never reads the clock (``reads_the_clock`` False): structure trend, no flow or
+    ``VolumeRateUnit.BAR`` volume, and a bar-count ``vol_window`` for leg-size or BOCPD inputs. Legs and the frozen
+    threshold do not depend on the clock. A clock-reading configuration refuses a numpy matrix rather than invent
+    timestamps (volume per second across a session gap would change); give it a ``MarketData`` or a DataFrame with a
+    DatetimeIndex. ``needs_timestamps`` (= ``reads_the_clock``) makes ``HmmModelWrapper`` pass the model such a
+    DataFrame, built on the index of the DataFrame the wrapper is given. ``compute_trajectories`` passes numpy, so
+    adaptive lag needs a clock-free configuration.
 
     Transitions, ``forecast``, ``expected_duration``, likelihoods and selection scores are per *leg* (event time).
     ``compute_per_bar_predictive_loglik`` puts each leg's predictive log density on its confirmation bar and 0
@@ -194,6 +197,12 @@ class TayalHHMM:
         uses_vol = self.trend is TrendInput.LEG_SIZE or self.flow is FlowInput.BOCPD
         per_second = self.flow is FlowInput.VOLUME_RATE and self.volume_unit is VolumeRateUnit.SECOND
         return (uses_vol and time_window) or per_second
+
+    @property
+    def needs_timestamps(self) -> bool:
+        """True when the bars' real times matter (``reads_the_clock``). ``HmmModelWrapper`` then passes the model a
+        DataFrame on its input's DatetimeIndex instead of a numpy matrix."""
+        return self.reads_the_clock
 
     # ==================================================================================================================
     # Fitting

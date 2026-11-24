@@ -302,6 +302,29 @@ def test_tayal_refuses_numpy_when_it_reads_the_clock():
     np.testing.assert_allclose(clock_free.predict_proba(frame.to_numpy()), clock_free.predict_proba(frame))
 
 
+def test_hmm_model_wrapper_gives_a_clock_reading_tayal_its_timestamps(tmp_path):
+    from okmich_quant_ml.hmm.hierarchical.flavours import FlowInput
+    frame = _gappy_frame()
+    model = TayalHHMM(LegThreshold.legs_per_hour(1.0), flow=FlowInput.VOLUME_RATE, n_init=1, max_iter=20,
+                      bar_layout=BarLayout(close=0, volume=1)).fit(frame)
+    assert model.needs_timestamps
+    spec = _export(tmp_path, model, FunctionTransformer(), frame.to_numpy())
+    probs, _ = HmmModelWrapper(spec).predict(frame)
+    np.testing.assert_allclose(probs, model.predict_proba(frame), atol=1e-12)
+    regular = pd.DataFrame(frame.to_numpy(), index=pd.date_range(frame.index[0], periods=len(frame), freq="5min"))
+    assert not np.allclose(probs, model.predict_proba(regular))       # the gaps matter: the real clock arrived
+    lag_probs, _ = HmmModelWrapper(spec, use_fixed_lag_posterior=True).predict(frame)
+    np.testing.assert_allclose(lag_probs, model.predict_proba_fixed_lag(frame, 3)[[-4]], atol=1e-12)
+    np.testing.assert_allclose(HmmModelWrapper(spec).compute_per_bar_predictive_loglik(frame),
+                               model.compute_per_bar_predictive_loglik(frame))
+    with pytest.raises(ValueError, match="needs timestamps"):
+        HmmModelWrapper(spec).predict(frame.to_numpy())
+
+
+def test_a_clock_free_tayal_still_gets_numpy_from_the_wrapper():
+    assert not TayalHHMM(LegThreshold.legs_per_hour(1.0)).needs_timestamps
+
+
 def test_models_saved_before_later_attributes_still_load(tmp_path):
     model = _two_level().fit(_gauss())
     X = _gauss(100, 9)
