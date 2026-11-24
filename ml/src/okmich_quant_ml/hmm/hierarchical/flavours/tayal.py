@@ -15,8 +15,8 @@ regime. Leaves are pinned to their leg direction through the symbol support.
 Observations (Table 4.1). One symbol per leg from direction x trend x flow:
 
 - direction (f0): down / up;
-- trend (f1): market structure, higher highs and higher lows over the last five turning points (``STRUCTURE``) or,
-  as in the legacy SF build, the leg's size in sigma terciles (``LEG_SIZE``);
+- trend (f1): market structure, higher highs and higher lows over the last five turning points (``STRUCTURE``) or
+  the leg's size in sigma terciles (``LEG_SIZE``);
 - flow (f2): Tayal's volume strengthening / weakening (``VOLUME_RATE``), none (``NONE``, 6 symbols: the structure-only
   baseline and the default), BOCPD break intensity or signed volume terciles.
 
@@ -58,7 +58,7 @@ class TrendInput(StrEnum):
     """Second symbol component of the Tayal flavour."""
 
     STRUCTURE = "structure"   # Tayal f1: higher highs / higher lows over five turning points
-    LEG_SIZE = "leg_size"     # legacy SF: |leg| / sigma terciles
+    LEG_SIZE = "leg_size"     # |leg| / sigma terciles
 
 
 class FlowInput(StrEnum):

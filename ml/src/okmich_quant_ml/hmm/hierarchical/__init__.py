@@ -7,8 +7,8 @@ Hierarchical hidden Markov models.
   causal (filter, online Viterbi) and hindsight (smoother, fixed-lag, Viterbi) decoders.
 - ``inputs``: observation builders. Zigzag legs of a configurable size (``LegThreshold``) and per-leg features
   (Tayal's structure and volume, leg size, BOCPD break intensity, signed volume) combined by a ``SymbolEncoder``.
-- ``flavours``: paper presets on the engine. ``TayalHHMM`` (Tayal 2009), ``joint_multiscale``, ``embedded_hhmm``
-  (Adam et al. 2019) and ``legacy_model`` (the removed 2026-07 build, a masked flat HMM, for parity and old files).
+- ``flavours``: paper presets on the engine. ``TayalHHMM`` (Tayal 2009), ``joint_multiscale`` and ``embedded_hhmm``
+  (Adam et al. 2019).
 
 Every model here duck-types ``BasePomegranateHMM`` (``predict_proba``, ``predict_proba_fixed_lag``,
 ``compute_per_bar_predictive_loglik``, ``save`` / ``load`` ...) with the leaves as its states, so it plugs into
@@ -41,8 +41,6 @@ from .flavours import (
     block_schedule,
     embedded_hhmm,
     joint_multiscale,
-    legacy_block_posterior,
-    legacy_model,
     tayal_tree,
 )
 from .inputs import (
@@ -106,7 +104,5 @@ __all__ = [
     "block_schedule",
     "embedded_hhmm",
     "joint_multiscale",
-    "legacy_block_posterior",
-    "legacy_model",
     "tayal_tree",
 ]

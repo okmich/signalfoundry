@@ -5,7 +5,7 @@ Hierarchical hidden Markov models: a general engine, observation builders, and p
 ```
 engine/     HHMM: any state tree, exact inference by flattening, EM on the tree's own parameters
 inputs/     zigzag legs of a configurable size, per-leg features, a symbol encoder
-flavours/   TayalHHMM (Tayal 2009), joint_multiscale, embedded_hhmm (Adam et al. 2019), legacy_model
+flavours/   TayalHHMM (Tayal 2009), joint_multiscale, embedded_hhmm (Adam et al. 2019)
 ```
 
 ## The engine
@@ -60,7 +60,7 @@ and the posterior-inference stack:
 | Viterbi | `predict_viterbi` (hindsight), `predict_causal_viterbi`, `causal_viterbi_scores` |
 | likelihood | `log_likelihood`, `compute_per_bar_predictive_loglik`, `path_entropy`, `selection_scores`, `get_aic_bic` |
 | chain | `transition_prob`, `forecast`, `get_stationary_distribution`, `expected_duration` |
-| files | `save`, `load` (joblib) |
+| files | `save`, `load` (joblib; an attribute added to a class since a model was saved loads at its default) |
 
 The same reads for any tree level (level 1 = the top-level states) are separate functions: `predict_proba_level`,
 `predict_level`, `predict_proba_fixed_lag_level`, `stationary_level_distribution`, `expected_level_duration` (bars per
@@ -110,7 +110,6 @@ confirmation.
 | `TayalHHMM` | `R_down` (D...D) and `R_up` (U...U), top level always switches; 2 free transition parameters | direction x structure (6 symbols, default) or x flow (18) | online Viterbi; bull = higher mean in-sample block return |
 | `joint_multiscale` | backdrop states x fast leaves, no re-entry | slow columns tied at depth 1, fast per leaf | `predict_proba_level(X, 1)` |
 | `embedded_hhmm` (+ `block_column` or `block_schedule`) | day states owning intraday chains | bar features (+ optional day-level columns) | P(day state) through the day |
-| `legacy_model` | depth 1, four leaves, direction-flip mask | the 2026-07 18-symbol alphabet | parity and experiments (refit; old files are not loaded) |
 
 **`TayalHHMM` is event-time.** Its market-data API (`fit(MarketData)`, `decode`, `bar_regime`) works on legs with the
 real clock. Its duck-typed API works on a bar matrix read with `bar_layout` (close, optional volume / high / low): a
@@ -125,13 +124,3 @@ clock. That is exact only when the configuration never reads the clock (`reads_t
 no flow or `VolumeRateUnit.BAR` volume, and a bar-count `vol_window` for leg-size or BOCPD inputs (legs and the frozen
 threshold never depend on the clock). A clock-reading configuration refuses a numpy matrix rather than invent
 timestamps; give it `MarketData` or a DataFrame with a DatetimeIndex.
-
-## The removed legacy build
-
-The 2026-07 `HierarchicalHMM`, its 18-symbol `ZigzagObservationPipeline`, the asset-group configs and the JSON
-persistence were removed on 2026-11-24. That model was a masked flat 4-state HMM ("Run/Reversal" = a post-hoc grouping
-by leg size; its 8 edges let a block's first leg depend on the previous block's last leg, which an HHMM entry
-distribution cannot express), and its methods reported 2 states from `predict_proba` but 4 elsewhere. `legacy_model`
-reproduces its structure on the engine. Files the old class saved (joblib or JSON) are not loaded: its learnt end
-probabilities, session gates and Run / Reversal labels have no counterpart here, so refit instead. Engine and Tayal
-models saved before later attributes existed unpickle with those attributes at their defaults.

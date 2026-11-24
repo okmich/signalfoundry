@@ -1,8 +1,8 @@
 """Duck typing: every hierarchical model answers BasePomegranateHMM's public methods like PomegranateHMM does, and runs
 through the live ``HmmModelWrapper`` (three-file export) and ``compute_trajectories`` (adaptive lag).
 
-Models: PomegranateHMM (reference), a two-level engine HHMM, joint_multiscale, embedded_hhmm with a block-id column,
-legacy_model, and TayalHHMM through its bar-level adapter.
+Models: PomegranateHMM (reference), a two-level Gaussian engine HHMM, a two-level categorical engine HHMM,
+joint_multiscale, embedded_hhmm with a block-id column, and TayalHHMM through its bar-level adapter.
 """
 import itertools
 import json
@@ -17,9 +17,9 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 from okmich_quant_ml.hmm import DistType, PomegranateHMM
 from okmich_quant_ml.hmm.base_pomegranate import BasePomegranateHMM
-from okmich_quant_ml.hmm.hierarchical import (HHMM, BarLayout, ExitSchedule, GaussianEmission, LegThreshold, MarketData,
-                                              StateNode, TayalHHMM, block_ids, embedded_hhmm, joint_multiscale,
-                                              legacy_model)
+from okmich_quant_ml.hmm.hierarchical import (HHMM, BarLayout, CategoricalEmission, ExitSchedule, GaussianEmission,
+                                              LegThreshold, MarketData, StateNode, TayalHHMM, block_ids, embedded_hhmm,
+                                              joint_multiscale)
 from okmich_quant_ml.hmm.util import SelectionScores
 from okmich_quant_ml.inference_model_wrappers import HmmModelWrapper
 from okmich_quant_ml.posterior_inference import compute_trajectories
@@ -51,6 +51,14 @@ def _with_days(X: np.ndarray, bars_per_day: int = 60) -> np.ndarray:
     return np.column_stack([X, np.arange(len(X)) // bars_per_day])
 
 
+def _categorical() -> HHMM:
+    """Two regimes, each an up / down leaf pair over 18 symbols (up leaves emit 9..17, down leaves 0..8)."""
+    regime = lambda n: StateNode(n, [StateNode.leaf(f"{n}.up"), StateNode.leaf(f"{n}.down")])
+    root = StateNode("root", [regime("A"), regime("B")])
+    support = {f"{r}.{d}": (range(9, 18) if d == "up" else range(9)) for r in "AB" for d in ("up", "down")}
+    return HHMM(root, [CategoricalEmission(0, 18, support=support)], n_init=1, max_iter=20, random_state=0)
+
+
 def _symbols(n: int = T_BARS, seed: int = 2) -> np.ndarray:
     rng = np.random.default_rng(seed)
     return np.where(np.arange(n) % 2 == 0, rng.integers(9, 18, n), rng.integers(0, 9, n))[:, None].astype(float)
@@ -62,7 +70,7 @@ CASES = {
     "joint_multiscale": (lambda: joint_multiscale([0], [1], n_init=1, max_iter=20), _gauss),
     "embedded": (lambda: embedded_hhmm([0, 1], n_coarse=2, n_fine=2, block_column=2, n_init=1, max_iter=20),
                  lambda: _with_days(_gauss())),
-    "legacy": (lambda: legacy_model(n_init=1, max_iter=20), _symbols),
+    "categorical": (_categorical, _symbols),
     "tayal": (lambda: TayalHHMM(LegThreshold.legs_per_hour(1.0), n_init=1, max_iter=30,
                                 bar_layout=BarLayout(close=0, volume=1)), _bars),
 }
@@ -129,11 +137,11 @@ def _export(tmp_path, model, pipeline, X_fit) -> dict:
     return {"type": "hmm", "model_path": str(tmp_path)}
 
 
-@pytest.mark.parametrize("name", ["hhmm", "joint_multiscale", "embedded", "legacy", "tayal"])
+@pytest.mark.parametrize("name", ["hhmm", "categorical", "joint_multiscale", "embedded", "tayal"])
 def test_hmm_model_wrapper_runs_every_hierarchical_model(name, tmp_path):
     make, data = CASES[name]
     X_raw = data()
-    identity = name in ("legacy", "tayal")                 # symbols / prices must not be rescaled
+    identity = name in ("categorical", "tayal")            # symbols / prices must not be rescaled
     pipeline = FunctionTransformer() if identity else StandardScaler()
     pipeline.fit(X_raw)
     model = make().fit(pipeline.transform(X_raw))
@@ -158,7 +166,7 @@ def test_embedded_block_column_survives_the_scaler():
         HHMM(no_column.topology.root, [GaussianEmission([0, 1])], schedule_column=1)
 
 
-@pytest.mark.parametrize("name, window", [("hhmm", 24), ("embedded", 24), ("legacy", 24), ("hhmm", None),
+@pytest.mark.parametrize("name, window", [("hhmm", 24), ("embedded", 24), ("categorical", 24), ("hhmm", None),
                                           ("tayal", None)])
 def test_adaptive_lag_trajectories(name, window):
     """compute_trajectories stacks (n_lags, T, K); bounded history (the production default) needs window_size."""

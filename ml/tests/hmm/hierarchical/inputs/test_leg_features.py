@@ -96,13 +96,13 @@ def test_bocpd_break_score_is_informative_not_constant():
     assert np.bincount(flows, minlength=3).min() > 0.2 * len(legs)   # all three buckets used
 
 
-def test_symbol_encoder_matches_the_legacy_layout_and_tayal_alphabets():
+def test_symbol_encoder_mixed_radix_layout_and_tayal_alphabets():
     enc = SymbolEncoder([LegDirection(), TayalTrend(), TayalVolume()])
     assert enc.n_symbols == 18
     for d in (0, 1):
         for s in range(3):
             for f in range(3):
-                assert enc.encode([d, s, f]) == d * 9 + s * 3 + f            # the legacy 18-symbol layout
+                assert enc.encode([d, s, f]) == d * 9 + s * 3 + f            # mixed radix: direction x 9 + trend x 3 + flow
                 assert enc.decode(enc.encode([d, s, f])) == (d, s, f)
     np.testing.assert_array_equal(enc.symbols_with("direction", 1), np.arange(9, 18))
     six = SymbolEncoder([LegDirection(), TayalTrend()])

@@ -1,32 +1,10 @@
-"""The legacy build on the engine (depth-1 tree, loaders for saved models) and the two bar flavours."""
+"""The two bar flavours: ``joint_multiscale`` and ``embedded_hhmm`` (block ids and schedules)."""
 import numpy as np
 import pandas as pd
 import pytest
 
-from okmich_quant_ml.hmm.hierarchical import (ExitMode, block_ids, block_schedule, embedded_hhmm, joint_multiscale,
-                                              legacy_block_posterior, legacy_model)
+from okmich_quant_ml.hmm.hierarchical import ExitMode, block_ids, block_schedule, embedded_hhmm, joint_multiscale
 from okmich_quant_ml.hmm.hierarchical.engine import ExitSchedule
-
-
-def _alternating_symbols(n: int = 3000, seed: int = 0) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    return np.where(np.arange(n) % 2 == 0, rng.integers(9, 18, n), rng.integers(0, 9, n))
-
-
-def test_legacy_model_is_a_depth_one_tree_and_fits():
-    X = _alternating_symbols(seed=2)[:, None].astype(float)
-    engine = legacy_model(n_init=2, max_iter=100, transition_prior=0.0, random_state=1).fit(X)
-    assert engine.topology.max_depth == 1 and engine.n_states == 4
-    assert np.all(np.diff(engine.fit_report.history) > -1e-7 * len(X))
-    np.testing.assert_allclose(legacy_block_posterior(engine.filter(X)).sum(axis=1), 1.0)
-
-
-def test_default_legacy_model_survives_an_unseen_allowed_symbol():
-    train = _alternating_symbols(seed=3)
-    train = np.where(train == 17, 16, train)[:, None].astype(float)          # up symbol 17 never appears
-    model = legacy_model(n_init=1, max_iter=30).fit(train)
-    post = model.filter(np.array([[10.0], [4.0], [17.0], [2.0]]))
-    assert np.isfinite(post).all() and np.allclose(post.sum(axis=1), 1.0)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
