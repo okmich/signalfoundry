@@ -5,15 +5,30 @@ Why ForexFactory for these two
 The official ECB and BoE calendar pages are heavily JavaScript-rendered: direct HTML scraping yields only news-feed
 dates, not the meeting calendar. FRED tracks the rates as daily series, not as meeting-keyed releases. ForexFactory
 embeds a clean JSON event blob in the page HTML, no JS required, and supports range queries like
-``?range=jan1.2025-mar31.2025`` so the whole 3-year window fits in a dozen polite HTTP calls.
+``?range=jan1.2025-jan31.2025``.
 
-Coverage gap (documented)
--------------------------
-ForexFactory only flags the 3-4 highest-impact ECB/BoE meetings per year (the SEP/MPR projection meetings). T
-he remaining 4-5 interim meetings per year per bank are **not** in FF — not even at medium or low impact. For the
-Week 1 XAUUSD news mask this gap is ~60 unmasked bars per year against ~75k bars total (well below the noise floor of
-the entropy stats Block B computes). If a downstream consumer needs full ECB/BoE coverage, that's a separate fetcher
-(Playwright on the official sites) — out of scope here.
+One month per request
+---------------------
+ForexFactory answers a range query with at most about two months and raises no error. ``jan1.2024-mar31.2024``
+returns Jan 1 -> Mar 2 (62 days), checked 2026-11-26. Quarter-sized requests therefore dropped every March, June,
+September and December. ``_month_days`` asks for one calendar month per request and raises unless the reply holds one
+entry per calendar day. Requests are paced by ``_PAUSE_SECONDS``.
+
+Coverage
+--------
+Requested a month at a time, ForexFactory lists every ECB and BoE rate decision as high impact (checked 2011-2026 on
+2026-11-26):
+- ECB: 12 a year through 2014, 8 a year from 2015.
+- BoE: 12 a year through 2015, 8 a year from 2017, and 10 in 2020 with the two March emergency cuts.
+
+Timestamps
+----------
+``dateline`` is the real release instant for past events:
+- ECB decisions: 13:45 Frankfurt through the 2022-06-09 meeting, 14:15 from 2022-07-21.
+- BoE decisions: 12:00 London, except 2020-03-11, 05-07, 08-06 and 11-05 at 07:00 and 2020-03-19 at 14:30.
+
+A *future* event fetched before a DST change can be an hour off: the ECB 2026-10-29 decision, fetched in June, read
+12:15 UTC against the true 13:15. ``build.py`` stamps events by ``release_times.py`` and ignores ``dateline``.
 
 Data shape
 ----------
@@ -37,6 +52,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
+from collections.abc import Iterator
 
 import pandas as pd
 
@@ -44,6 +61,7 @@ from okmich_quant_pipeline.http import get
 from okmich_quant_pipeline.news_calendar._types import EventName, ImpactTier, Source
 
 _BASE_URL = "https://www.forexfactory.com/calendar?range={start}-{end}"
+_PAUSE_SECONDS = 1.0     # between consecutive month requests
 
 # (country, event_name) -> our canonical EventName. The country code is FF's
 # (EZ for eurozone, UK for united kingdom).
@@ -124,28 +142,38 @@ def _range_url(start: dt.date, end: dt.date) -> str:
     return _BASE_URL.format(start=_fmt(start), end=_fmt(end))
 
 
-def _quarter_windows(year_min: int, year_max: int) -> list[tuple[dt.date, dt.date]]:
-    """Yield (start, end) windows spanning [year_min Jan 1, year_max Dec 31] in
-    quarter-sized chunks. Quarters are large enough to keep the call count
-    low (12 per 3 years) and small enough that FF doesn't truncate."""
+def _month_windows(year_min: int, year_max: int) -> list[tuple[dt.date, dt.date]]:
+    """(first day, last day) of every calendar month from ``year_min`` January to ``year_max`` December."""
     windows: list[tuple[dt.date, dt.date]] = []
     for y in range(year_min, year_max + 1):
-        for q in range(4):
-            start_month = q * 3 + 1
-            end_month = start_month + 2
-            start = dt.date(y, start_month, 1)
-            # Last day of end_month
-            if end_month == 12:
-                end = dt.date(y, 12, 31)
-            else:
-                end = dt.date(y, end_month + 1, 1) - dt.timedelta(days=1)
+        for m in range(1, 13):
+            start = dt.date(y, m, 1)
+            end = (dt.date(y + 1, 1, 1) if m == 12 else dt.date(y, m + 1, 1)) - dt.timedelta(days=1)
             windows.append((start, end))
     return windows
 
 
-def _parse_quarter(html: str) -> list[dict]:
-    """Parse one quarter's HTML and return matched-event rows."""
-    days = _extract_days(html)
+def _check_full_window(days: list[dict], start: dt.date, end: dt.date) -> None:
+    """Raise unless ForexFactory returned one entry per calendar day of ``[start, end]`` (a truncated reply carries no
+    error of its own)."""
+    expected = (end - start).days + 1
+    if len(days) != expected:
+        raise RuntimeError(f"FF fetcher: {len(days)} days returned for {start} -> {end}, expected {expected}. "
+                           f"ForexFactory truncated the range or changed its page.")
+
+
+def _month_days(year_min: int, year_max: int) -> Iterator[tuple[dt.date, list[dict]]]:
+    """(month start, verified ``days`` array) for every month of ``[year_min, year_max]``, one paced request each."""
+    for i, (start, end) in enumerate(_month_windows(year_min, year_max)):
+        if i:
+            time.sleep(_PAUSE_SECONDS)
+        days = _extract_days(get(_range_url(start, end)).text)
+        _check_full_window(days, start, end)
+        yield start, days
+
+
+def _parse_days(days: list[dict]) -> list[dict]:
+    """Matched high-impact ECB/BoE rows from one window's ``days`` array."""
     rows: list[dict] = []
     for day in days:
         for ev in day.get("events", []):
@@ -177,15 +205,13 @@ def fetch(year_min: int, year_max: int) -> pd.DataFrame:
     """Return a DataFrame of ECB + BoE high-impact meeting dates in
     ``[year_min, year_max]``.
 
-    Polls ForexFactory one quarter at a time. Same release_date can appear twice per bank
+    Polls ForexFactory one month at a time (see module docstring). Same release_date can appear twice per bank
     (e.g. "Main Refinancing Rate" + "Monetary Policy Statement" both map to EU_ECB_RATE_DECISION) — the orchestrator
     deduplicates on (release_date, event_name).
     """
     rows: list[dict] = []
-    for start, end in _quarter_windows(year_min, year_max):
-        url = _range_url(start, end)
-        resp = get(url)
-        rows.extend(_parse_quarter(resp.text))
+    for _start, days in _month_days(year_min, year_max):
+        rows.extend(_parse_days(days))
     if not rows:
         raise RuntimeError(
             f"FF fetcher: parsed zero matching events in [{year_min}, {year_max}]. "

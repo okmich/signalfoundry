@@ -5,6 +5,8 @@ event frames where every value is verifiable by hand.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -36,29 +38,31 @@ def test_parse_value_blank_is_nan(raw) -> None:
 # fetch mapping (synthetic FF blob)
 # --------------------------------------------------------------------------- #
 
-_FF_BLOB = """
-<script>
-window.calendarComponentStates[1] = {
-  days: [
-    {"events":[
-      {"country":"US","name":"Non-Farm Employment Change","dateline":1704801000,"forecast":"160K","actual":"200K","previous":"150K"},
-      {"country":"US","name":"CPI m/m","dateline":1705406400,"forecast":"0.3%","actual":"0.5%","previous":"0.2%"},
-      {"country":"US","name":"Unemployment Rate","dateline":1704801000,"forecast":"3.8%","actual":"3.7%","previous":"3.9%"}
-    ]}
-  ],
-  more: 1
-};
-</script>
-"""
+_FF_EVENTS = [
+    {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1704801000,
+     "forecast": "160K", "actual": "200K", "previous": "150K"},
+    {"country": "US", "name": "CPI m/m", "dateline": 1705406400,
+     "forecast": "0.3%", "actual": "0.5%", "previous": "0.2%"},
+    {"country": "US", "name": "Unemployment Rate", "dateline": 1704801000,
+     "forecast": "3.8%", "actual": "3.7%", "previous": "3.9%"},
+]
+
+
+def _ff_month_page(url: str) -> str:
+    """A full month of ``days`` (one entry per calendar day, as the live page has) with the events on the 9th."""
+    start, end = next(w for w in ff._month_windows(2024, 2024) if ff._range_url(*w) == url)
+    days = [{"events": _FF_EVENTS if d.day == 9 else []} for d in pd.date_range(start, end)]
+    return f"<script>window.calendarComponentStates[1] = {{\n  days: {json.dumps(days)},\n  more: 1\n}};</script>"
 
 
 def test_fetch_events_with_data_maps_and_parses(monkeypatch) -> None:
-    monkeypatch.setattr(ee.ff, "get", lambda url, **_kw: type("R", (), {"text": _FF_BLOB})())
-    df = ee.fetch_events_with_data(2025, 2025)  # 4 quarters x same blob -> deduped
+    monkeypatch.setattr(ee.ff, "get", lambda url, **_kw: type("R", (), {"text": _ff_month_page(url)})())
+    monkeypatch.setattr(ee.ff, "_PAUSE_SECONDS", 0.0)
+    df = ee.fetch_events_with_data(2024, 2024)  # 12 months x the same events -> deduped
     assert set(df["event_name"]) == {"US_NFP", "US_CPI"}  # unmapped "Unemployment Rate" dropped
     nfp = df[df["event_name"] == "US_NFP"].iloc[0]
     assert nfp["actual"] == 200000.0 and nfp["forecast"] == 160000.0
-    assert len(df) == 2  # deduped across the repeated quarters
+    assert len(df) == 2  # deduped across the repeated months
 
 
 # --------------------------------------------------------------------------- #

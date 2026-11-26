@@ -77,11 +77,10 @@ def fetch_events_with_data(year_min: int, year_max: int) -> pd.DataFrame:
     """Fetch mapped events with forecast/actual/previous from ForexFactory across the year span.
 
     Returns ``[timestamp_utc, event_name, actual, forecast, previous]`` sorted by time, deduped on
-    ``(timestamp_utc, event_name)``.
+    ``(timestamp_utc, event_name)``. One verified request per month (``forexfactory._month_days``).
     """
     rows: list[dict] = []
-    for start, end in ff._quarter_windows(year_min, year_max):
-        days = ff._extract_days(ff.get(ff._range_url(start, end)).text)
+    for _start, days in ff._month_days(year_min, year_max):
         for day in days:
             for ev in day.get("events", []):
                 key = (ev.get("country"), ev.get("name"))

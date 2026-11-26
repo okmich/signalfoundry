@@ -31,7 +31,8 @@ RELEASE_TIMES: dict[EventName, tuple[int, int, str]] = {
     # United States — Census (08:30 ET)
     EventName.US_RETAIL_SALES: (8, 30, "America/New_York"),
     # Euro area — ECB (Frankfurt, CET/CEST)
-    # Statement at 14:15 local; press conf at 14:45 local since 2022.
+    # Statement at 14:15 local; press conf at 14:45 local from the 2022-07-21 meeting. Before it they were 13:45 and
+    # 14:30, so a build window reaching before 2022-07-21 stamps those ECB rows 30 minutes late.
     EventName.EU_ECB_RATE_DECISION: (14, 15, "Europe/Berlin"),
     EventName.EU_ECB_PRESS_CONFERENCE: (14, 45, "Europe/Berlin"),
     # United Kingdom — BoE (London, GMT/BST)

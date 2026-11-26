@@ -43,8 +43,8 @@ _MIN_EVENTS_PER_YEAR: dict[EventName, int] = {
     EventName.US_FOMC_STATEMENT: 6,      # 8/yr nominal
     EventName.US_NFP: 9,                 # ~12/yr
     EventName.US_CPI: 9,                 # ~12/yr
-    EventName.EU_ECB_RATE_DECISION: 2,   # FF flags only SEP/MPR meetings, ~3-4/yr
-    EventName.UK_BOE_RATE_DECISION: 2,
+    EventName.EU_ECB_RATE_DECISION: 6,   # 8/yr (one FF request per month lists every meeting)
+    EventName.UK_BOE_RATE_DECISION: 6,   # 8/yr
 }
 
 

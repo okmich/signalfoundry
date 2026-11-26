@@ -8,6 +8,7 @@ live integration check.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pandas as pd
 import pytest
@@ -334,8 +335,8 @@ def test_ff_extract_days_brace_matches() -> None:
     assert len(days) == 1 and len(days[0]["events"]) == 5
 
 
-def test_ff_parse_quarter_maps_and_filters() -> None:
-    rows = forexfactory._parse_quarter(_FF_HTML)
+def test_ff_parse_days_maps_and_filters() -> None:
+    rows = forexfactory._parse_days(forexfactory._extract_days(_FF_HTML))
     names = {r["event_name"] for r in rows}
     # high-impact mapped events kept; the medium EZ statement and the unmapped US/low row dropped.
     assert names == {EventName.EU_ECB_RATE_DECISION, EventName.EU_ECB_PRESS_CONFERENCE, EventName.UK_BOE_RATE_DECISION}
@@ -349,8 +350,42 @@ def test_ff_range_url_format() -> None:
     assert url.endswith("range=jan1.2024-mar31.2024")
 
 
-def test_ff_quarter_windows_count() -> None:
-    assert len(forexfactory._quarter_windows(2024, 2026)) == 12  # 4 quarters x 3 years
+def test_ff_month_windows_cover_every_day_once() -> None:
+    windows = forexfactory._month_windows(2023, 2024)
+    assert len(windows) == 24
+    assert windows[1] == (dt.date(2023, 2, 1), dt.date(2023, 2, 28))
+    assert windows[13] == (dt.date(2024, 2, 1), dt.date(2024, 2, 29))      # leap year
+    assert windows[-1] == (dt.date(2024, 12, 1), dt.date(2024, 12, 31))
+    assert sum((e - s).days + 1 for s, e in windows) == 365 + 366     # contiguous, no day twice
+
+
+def _ff_page(start: dt.date, end: dt.date, events: dict[dt.date, list[dict]] | None = None) -> str:
+    """A ForexFactory-shaped page with one ``days`` entry per calendar day of [start, end]."""
+    days = [{"date": f"{d:%b} {d.day}", "events": (events or {}).get(d, [])} for d in pd.date_range(start, end).date]
+    return f"<script>window.calendarComponentStates[1] = {{\n  days: {json.dumps(days)},\n  more: 1\n}};</script>"
+
+
+def test_ff_fetch_requests_one_month_each(monkeypatch) -> None:
+    ecb = {"country": "EZ", "name": "Main Refinancing Rate", "dateline": 1709213400, "impactName": "high"}  # 02-29
+    seen: list[str] = []
+
+    def fake_get(url: str):
+        seen.append(url)
+        start, end = next(w for w in forexfactory._month_windows(2024, 2024) if forexfactory._range_url(*w) == url)
+        return type("R", (), {"text": _ff_page(start, end, {dt.date(2024, 2, 29): [ecb]})})()
+    monkeypatch.setattr(forexfactory, "get", fake_get)
+    monkeypatch.setattr(forexfactory, "_PAUSE_SECONDS", 0.0)
+    df = forexfactory.fetch(2024, 2024)
+    assert len(seen) == 12 and seen[2].endswith("range=mar1.2024-mar31.2024")
+    assert df["release_date"].tolist() == [dt.date(2024, 2, 29)]
+
+
+def test_ff_fetch_raises_on_a_truncated_month(monkeypatch) -> None:
+    # The live failure: a range answered with fewer days than asked for, and no error.
+    short = _ff_page(dt.date(2024, 1, 1), dt.date(2024, 1, 30))
+    monkeypatch.setattr(forexfactory, "get", lambda url: type("R", (), {"text": short})())
+    with pytest.raises(RuntimeError, match="30 days returned for 2024-01-01 -> 2024-01-31, expected 31"):
+        forexfactory.fetch(2024, 2024)
 
 
 # --------------------------------------------------------------------------- #
@@ -415,7 +450,7 @@ def _calendar_rows(counts: dict[str, int], years: list[int]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["event_name", "release_date"])
 
 
-_HEALTHY = {"US_FOMC_STATEMENT": 8, "US_NFP": 12, "US_CPI": 12, "EU_ECB_RATE_DECISION": 4, "UK_BOE_RATE_DECISION": 4}
+_HEALTHY = {"US_FOMC_STATEMENT": 8, "US_NFP": 12, "US_CPI": 12, "EU_ECB_RATE_DECISION": 8, "UK_BOE_RATE_DECISION": 8}
 
 
 def test_build_validate_coverage_raises_on_partial_scrape() -> None:
@@ -432,7 +467,7 @@ def test_build_validate_coverage_counts_only_completed_years() -> None:
     # 2025-2027 evaluated in 2026: only 2025 is fully completed, so the floor is one year's worth.
     # One year of counts clears it even though a naive 3-year floor (e.g. NFP >= 27) would reject —
     # this is what stops the partial current/future year from false-tripping the guard.
-    counts = {"US_FOMC_STATEMENT": 8, "US_NFP": 10, "US_CPI": 10, "EU_ECB_RATE_DECISION": 3, "UK_BOE_RATE_DECISION": 3}
+    counts = {"US_FOMC_STATEMENT": 8, "US_NFP": 10, "US_CPI": 10, "EU_ECB_RATE_DECISION": 6, "UK_BOE_RATE_DECISION": 6}
     build_mod._validate_coverage(_calendar_rows(counts, [2025]), 2025, 2027, today_year=2026)
 
 
