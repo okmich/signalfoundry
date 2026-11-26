@@ -9,7 +9,9 @@ rolls forward picks up new dates automatically.
 Layout
 ------
 - ``_types.py``       — ``EventName``, ``ImpactTier``, ``Source`` enums.
-- ``release_times.py``— release-time conventions per event (08:30 ET, etc.) + DST-aware UTC.
+- ``release_times.py``— release times per event (08:30 ET, etc.), by date, with single-release
+                        exceptions, + DST-aware UTC. Both builders check them against the
+                        instants ForexFactory recorded before writing.
 - ``fetchers/``       — one module per source; each exports ``fetch()`` returning
                         ``(release_date, event_name, source, impact_tier)``. ``fomc`` also exports
                         ``fetch_unscheduled()``: the date-only inter-meeting actions (emergency cuts,

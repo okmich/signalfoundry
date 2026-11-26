@@ -18,7 +18,8 @@ from okmich_quant_pipeline.news_calendar import build as build_mod
 from okmich_quant_pipeline.news_calendar._types import EventName, ImpactTier, Source
 from okmich_quant_pipeline.news_calendar.fetchers import fomc, forexfactory, fred
 from okmich_quant_pipeline.news_calendar.reader import is_event_window
-from okmich_quant_pipeline.news_calendar.release_times import RELEASE_TIMES, to_utc
+from okmich_quant_pipeline.news_calendar.release_times import (EXCEPTIONS, RELEASE_TIMES, local_date, release_tz,
+                                                               to_utc)
 
 
 # --------------------------------------------------------------------------- #
@@ -48,6 +49,49 @@ def test_every_event_name_has_a_release_time() -> None:
     # make build.py raise KeyError at orchestration. Catch it here instead.
     for e in EventName:
         assert e in RELEASE_TIMES
+
+
+@pytest.mark.parametrize("event, date, expected", [
+    # ECB: 13:45 / 14:30 Frankfurt through the 2022-06-09 meeting, 14:15 / 14:45 from 2022-07-21 (both CEST here).
+    (EventName.EU_ECB_RATE_DECISION, dt.date(2022, 6, 9), "2022-06-09T11:45:00+00:00"),
+    (EventName.EU_ECB_RATE_DECISION, dt.date(2022, 7, 21), "2022-07-21T12:15:00+00:00"),
+    (EventName.EU_ECB_PRESS_CONFERENCE, dt.date(2022, 6, 9), "2022-06-09T12:30:00+00:00"),
+    (EventName.EU_ECB_PRESS_CONFERENCE, dt.date(2022, 7, 21), "2022-07-21T12:45:00+00:00"),
+    # Single-release exceptions: BoE 2020 at 07:00 (GMT, then BST) and 14:30; PCE at 10:00 ET on a GDP day.
+    (EventName.UK_BOE_RATE_DECISION, dt.date(2020, 3, 11), "2020-03-11T07:00:00+00:00"),
+    (EventName.UK_BOE_RATE_DECISION, dt.date(2020, 3, 19), "2020-03-19T14:30:00+00:00"),
+    (EventName.UK_BOE_RATE_DECISION, dt.date(2020, 5, 7), "2020-05-07T06:00:00+00:00"),
+    (EventName.US_PCE, dt.date(2019, 11, 27), "2019-11-27T15:00:00+00:00"),
+    (EventName.US_PCE, dt.date(2019, 10, 31), "2019-10-31T12:30:00+00:00"),
+])
+def test_to_utc_follows_eras_and_exceptions(event: EventName, date: dt.date, expected: str) -> None:
+    assert to_utc(date, event).isoformat() == expected
+
+
+@pytest.mark.parametrize("event, date", [
+    (EventName.US_NFP, dt.date(2010, 12, 3)),
+    (EventName.US_FOMC_STATEMENT, dt.date(2013, 1, 30)),     # statements came at 12:30 or 14:15 then
+    (EventName.EU_ECB_RATE_DECISION, dt.date(2010, 12, 2)),
+])
+def test_to_utc_refuses_dates_before_the_first_checked_time(event: EventName, date: dt.date) -> None:
+    with pytest.raises(ValueError, match="no checked release time before"):
+        to_utc(date, event)
+
+
+def test_release_time_tables_are_ordered_single_zone_and_exceptions_differ() -> None:
+    for event, eras in RELEASE_TIMES.items():
+        starts = [d for d, _ in eras]
+        assert starts == sorted(set(starts))
+        assert {t.tz for _, t in eras} == {release_tz(event)}
+    for (event, day), t in EXCEPTIONS.items():
+        assert t.tz == release_tz(event) and day >= RELEASE_TIMES[event][0][0]
+        assert t != next(rt for start, rt in reversed(RELEASE_TIMES[event]) if day >= start)
+
+
+def test_local_date_is_the_date_in_the_event_zone() -> None:
+    instant = dt.datetime(2024, 1, 5, 2, tzinfo=dt.timezone.utc)             # 2024-01-04 21:00 in New York
+    assert local_date(instant, EventName.US_NFP) == dt.date(2024, 1, 4)
+    assert local_date(instant, EventName.UK_BOE_RATE_DECISION) == dt.date(2024, 1, 5)
 
 
 # --------------------------------------------------------------------------- #
@@ -338,11 +382,24 @@ def test_ff_extract_days_brace_matches() -> None:
 def test_ff_parse_days_maps_and_filters() -> None:
     rows = forexfactory._parse_days(forexfactory._extract_days(_FF_HTML))
     names = {r["event_name"] for r in rows}
-    # high-impact mapped events kept; the medium EZ statement and the unmapped US/low row dropped.
+    # The three dating names kept; the EZ statement (a checked-only name) and the unmapped US row dropped.
     assert names == {EventName.EU_ECB_RATE_DECISION, EventName.EU_ECB_PRESS_CONFERENCE, EventName.UK_BOE_RATE_DECISION}
     assert all(r["impact_tier"] == ImpactTier.HIGH for r in rows)
     sources = {r["source"] for r in rows}
     assert sources == {Source.ECB, Source.BOE}
+
+
+def test_ff_parse_days_dates_decisions_by_the_rate_name_only() -> None:
+    # Before August 2015 the BoE minutes (09:30) and Inflation Report (10:30) came out on their own days, filed under
+    # decision-day names; neither is a decision. A rate name rated "medium" (ECB 2021) still is one.
+    days = [{"events": [
+        {"country": "UK", "name": "MPC Official Bank Rate Votes", "dateline": 1296034200, "impactName": "high"},
+        {"country": "UK", "name": "BOE Monetary Policy Report", "dateline": 1297852200, "impactName": "high"},
+        {"country": "EZ", "name": "Main Refinancing Rate", "dateline": 1615466700, "impactName": "medium"},
+    ]}]
+    rows = forexfactory._parse_days(days)
+    assert [(r["event_name"], r["release_date"], r["impact_tier"]) for r in rows] == [
+        (EventName.EU_ECB_RATE_DECISION, dt.date(2021, 3, 11), ImpactTier.HIGH)]
 
 
 def test_ff_range_url_format() -> None:
@@ -386,6 +443,69 @@ def test_ff_fetch_raises_on_a_truncated_month(monkeypatch) -> None:
     monkeypatch.setattr(forexfactory, "get", lambda url: type("R", (), {"text": short})())
     with pytest.raises(RuntimeError, match="30 days returned for 2024-01-01 -> 2024-01-31, expected 31"):
         forexfactory.fetch(2024, 2024)
+
+
+def test_ff_fetch_with_recorded_returns_the_us_instants_too(monkeypatch) -> None:
+    nfp = {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1704461400, "impactName": "high"}
+    boe = {"country": "UK", "name": "Official Bank Rate", "dateline": 1706788800, "impactName": "high"}
+    events = {dt.date(2024, 1, 5): [nfp], dt.date(2024, 2, 1): [boe]}
+
+    def fake_get(url: str):
+        start, end = next(w for w in forexfactory._month_windows(2024, 2024) if forexfactory._range_url(*w) == url)
+        return type("R", (), {"text": _ff_page(start, end, events)})()
+    monkeypatch.setattr(forexfactory, "get", fake_get)
+    monkeypatch.setattr(forexfactory, "_PAUSE_SECONDS", 0.0)
+    rows, recorded = forexfactory.fetch_with_recorded(2024, 2024)
+    assert rows["event_name"].tolist() == [EventName.UK_BOE_RATE_DECISION]          # calendar rows: ECB/BoE only
+    assert recorded.to_dict("records") == [
+        {"event_name": "US_NFP", "release_date": dt.date(2024, 1, 5),
+         "recorded_utc": pd.Timestamp("2024-01-05 13:30", tz="UTC")},
+        {"event_name": "UK_BOE_RATE_DECISION", "release_date": dt.date(2024, 2, 1),
+         "recorded_utc": pd.Timestamp("2024-02-01 12:00", tz="UTC")},
+    ]
+
+
+def _pairs(rows: list[tuple[str, dt.date, str]]) -> pd.DataFrame:
+    """``(event, release_date, recorded UTC)`` -> ``check_recorded_times`` input, stamped by ``release_times``."""
+    return pd.DataFrame([{"event_name": e, "release_date": d, "timestamp_utc": pd.Timestamp(to_utc(d, EventName(e))),
+                          "recorded_utc": pd.Timestamp(r, tz="UTC")} for e, d, r in rows])
+
+
+_NOW = pd.Timestamp("2026-11-26", tz="UTC")
+
+
+def test_ff_check_recorded_times_accepts_agreement_and_minute_offsets() -> None:
+    forexfactory.check_recorded_times(_pairs([
+        ("US_NFP", dt.date(2025, 12, 16), "2025-12-16 13:29"),               # older of two same-instant releases
+        ("US_NFP", dt.date(2025, 12, 16), "2025-12-16 13:30"),
+        ("EU_ECB_RATE_DECISION", dt.date(2021, 6, 10), "2021-06-10 11:45"),  # 13:45 CEST, before the 2022 change
+        ("US_PCE", dt.date(2019, 11, 27), "2019-11-27 15:00"),               # a 10:00 ET exception
+    ]), now=_NOW)
+
+
+def test_ff_check_recorded_times_raises_on_a_disagreement() -> None:
+    late = _pairs([("US_PCE", dt.date(2024, 6, 28), "2024-06-28 14:00")])
+    with pytest.raises(ValueError, match=r"US_PCE 2024-06-28: stamped 08:30, ForexFactory recorded 10:00 "
+                                         r"America/New_York \(\+90 min\)"):
+        forexfactory.check_recorded_times(late, now=_NOW)
+
+
+def test_ff_check_recorded_times_allows_the_scheduled_dst_gap_only() -> None:
+    # 2027-03-18: New York is on summer time, London not yet. ForexFactory lists the scheduled BoE decision an hour
+    # early until it has happened.
+    early = _pairs([("UK_BOE_RATE_DECISION", dt.date(2027, 3, 18), "2027-03-18 11:00")])
+    forexfactory.check_recorded_times(early, now=_NOW)
+    with pytest.raises(ValueError):                                          # released: the instant must be right
+        forexfactory.check_recorded_times(early, now=pd.Timestamp("2027-03-19", tz="UTC"))
+    with pytest.raises(ValueError):                                          # both on summer time: no gap
+        forexfactory.check_recorded_times(_pairs([("UK_BOE_RATE_DECISION", dt.date(2027, 4, 29), "2027-04-29 10:00")]),
+                                          now=_NOW)
+    with pytest.raises(ValueError):                                          # a US event never has the gap
+        forexfactory.check_recorded_times(_pairs([("US_CPI", dt.date(2027, 3, 10), "2027-03-10 12:30")]), now=_NOW)
+
+
+def test_ff_check_recorded_times_skips_a_listed_forexfactory_error() -> None:
+    forexfactory.check_recorded_times(_pairs([("US_PPI", dt.date(2021, 4, 9), "2021-04-09 12:56")]), now=_NOW)
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +600,42 @@ def test_build_validate_coverage_raises_on_a_missing_year_hidden_by_the_window_t
     with pytest.raises(ValueError, match=r"US_FOMC_STATEMENT 2019: 0 < 6[\s\S]*US_FOMC_STATEMENT 2020: 0 < 6"):
         build_mod._validate_coverage(final, 2019, 2026, today_year=2026)
     build_mod._validate_coverage(_calendar_rows(_HEALTHY, list(range(2019, 2027))), 2019, 2026, today_year=2026)
+
+
+def _stub_fetchers(monkeypatch, rows: pd.DataFrame, recorded: pd.DataFrame) -> None:
+    """``build`` on ``rows`` (served by the FRED fetcher) and ForexFactory instants ``recorded``, coverage unchecked."""
+    monkeypatch.setattr(build_mod.fomc, "fetch", lambda a, b: rows.iloc[:0])
+    monkeypatch.setattr(build_mod.fred, "fetch", lambda a, b: rows)
+    monkeypatch.setattr(build_mod.forexfactory, "fetch_with_recorded", lambda a, b: (rows.iloc[:0], recorded))
+    monkeypatch.setattr(build_mod, "_validate_coverage", lambda *a, **k: None)
+
+
+def _pce_rows(*days: dt.date) -> pd.DataFrame:
+    return pd.DataFrame([{"release_date": d, "event_name": EventName.US_PCE, "source": Source.BEA,
+                          "impact_tier": ImpactTier.HIGH} for d in days])
+
+
+def _recorded(*rows: tuple[str, dt.date, str]) -> pd.DataFrame:
+    return pd.DataFrame([{"event_name": e, "release_date": d, "recorded_utc": pd.Timestamp(r, tz="UTC")}
+                         for e, d, r in rows])
+
+
+def test_build_stamps_exceptions_and_checks_them(monkeypatch, tmp_path) -> None:
+    days = (dt.date(2019, 11, 27), dt.date(2019, 12, 20), dt.date(2024, 6, 28))
+    _stub_fetchers(monkeypatch, _pce_rows(*days), _recorded(("US_PCE", days[0], "2019-11-27 15:00"),
+                                                            ("US_PCE", days[2], "2024-06-28 12:30")))
+    out = build_mod.build(2019, 2024, tmp_path / "cal.parquet")
+    assert out["timestamp_utc"].dt.strftime("%Y-%m-%d %H:%M").tolist() == ["2019-11-27 15:00", "2019-12-20 15:00",
+                                                                             "2024-06-28 12:30"]
+    assert (tmp_path / "cal.parquet").exists()
+
+
+def test_build_refuses_to_write_when_a_release_time_disagrees(monkeypatch, tmp_path) -> None:
+    day = dt.date(2024, 6, 28)
+    _stub_fetchers(monkeypatch, _pce_rows(day), _recorded(("US_PCE", day, "2024-06-28 14:00")))
+    with pytest.raises(ValueError, match="US_PCE 2024-06-28: stamped 08:30"):
+        build_mod.build(2024, 2024, tmp_path / "cal.parquet")
+    assert not (tmp_path / "cal.parquet").exists()
 
 
 def test_default_years_track_today() -> None:

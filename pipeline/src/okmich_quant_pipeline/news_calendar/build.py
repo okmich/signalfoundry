@@ -8,13 +8,16 @@ Run via:
 
 Pipeline
 --------
-1. For each fetcher in ``_FETCHERS``, call ``fetch(year_min, year_max)``.
-   Each returns a DataFrame with columns ``(release_date, event_name, source, impact_tier)``.
+1. Call ``fetch(year_min, year_max)`` on each fetcher in ``_DATE_FETCHERS`` and
+   ``forexfactory.fetch_with_recorded``. Each returns a DataFrame with columns
+   ``(release_date, event_name, source, impact_tier)``; ForexFactory also returns the instants it recorded.
 2. Concatenate all fetcher frames.
 3. For each row, derive ``timestamp_utc`` from ``release_times.to_utc(release_date, event_name)``
-   — fetchers don't deal with times, the convention table does.
+   — fetchers don't deal with times, the release-time tables do.
 4. Drop duplicates on ``(timestamp_utc, event_name)``.
-5. Sort by ``timestamp_utc`` and write atomically to ``--out``.
+5. Check every row ForexFactory also lists against the instant it recorded, and the per-year coverage. Either
+   failure raises before the write.
+6. Sort by ``timestamp_utc`` and write atomically to ``--out``.
 """
 from __future__ import annotations
 
@@ -34,7 +37,8 @@ from okmich_quant_pipeline.news_calendar.release_times import to_utc
 
 logger = logging.getLogger(__name__)
 
-_FETCHERS = (fomc, fred, forexfactory)
+# Fetchers that return dates only; ``forexfactory.fetch_with_recorded`` is called separately for its recorded instants.
+_DATE_FETCHERS = (fomc, fred)
 
 # Conservative per-year lower bounds per event family (~75% of nominal cadence). A healthy scrape
 # clears these comfortably; a partial scrape (one fetcher returning a fraction of its rows) trips
@@ -94,19 +98,36 @@ def _validate_coverage(final: pd.DataFrame, year_min: int, year_max: int, today_
         )
 
 
+def _check_release_times(final: pd.DataFrame, recorded: pd.DataFrame, now: pd.Timestamp | None = None) -> None:
+    """Raise if a stamped row disagrees with the instant ForexFactory recorded for it (before the write).
+
+    Rows ForexFactory does not list on the same date (FOMC press conferences it skipped, ALFRED revision dates) go
+    unchecked; the log reports how many rows of each event were checked.
+    """
+    pairs = final[["event_name", "release_date", "timestamp_utc"]].merge(recorded, on=["event_name", "release_date"])
+    forexfactory.check_recorded_times(pairs, now=now)
+    checked = pairs.drop_duplicates(["event_name", "release_date"]).groupby("event_name").size()
+    table = pd.DataFrame({"checked": checked, "rows": final.groupby("event_name").size()}).fillna(0).astype(int)
+    logger.info("Release times checked against ForexFactory:\n" + table.to_string())
+
+
 def build(year_min: int, year_max: int, out_path: Path) -> pd.DataFrame:
-    """Run every fetcher, apply release times, dedupe, validate coverage, write parquet (atomic)."""
+    """Run every fetcher, apply release times, dedupe, check times and coverage, write parquet (atomic)."""
     frames: list[pd.DataFrame] = []
-    for mod in _FETCHERS:
+    for mod in _DATE_FETCHERS:
         name = mod.__name__.rsplit(".", 1)[-1]
         df = mod.fetch(year_min, year_max)
         logger.info(f"  {name:<14} -> {len(df):4d} rows")
         frames.append(df)
+    ff_rows, recorded = forexfactory.fetch_with_recorded(year_min, year_max)
+    logger.info(f"  {'forexfactory':<14} -> {len(ff_rows):4d} rows")
+    frames.append(ff_rows)
     combined = pd.concat(frames, ignore_index=True)
 
     # Apply release times. ``to_utc`` raises KeyError if an event has no
     # release-time convention — that's a programming error (new EventName
-    # without a release_times.py entry), surface it loudly.
+    # without a release_times.py entry) — and ValueError for a date before
+    # the event's first checked release time. Surface both loudly.
     combined["timestamp_utc"] = combined.apply(
         lambda row: pd.Timestamp(to_utc(row["release_date"], row["event_name"])), axis=1
     )
@@ -121,6 +142,7 @@ def build(year_min: int, year_max: int, out_path: Path) -> pd.DataFrame:
     deduped = combined.drop_duplicates(subset=["timestamp_utc", "event_name"])
     final = deduped[["timestamp_utc", "event_name", "source", "impact_tier", "release_date"]].sort_values("timestamp_utc").reset_index(drop=True)
 
+    _check_release_times(final, recorded)
     _validate_coverage(final, year_min, year_max)
     atomic_write_parquet(final, Path(out_path))
     logger.info(f"Wrote {len(final)} rows -> {out_path}")

@@ -38,31 +38,59 @@ def test_parse_value_blank_is_nan(raw) -> None:
 # fetch mapping (synthetic FF blob)
 # --------------------------------------------------------------------------- #
 
+# Real release instants: NFP 2024-01-05 and CPI 2024-01-11, both 08:30 ET (13:30 UTC).
 _FF_EVENTS = [
-    {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1704801000,
+    {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1704461400,
      "forecast": "160K", "actual": "200K", "previous": "150K"},
-    {"country": "US", "name": "CPI m/m", "dateline": 1705406400,
+    {"country": "US", "name": "CPI m/m", "dateline": 1704979800,
      "forecast": "0.3%", "actual": "0.5%", "previous": "0.2%"},
-    {"country": "US", "name": "Unemployment Rate", "dateline": 1704801000,
+    {"country": "US", "name": "Unemployment Rate", "dateline": 1704461400,
      "forecast": "3.8%", "actual": "3.7%", "previous": "3.9%"},
 ]
 
 
-def _ff_month_page(url: str) -> str:
-    """A full month of ``days`` (one entry per calendar day, as the live page has) with the events on the 9th."""
-    start, end = next(w for w in ff._month_windows(2024, 2024) if ff._range_url(*w) == url)
-    days = [{"events": _FF_EVENTS if d.day == 9 else []} for d in pd.date_range(start, end)]
-    return f"<script>window.calendarComponentStates[1] = {{\n  days: {json.dumps(days)},\n  more: 1\n}};</script>"
+def _serve(monkeypatch, year: int, events: list[dict]) -> None:
+    """Serve a full month of ``days`` per request (one entry per calendar day, as the live page has), ``events`` on
+    the 9th of every month."""
+    def page(url: str) -> str:
+        start, end = next(w for w in ff._month_windows(year, year) if ff._range_url(*w) == url)
+        days = [{"events": events if d.day == 9 else []} for d in pd.date_range(start, end)]
+        return f"<script>window.calendarComponentStates[1] = {{\n  days: {json.dumps(days)},\n  more: 1\n}};</script>"
+    monkeypatch.setattr(ee.ff, "get", lambda url, **_kw: type("R", (), {"text": page(url)})())
+    monkeypatch.setattr(ee.ff, "_PAUSE_SECONDS", 0.0)
 
 
 def test_fetch_events_with_data_maps_and_parses(monkeypatch) -> None:
-    monkeypatch.setattr(ee.ff, "get", lambda url, **_kw: type("R", (), {"text": _ff_month_page(url)})())
-    monkeypatch.setattr(ee.ff, "_PAUSE_SECONDS", 0.0)
+    _serve(monkeypatch, 2024, _FF_EVENTS)
     df = ee.fetch_events_with_data(2024, 2024)  # 12 months x the same events -> deduped
     assert set(df["event_name"]) == {"US_NFP", "US_CPI"}  # unmapped "Unemployment Rate" dropped
     nfp = df[df["event_name"] == "US_NFP"].iloc[0]
     assert nfp["actual"] == 200000.0 and nfp["forecast"] == 160000.0
     assert len(df) == 2  # deduped across the repeated months
+    assert list(df.columns) == ee.EVENT_COLUMNS
+
+
+def test_fetch_events_with_data_stamps_release_times_and_keeps_both_of_a_double_release(monkeypatch) -> None:
+    # 2025-12-16: October and November payrolls released together at 08:30 ET; ForexFactory lists October at 08:29.
+    double = [
+        {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1765891800,
+         "forecast": "64K", "actual": "64K", "previous": "-105K"},
+        {"country": "US", "name": "Non-Farm Employment Change", "dateline": 1765891740,
+         "forecast": "", "actual": "-105K", "previous": "119K"},
+    ]
+    _serve(monkeypatch, 2025, double)
+    df = ee.fetch_events_with_data(2025, 2025)
+    assert df["timestamp_utc"].tolist() == [pd.Timestamp("2025-12-16 13:30", tz="UTC")] * 2
+    assert df["actual"].tolist() == [-105000.0, 64000.0]  # the older month first, the newer one last
+
+
+def test_fetch_events_with_data_raises_when_forexfactory_disagrees(monkeypatch) -> None:
+    # PCE recorded at 10:00 ET on 2024-06-28, which release_times stamps at 08:30.
+    pce = [{"country": "US", "name": "Core PCE Price Index m/m", "dateline": 1719583200,
+            "forecast": "0.1%", "actual": "0.1%", "previous": "0.3%"}]
+    _serve(monkeypatch, 2024, pce)
+    with pytest.raises(ValueError, match="US_PCE 2024-06-28: stamped 08:30"):
+        ee.fetch_events_with_data(2024, 2024)
 
 
 # --------------------------------------------------------------------------- #
