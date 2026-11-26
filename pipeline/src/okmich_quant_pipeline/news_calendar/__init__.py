@@ -11,7 +11,10 @@ Layout
 - ``_types.py``       — ``EventName``, ``ImpactTier``, ``Source`` enums.
 - ``release_times.py``— release-time conventions per event (08:30 ET, etc.) + DST-aware UTC.
 - ``fetchers/``       — one module per source; each exports ``fetch()`` returning
-                        ``(release_date, event_name, source, impact_tier)``.
+                        ``(release_date, event_name, source, impact_tier)``. ``fomc`` also exports
+                        ``fetch_unscheduled()``: the date-only inter-meeting actions (emergency cuts,
+                        notation votes) that published a statement. Those are not in the parquet, which
+                        needs a fixed release time per event. FOMC years start at ``fomc.EARLIEST_YEAR``.
 - ``build.py``        — orchestrator: joins fetchers, applies release times, writes parquet.
 - ``reader.py``       — ``load_calendar()`` + ``is_event_window()``.
 

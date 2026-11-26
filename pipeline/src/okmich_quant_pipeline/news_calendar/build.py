@@ -63,21 +63,30 @@ def _validate_coverage(final: pd.DataFrame, year_min: int, year_max: int, today_
     """Raise if any tracked event family is below its conservative minimum (partial-scrape guard).
 
     Runs *before* the write so a half-scraped calendar can never replace a good asset on disk.
-    The floor is applied only to **fully-completed** years (strictly before the current year):
-    publication timing makes the current and future years legitimately partial — the Fed posts FOMC
-    dates ~18 months ahead, but BLS/BEA/Census (NFP/CPI) and ForexFactory (ECB/BoE) only publish
-    ~1 year out, and the current year is itself only part-elapsed. Those years still contribute
+    The floor is applied to **each fully-completed** year (strictly before the current year), keyed on
+    ``release_date``. Checking each year rather than the window total catches a fetcher that silently
+    drops whole years: two missing years inside a long window can otherwise hide behind the bonus rows
+    of the others. Publication timing makes the current and future years legitimately partial — the Fed
+    posts FOMC dates ~18 months ahead, but BLS/BEA/Census (NFP/CPI) and ForexFactory (ECB/BoE) only
+    publish ~1 year out, and the current year is itself only part-elapsed. Those years still contribute
     their (bonus) rows; they're just not *required*, so the guard never false-trips on the window
-    boundary while still catching a genuine partial scrape of the settled history.
+    boundary. A window with no completed year must hold one year's floor in total.
     """
     today_year = today_year if today_year is not None else dt.date.today().year
-    n_complete_years = max(1, min(year_max, today_year - 1) - year_min + 1)
-    counts = final["event_name"].value_counts()
-    shortfalls = [
-        f"{event.value}: {int(counts.get(event.value, 0))} < {per_year * n_complete_years} expected"
-        for event, per_year in _MIN_EVENTS_PER_YEAR.items()
-        if int(counts.get(event.value, 0)) < per_year * n_complete_years
-    ]
+    complete_years = range(year_min, min(year_max, today_year - 1) + 1)
+    years = pd.to_datetime(final["release_date"]).dt.year
+    counts = final.groupby([final["event_name"], years]).size()
+    totals = final["event_name"].value_counts()
+    shortfalls: list[str] = []
+    for event, per_year in _MIN_EVENTS_PER_YEAR.items():
+        if not complete_years:
+            if int(totals.get(event.value, 0)) < per_year:
+                shortfalls.append(f"{event.value}: {int(totals.get(event.value, 0))} < {per_year} expected")
+            continue
+        for year in complete_years:
+            n = int(counts.get((event.value, year), 0))
+            if n < per_year:
+                shortfalls.append(f"{event.value} {year}: {n} < {per_year} expected")
     if shortfalls:
         raise ValueError(
             "news-calendar coverage check failed (partial scrape?) — refusing to overwrite:\n  "

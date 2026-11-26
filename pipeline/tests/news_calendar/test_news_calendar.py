@@ -154,6 +154,159 @@ def test_fomc_fetch_builds_statement_and_press_rows(monkeypatch) -> None:
     assert (df["source"] == Source.FED).all()
 
 
+# Fixtures shaped like the live pages (verified 2026-11-26): the current calendar is one panel per year with
+# div.row.fomc-meeting rows; a historical page is one div.panel per meeting or action, headed by an h5.
+
+def _cur_row(month: str, date: str, links: str = "") -> str:
+    return (f'<div class="row fomc-meeting"><div class="fomc-meeting__month"><strong>{month}</strong></div>'
+            f'<div class="fomc-meeting__date">{date}</div>{links}</div>')
+
+
+def _cur_page(panels: dict[int, list[str]]) -> str:
+    head = '<div class="panel panel-default"><div class="panel-heading"><h4><a>{} FOMC Meetings</a></h4></div>'
+    body = "".join(f'{head.format(y)}{"".join(rows)}</div>' for y, rows in panels.items())
+    return f"<html><body>{body}</body></html>"
+
+
+def _hist_page(year: int, panels: list[tuple[str, str]]) -> str:
+    body = "".join(f'<div class="panel panel-default panel-padded"><h5>{h}</h5>{links}</div>' for h, links in panels)
+    return f"<html><body><h3>{year}</h3>{body}</body></html>"
+
+
+def _stmt(yyyymmdd: str, title: str = "Statement") -> str:
+    return f'<a href="/newsevents/pressreleases/monetary{yyyymmdd}a.htm">{title}</a>'
+
+
+_PRESS = '<a href="/monetarypolicy/fomcpresconf.htm">Press Conference</a>'
+_FRAMEWORK = "Statement on Longer-Run Goals and Monetary Policy Strategy"
+
+_HIST_2020 = _hist_page(2020, [
+    ("January 28-29 Meeting - 2020", _stmt("20200129")),
+    ("March 2 (unscheduled) Meeting - 2020", _stmt("20200303") + _PRESS),
+    ("March 17-18 (cancelled) Meeting - 2020", ""),
+    ("March 19 (notation vote) - 2020", '<a href="/newsevents/pressreleases/monetary20200319b.htm">Press Release</a>'),
+    ("August 27 (notation vote) - 2020", _stmt("20200827", _FRAMEWORK)),
+    ("October 4 (unscheduled) - 2020", _stmt("20201011")),
+    ("December 15-16 Meeting - 2020", _stmt("20201216")),
+])
+
+_HIST_2018 = _hist_page(2018, [
+    ("January 31-February  1 Meeting - 2018", _stmt("20180201")),   # month named inside the range, double space
+    ("June 12-13 Meeting - 2018", _stmt("20180613") + _PRESS),
+    ("Jul/Aug 31-1 Meeting - 2018", _stmt("20180801")),
+    ("August 9 Conference Call - 2018", _stmt("20180810")),
+    ("March  4 (unscheduled) - 2018", ""),                             # call with no public statement
+])
+
+
+def test_fomc_historical_page_meetings_and_actions() -> None:
+    meetings, actions = fomc._parse_historical_html(_HIST_2020, 2020)
+    assert meetings == [(dt.date(2020, 1, 29), True, 2020), (dt.date(2020, 12, 16), True, 2020)]   # cancelled skipped
+    assert [(a.action_date, a.release_date, a.action, a.has_press_conference) for a in actions] == [
+        (dt.date(2020, 3, 2), dt.date(2020, 3, 3), fomc.FomcAction.UNSCHEDULED_MEETING, True),
+        (dt.date(2020, 8, 27), dt.date(2020, 8, 27), fomc.FomcAction.NOTATION_VOTE, False),
+        (dt.date(2020, 10, 4), dt.date(2020, 10, 11), fomc.FomcAction.UNSCHEDULED_MEETING, False),   # released later
+    ]  # the 03-19 notation vote issued only a press release -> skipped
+    assert actions[1].statement == _FRAMEWORK
+
+
+def test_fomc_historical_page_heading_forms_and_pre_2019_press_conferences() -> None:
+    meetings, actions = fomc._parse_historical_html(_HIST_2018, 2018)
+    assert meetings == [(dt.date(2018, 2, 1), False, 2018), (dt.date(2018, 6, 13), True, 2018),
+                        (dt.date(2018, 8, 1), False, 2018)]   # before 2019 the press-conference anchor decides
+    assert [(a.action_date, a.release_date, a.action) for a in actions] == [
+        (dt.date(2018, 8, 9), dt.date(2018, 8, 10), fomc.FomcAction.CONFERENCE_CALL)]
+
+
+@pytest.mark.parametrize("heading, match", [
+    ("March 3rd Meeting - 2020", "not recognised"),          # a meeting-like heading that does not parse
+    ("March 3 (telephone poll) - 2020", "annotation"),       # an annotation we do not know
+    ("March 3 - 2020", "neither"),                           # neither 'Meeting' nor an annotation
+    ("March 17-18 Meeting - 2019", "on the 2020 page"),      # heading year differs from the page year
+])
+def test_fomc_historical_page_raises_on_unknown_heading(heading: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        fomc._parse_historical_html(_hist_page(2020, [(heading, _stmt("20200303"))]), 2020)
+
+
+def test_fomc_statement_link_without_dated_url_raises() -> None:
+    page = _hist_page(2020, [("March 2 (unscheduled) Meeting - 2020", '<a href="/statement.htm">Statement</a>')])
+    with pytest.raises(ValueError, match="dated URL"):
+        fomc._parse_historical_html(page, 2020)
+
+
+def test_fomc_calendar_actions_from_annotated_rows() -> None:
+    framework = _stmt("20250822", _FRAMEWORK)
+    html = _cur_page({2025: [
+        _cur_row("January", "28-29"),
+        _cur_row("August", "22 (notation vote)", framework),
+        _cur_row("October", "3 (conference call)"),        # no statement -> skipped
+        _cur_row("November", "4 (cancelled)"),
+    ]})
+    actions = fomc._parse_calendar_actions(html, 2025, 2027)
+    assert [(a.action_date, a.release_date, a.action) for a in actions] == [
+        (dt.date(2025, 8, 22), dt.date(2025, 8, 22), fomc.FomcAction.NOTATION_VOTE)]
+    assert [d for d, _pc, _y in fomc._parse_calendar_html(html, 2025, 2027)] == [dt.date(2025, 1, 29)]
+
+
+def _route(monkeypatch, pages: dict[str, str]) -> list[str]:
+    seen: list[str] = []
+
+    def fake_get(url: str):
+        seen.append(url)
+        return type("R", (), {"text": pages[url]})()
+    monkeypatch.setattr(fomc, "get", fake_get)
+    return seen
+
+
+def _hist_url(year: int) -> str:
+    return fomc._HISTORICAL_URL.format(year=year)
+
+
+def test_fomc_fetch_reads_historical_pages_for_years_before_the_current_page(monkeypatch) -> None:
+    current = _cur_page({2021: [_cur_row("January", "26-27")], 2022: [_cur_row("March", "15-16*")]})
+    seen = _route(monkeypatch, {fomc._CALENDAR_URL: current, _hist_url(2020): _HIST_2020})
+    df = fomc.fetch(2020, 2022)
+    stmts = df.loc[df["event_name"] == EventName.US_FOMC_STATEMENT, "release_date"].tolist()
+    assert stmts == [dt.date(2020, 1, 29), dt.date(2020, 12, 16), dt.date(2021, 1, 27), dt.date(2022, 3, 16)]
+    assert seen == [fomc._CALENDAR_URL, _hist_url(2020)]        # 2021-22 come from the current page only
+
+
+def test_fomc_fetch_raises_on_a_historical_page_without_meetings(monkeypatch) -> None:
+    current = _cur_page({2021: [_cur_row("January", "26-27")]})
+    _route(monkeypatch, {fomc._CALENDAR_URL: current, _hist_url(2020): _hist_page(2020, [])})
+    with pytest.raises(RuntimeError, match="zero meetings"):
+        fomc.fetch(2020, 2021)
+
+
+def test_fomc_fetch_raises_on_a_year_missing_inside_the_current_page(monkeypatch) -> None:
+    current = _cur_page({2021: [_cur_row("January", "26-27")], 2023: [_cur_row("January", "31-1")]})
+    _route(monkeypatch, {fomc._CALENDAR_URL: current})
+    with pytest.raises(RuntimeError, match=r"not \[2022\]"):
+        fomc.fetch(2021, 2023)
+
+
+@pytest.mark.parametrize("fn", [fomc.fetch, fomc.fetch_unscheduled])
+def test_fomc_rejects_years_before_the_release_time_convention(monkeypatch, fn) -> None:
+    monkeypatch.setattr(fomc, "get", lambda url: pytest.fail("must raise before any request"))
+    with pytest.raises(ValueError, match=f">= {fomc.EARLIEST_YEAR}"):
+        fn(fomc.EARLIEST_YEAR - 1, 2026)
+
+
+def test_fomc_fetch_unscheduled_merges_pages_and_keeps_columns_when_empty(monkeypatch) -> None:
+    panels = {y: [_cur_row("January", "26-27")] for y in range(2021, 2025)}
+    panels[2025] = [_cur_row("August", "22 (notation vote)", _stmt("20250822", "Statement on Longer-Run Goals"))]
+    current = _cur_page(panels)
+    _route(monkeypatch, {fomc._CALENDAR_URL: current, _hist_url(2020): _HIST_2020})
+    df = fomc.fetch_unscheduled(2020, 2025)
+    assert list(df.columns) == fomc.UNSCHEDULED_COLUMNS
+    assert df["release_date"].tolist() == [dt.date(2020, 3, 3), dt.date(2020, 8, 27), dt.date(2020, 10, 11),
+                                           dt.date(2025, 8, 22)]
+    assert (df["source"] == Source.FED).all()
+    empty = fomc.fetch_unscheduled(2021, 2021)
+    assert empty.empty and list(empty.columns) == fomc.UNSCHEDULED_COLUMNS
+
+
 # --------------------------------------------------------------------------- #
 # forexfactory fetcher — JS-blob extraction + event mapping/filtering
 # --------------------------------------------------------------------------- #
@@ -256,25 +409,42 @@ def test_http_browser_ua_swaps_only_when_requested(monkeypatch) -> None:
 # build — coverage validation (partial-scrape guard) + dynamic default window
 # --------------------------------------------------------------------------- #
 
+def _calendar_rows(counts: dict[str, int], years: list[int]) -> pd.DataFrame:
+    """``counts[event]`` rows of each event in each year, dated mid-year."""
+    rows = [(name, dt.date(y, 6, 1)) for y in years for name, n in counts.items() for _ in range(n)]
+    return pd.DataFrame(rows, columns=["event_name", "release_date"])
+
+
+_HEALTHY = {"US_FOMC_STATEMENT": 8, "US_NFP": 12, "US_CPI": 12, "EU_ECB_RATE_DECISION": 4, "UK_BOE_RATE_DECISION": 4}
+
+
 def test_build_validate_coverage_raises_on_partial_scrape() -> None:
-    final = pd.DataFrame({"event_name": ["US_FOMC_STATEMENT"]})  # 1 row for a 3-year window
+    final = _calendar_rows({"US_FOMC_STATEMENT": 1}, [2024])  # 1 row for a 3-year window
     with pytest.raises(ValueError, match="coverage check failed"):
         build_mod._validate_coverage(final, 2024, 2026)
 
 
 def test_build_validate_coverage_passes_on_healthy_counts() -> None:
-    rows = (["US_FOMC_STATEMENT"] * 8 + ["US_NFP"] * 12 + ["US_CPI"] * 12
-            + ["EU_ECB_RATE_DECISION"] * 4 + ["UK_BOE_RATE_DECISION"] * 4)
-    build_mod._validate_coverage(pd.DataFrame({"event_name": rows}), 2024, 2024)  # 1 year — must not raise
+    build_mod._validate_coverage(_calendar_rows(_HEALTHY, [2024]), 2024, 2024)  # 1 year — must not raise
 
 
 def test_build_validate_coverage_counts_only_completed_years() -> None:
     # 2025-2027 evaluated in 2026: only 2025 is fully completed, so the floor is one year's worth.
     # One year of counts clears it even though a naive 3-year floor (e.g. NFP >= 27) would reject —
     # this is what stops the partial current/future year from false-tripping the guard.
-    rows = (["US_FOMC_STATEMENT"] * 8 + ["US_NFP"] * 10 + ["US_CPI"] * 10
-            + ["EU_ECB_RATE_DECISION"] * 3 + ["UK_BOE_RATE_DECISION"] * 3)
-    build_mod._validate_coverage(pd.DataFrame({"event_name": rows}), 2025, 2027, today_year=2026)
+    counts = {"US_FOMC_STATEMENT": 8, "US_NFP": 10, "US_CPI": 10, "EU_ECB_RATE_DECISION": 3, "UK_BOE_RATE_DECISION": 3}
+    build_mod._validate_coverage(_calendar_rows(counts, [2025]), 2025, 2027, today_year=2026)
+
+
+def test_build_validate_coverage_raises_on_a_missing_year_hidden_by_the_window_total() -> None:
+    # 2019-2026 evaluated in 2026: FOMC present only for 2021-2026 gives 48 statements, above the old total floor of
+    # 6 x 7 completed years = 42. The per-year check must still name the two missing years.
+    others = {k: v for k, v in _HEALTHY.items() if k != "US_FOMC_STATEMENT"}
+    fomc_rows = _calendar_rows({"US_FOMC_STATEMENT": 8}, list(range(2021, 2027)))
+    final = pd.concat([_calendar_rows(others, list(range(2019, 2027))), fomc_rows], ignore_index=True)
+    with pytest.raises(ValueError, match=r"US_FOMC_STATEMENT 2019: 0 < 6[\s\S]*US_FOMC_STATEMENT 2020: 0 < 6"):
+        build_mod._validate_coverage(final, 2019, 2026, today_year=2026)
+    build_mod._validate_coverage(_calendar_rows(_HEALTHY, list(range(2019, 2027))), 2019, 2026, today_year=2026)
 
 
 def test_default_years_track_today() -> None:
