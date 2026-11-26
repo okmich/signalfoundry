@@ -9,4 +9,6 @@ Returned DataFrame schema (all fetchers):
 
 The orchestrator (``build.py``) joins these frames and applies release
 times via ``release_times.to_utc`` to produce the final UTC parquet.
+``forexfactory.fetch_with_recorded`` also returns the instants ForexFactory
+recorded, which ``build.py`` checks those release times against.
 """

@@ -2,8 +2,9 @@ r"""Economic-event surprises (ForexFactory-native) — the event channel's surpr
 
 A self-contained data layer, distinct from the schedule calendar (``build.py``): ForexFactory's
 event blob carries ``forecast`` / ``actual`` / ``previous`` for the high-impact US releases (and
-ECB/BoE rate decisions), all in matching headline units, with the real release timestamp in
-``dateline``. We store those raw values, then derive
+ECB/BoE rate decisions), all in matching headline units. Each row is stamped at its release instant
+from ``release_times`` (the same tables as the calendar); ForexFactory's recorded ``dateline`` only
+checks that stamp (``forexfactory.check_recorded_times``). We store those raw values, then derive
 
     surprise = (actual − forecast) / σ_trailing_per_event_type
 
@@ -30,6 +31,7 @@ import pandas as pd
 from okmich_quant_pipeline._io import atomic_write_parquet
 from okmich_quant_pipeline.news_calendar._types import EventName
 from okmich_quant_pipeline.news_calendar.fetchers import forexfactory as ff
+from okmich_quant_pipeline.news_calendar.release_times import local_date, to_utc
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ DEFAULT_EVENTS_PATH = Path(r"E:\data_dump\calendars\economic_events.parquet")
 DEFAULT_YEAR_MIN = 2011  # FF carries forecast/actual back to ~2011 (verified); earlier is sparse.
 DEFAULT_SIGMA_WINDOW = 24
 DEFAULT_SIGMA_MIN_PERIODS = 12
+EVENT_COLUMNS = ["timestamp_utc", "event_name", "actual", "forecast", "previous"]
 
 # FF numeric suffixes → multiplier. Units are consistent within an event type (forecast and actual
 # share them), so the absolute scale is irrelevant to the z-scored surprise — but scale anyway so a
@@ -76,29 +79,38 @@ def _parse_value(raw: object) -> float:
 def fetch_events_with_data(year_min: int, year_max: int) -> pd.DataFrame:
     """Fetch mapped events with forecast/actual/previous from ForexFactory across the year span.
 
-    Returns ``[timestamp_utc, event_name, actual, forecast, previous]`` sorted by time, deduped on
-    ``(timestamp_utc, event_name)``.
+    Returns ``EVENT_COLUMNS`` sorted by time. ``timestamp_utc`` comes from ``release_times`` and is checked against
+    ForexFactory's recorded instant, raising on a disagreement. Two releases of one event at one instant (a month
+    delayed by a government shutdown) keep both rows, in ForexFactory's order: the older month first, so the newer
+    release is the last value at that instant. One verified request per month (``forexfactory._month_days``).
     """
     rows: list[dict] = []
-    for start, end in ff._quarter_windows(year_min, year_max):
-        days = ff._extract_days(ff.get(ff._range_url(start, end)).text)
+    for _start, days in ff._month_days(year_min, year_max):
         for day in days:
             for ev in day.get("events", []):
                 key = (ev.get("country"), ev.get("name"))
                 ts = ev.get("dateline")
                 if key not in _DATA_NAME_MAP or ts is None:
                     continue
+                event = _DATA_NAME_MAP[key]
+                recorded = pd.Timestamp(ts, unit="s", tz="UTC")
+                release_date = local_date(recorded, event)
                 rows.append({
-                    "timestamp_utc": pd.Timestamp(dt.datetime.fromtimestamp(ts, dt.timezone.utc)),
-                    "event_name": _DATA_NAME_MAP[key].value,
+                    "timestamp_utc": pd.Timestamp(to_utc(release_date, event)),
+                    "event_name": event.value,
                     "actual": _parse_value(ev.get("actual")),
                     "forecast": _parse_value(ev.get("forecast")),
                     "previous": _parse_value(ev.get("previous")),
+                    "release_date": release_date,
+                    "recorded_utc": recorded,
                 })
     if not rows:
         raise RuntimeError(f"economic_events: parsed zero mapped events in [{year_min}, {year_max}]")
-    return (pd.DataFrame(rows).drop_duplicates(subset=["timestamp_utc", "event_name"])
-            .sort_values("timestamp_utc").reset_index(drop=True))
+    df = pd.DataFrame(rows).drop_duplicates()
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    ff.check_recorded_times(df)
+    df = df.sort_values(["timestamp_utc", "recorded_utc"], kind="stable")
+    return df[EVENT_COLUMNS].reset_index(drop=True)
 
 
 def load_economic_events(path: Path | str = DEFAULT_EVENTS_PATH) -> pd.DataFrame:
@@ -117,7 +129,9 @@ def compute_surprise(events: pd.DataFrame, *, window: int = DEFAULT_SIGMA_WINDOW
     Returns long ``[feature, value, available_from_utc]`` with a single ``surprise`` feature stamped
     at each release instant (per-type columns are a one-line change: ``feature = event_name``).
     """
-    df = events.dropna(subset=["actual", "forecast"]).sort_values("timestamp_utc").reset_index(drop=True)
+    # Stable: two releases at one instant keep the stored order, so the newer one is the last value there.
+    df = events.dropna(subset=["actual", "forecast"]).sort_values("timestamp_utc", kind="stable")
+    df = df.reset_index(drop=True)
     df["miss"] = df["actual"] - df["forecast"]
     sigma = df.groupby("event_name")["miss"].transform(lambda m: m.shift(1).rolling(window, min_periods=min_periods).std())
     # σ==0 (a run of identical misses, e.g. a rate held flat) would make miss/σ = ±inf — drop those
